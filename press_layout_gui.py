@@ -10,6 +10,183 @@ from tkinter import ttk, filedialog, messagebox
 LAYOUT_DIR = r"C:\Users\MBradbury\Documents\Press Layouts\jsons"
 
 # --------- UTILS ---------
+def get_unit_order(units, press_name):
+    """Return your preferred unit traversal order, filtered to units that exist in this layout."""
+    unit_map = {u["label"]: u for u in units}
+    press_num = "1" if "1" in press_name else "2"
+
+    preferred_labels = [
+        f"F{press_num}",
+        f"G{press_num}-Lower",
+        f"G{press_num}-Upper",
+        "E2", "D2", "C2",
+        "E1", "D1", "C1",
+        f"B{press_num}-Lower",
+        f"B{press_num}-Upper",
+        f"A{press_num}",
+    ]
+    return [lab for lab in preferred_labels if lab in unit_map]
+
+def enable_arrow_navigation(focus_list, units, press_name):
+    """
+    Arrow navigation:
+      - Grid cells:
+          Up/Down = same unit, same column, row-1/row+1
+          Left/Right = same row, col-1/col+1; at edges jump to prev/next unit (same row)
+      - Non-grid entries:
+          Up/Left = previous in focus_list
+          Down/Right = next in focus_list
+
+    Left/Right only change focus when caret is at start/end of text (so you can still edit text).
+    """
+
+    focus_list = [w for w in focus_list if w is not None]
+    if len(focus_list) < 2:
+        return
+
+    # next/prev maps using widget objects (reliable)
+    n = len(focus_list)
+    next_map = {focus_list[i]: focus_list[(i + 1) % n] for i in range(n)}
+    prev_map = {focus_list[i]: focus_list[(i - 1) % n] for i in range(n)}
+
+    # Unit order in your preferred traversal (F..A), filtered to existing units
+    unit_order = get_unit_order(units, press_name)
+    unit_map = {u["label"]: u for u in units}
+    unit_index = {lab: i for i, lab in enumerate(unit_order)}
+
+    # Grid lookup: cell_widget -> (unit_label, entries_2d, row, col)
+    grid_lookup = {}
+    for u in units:
+        entries_2d = u["entries"]
+        for r, row in enumerate(entries_2d):
+            for c, cell in enumerate(row):
+                grid_lookup[cell] = (u["label"], entries_2d, r, c)
+
+    def _goto(w):
+        w.focus_set()
+        try:
+            w.selection_range(0, "end")  # optional: fast overwrite
+        except Exception:
+            pass
+        return "break"
+
+    def on_left(event):
+        w = event.widget
+
+        # Allow normal cursor movement unless caret is at start
+        try:
+            if w.index("insert") > 0:
+                return
+        except Exception:
+            return
+
+        if w in grid_lookup:
+            lab, entries_2d, r, c = grid_lookup[w]
+
+            # move left within unit
+            if c - 1 >= 0:
+                return _goto(entries_2d[r][c - 1])
+
+            # at left edge -> jump to previous unit (WRAP), same row, last column
+            if lab in unit_index and unit_order:
+                prev_lab = unit_order[(unit_index[lab] - 1) % len(unit_order)]  # <-- wrap
+                prev_entries = unit_map[prev_lab]["entries"]
+                last_col = len(prev_entries[r]) - 1
+                return _goto(prev_entries[r][last_col])
+
+            # fallback: workflow prev
+            return _goto(prev_map[w])
+
+        # Non-grid: workflow prev
+        return _goto(prev_map[w])
+
+    def on_right(event):
+        w = event.widget
+
+        # Allow normal cursor movement unless caret is at end
+        try:
+            if w.index("insert") < len(w.get()):
+                return
+        except Exception:
+            return
+
+        if w in grid_lookup:
+            lab, entries_2d, r, c = grid_lookup[w]
+
+            # move right within unit
+            if c + 1 < len(entries_2d[r]):
+                return _goto(entries_2d[r][c + 1])
+
+            # at right edge -> jump to next unit (WRAP), same row, first column
+            if lab in unit_index and unit_order:
+                next_lab = unit_order[(unit_index[lab] + 1) % len(unit_order)]  # <-- wrap
+                next_entries = unit_map[next_lab]["entries"]
+                return _goto(next_entries[r][0])
+
+            # fallback: workflow next
+            return _goto(next_map[w])
+
+        # Non-grid: workflow next
+        return _goto(next_map[w])
+
+    def on_up(event):
+        w = event.widget
+
+        if w in grid_lookup:
+            lab, entries_2d, r, c = grid_lookup[w]
+            rows = len(entries_2d)
+
+            # Wrap: top row -> bottom row (same column)
+            target_r = (r - 1) % rows
+
+            # Move if column exists in target row
+            if c < len(entries_2d[target_r]):
+                return _goto(entries_2d[target_r][c])
+
+            # Safety fallback (shouldn't happen in your 2-row consistent grids)
+            return _goto(prev_map[w])
+
+        # Non-grid: workflow previous
+        return _goto(prev_map[w])
+
+    def on_down(event):
+        w = event.widget
+
+        if w in grid_lookup:
+            lab, entries_2d, r, c = grid_lookup[w]
+            rows = len(entries_2d)
+
+            # Wrap: bottom row -> top row (same column)
+            target_r = (r + 1) % rows
+
+            # Move if column exists in target row
+            if c < len(entries_2d[target_r]):
+                return _goto(entries_2d[target_r][c])
+
+            # Safety fallback
+            return _goto(next_map[w])
+
+        # Non-grid: workflow next
+        return _goto(next_map[w])
+
+    # Bind to all widgets in the focus chain
+    for w in focus_list:
+        try:
+            w.configure(takefocus=True)
+        except Exception:
+            pass
+
+        w.bind("<KeyPress-Left>", on_left)
+        w.bind("<KeyPress-Right>", on_right)
+        w.bind("<KeyPress-Up>", on_up)
+        w.bind("<KeyPress-Down>", on_down)
+
+        # keypad arrow variants
+        w.bind("<KP_Left>", on_left)
+        w.bind("<KP_Right>", on_right)
+        w.bind("<KP_Up>", on_up)
+        w.bind("<KP_Down>", on_down)
+
 def build_focus_order(issue_entry, product_entry, units, grid_rows, grid_cols, press_name):
     """
     Return an ordered list of widgets matching the requested traversal.
@@ -674,9 +851,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
         press_name=config.get("press_name", "")
     )
     set_custom_tab_order(focus_list)
-
-    print("Tab order widgets:", len(focus_list))
-    print("First 10:", [str(w) for w in focus_list[:10]])
+    enable_arrow_navigation(focus_list, units, config.get("press_name", ""))
 
     # Issue date should have focus when window opens
     win.after(50, issue_entry.focus_set)
