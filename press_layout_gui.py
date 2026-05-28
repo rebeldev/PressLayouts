@@ -1,6 +1,7 @@
 import os
 import json
 import glob
+import re
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -19,9 +20,18 @@ FORMAT_MIN_PAGES = {
 
 
 # ------------------ FILE/DIR HELPERS ------------------
+def build_layout_filename_suggestion(ctx) -> str:
+    raw_date = ctx["issue_entry"].get().strip() if ctx.get("issue_entry") else ""
+    raw_product = ctx["product_entry"].get().strip() if ctx.get("product_entry") else ""
+
+    dt = parse_issue_date_flexible(raw_date)
+    date_part = dt.strftime("%m%d%Y") if dt else "00000000"
+    product_part = raw_product if raw_product else "Layout"
+
+    return sanitize_filename(f"{date_part} - {product_part}.json").strip()
+
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
-
 
 def safe_read_json(path):
     try:
@@ -30,12 +40,10 @@ def safe_read_json(path):
     except Exception:
         return None
 
-
 def safe_write_json(path, data):
     ensure_dir(os.path.dirname(path))
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-
 
 def sanitize_filename(name: str) -> str:
     bad = '<>:"/\\|?*'
@@ -452,8 +460,234 @@ def enable_arrow_navigation(focus_list, units, press_name):
         w.bind("<KP_Up>", on_up)
         w.bind("<KP_Down>", on_down)
 
+# ------------------ DATE/TIME HELPERS ------------------
+import re
+from datetime import datetime
+
+def parse_issue_date_mmddyyyy(text: str):
+    """
+    Parse issue date text into datetime (local naive), trying common formats.
+    Returns datetime or None.
+    Accepts:
+      - MMDDYYYY
+      - MM/DD/YYYY
+      - M/D/YYYY
+      - YYYY-MM-DD
+      - YYYY/MM/DD
+    """
+    if not text:
+        return None
+    t = text.strip()
+
+    # digits only => MMDDYYYY (allow 8 digits)
+    digits = re.sub(r"\D", "", t)
+    if len(digits) == 8:
+        mm, dd, yyyy = digits[0:2], digits[2:4], digits[4:8]
+        try:
+            return datetime(int(yyyy), int(mm), int(dd))
+        except Exception:
+            pass
+
+    # Try common patterns
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(t, fmt)
+        except Exception:
+            continue
+
+    return None
+
+
+def format_mmddyyyy(dt: datetime) -> str:
+    return dt.strftime("%m%d%Y")
+
+def parse_saved_at(text: str):
+    """Parse saved_at from JSON (ISO). Return datetime or None."""
+    if not text:
+        return None
+    t = str(text).strip()
+    try:
+        # your saved_at uses isoformat(timespec="seconds")
+        return datetime.fromisoformat(t)
+    except Exception:
+        return None
+
+
+def fmt_dt_for_display(dt: datetime):
+    """Display-friendly datetime."""
+    if not dt:
+        return ""
+    return dt.strftime("%m/%d/%Y %H:%M:%S")
+
+
+def fmt_issue_for_display(issue_text: str):
+    dt = parse_issue_date_mmddyyyy(issue_text)
+    if dt:
+        return dt.strftime("%m/%d/%Y")
+    return issue_text or ""
+
+def parse_issue_date_flexible(text: str, today=None):
+    """
+    Parse many common date inputs into a datetime.
+    - Accepts: MMDD, MMDDYY, MMDDYYYY
+    - Accepts: M/D, M/D/YY, M/D/YYYY, M-D, M.D, etc.
+    - Accepts: YYYY-MM-DD, YYYY/MM/DD
+    - Accepts: Month names: May 28, May 28 2026, May 28, 2026, etc.
+    - If year missing: assumes current year (from `today`).
+    Returns datetime or None.
+    """
+    if not text:
+        return None
+
+    if today is None:
+        today = datetime.now()
+
+    t = text.strip()
+    if not t:
+        return None
+
+    default_year = today.year
+
+    # ----- Month-name formats (May 28, 2026 / May 28 / May 28 26 / etc.) -----
+    # If there are letters, try strptime with common patterns
+    if any(ch.isalpha() for ch in t):
+        # normalize punctuation
+        cleaned = re.sub(r"[,\-]+", " ", t).strip()
+        # If year is missing, append default year
+        has_year = re.search(r"\b(\d{4}|\d{2})\b", cleaned) is not None
+        candidates = [cleaned] if has_year else [f"{cleaned} {default_year}"]
+
+        patterns = [
+            "%b %d %Y",   # May 28 2026
+            "%B %d %Y",   # May 28 2026
+            "%b %d %y",   # May 28 26
+            "%B %d %y",   # May 28 26
+            "%d %b %Y",   # 28 May 2026
+            "%d %B %Y",   # 28 May 2026
+            "%d %b %y",   # 28 May 26
+            "%d %B %y",   # 28 May 26
+        ]
+
+        for s in candidates:
+            for fmt in patterns:
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    # If 2-digit year produced 19xx unexpectedly, you can pivot it:
+                    if dt.year < 1970:
+                        dt = dt.replace(year=dt.year + 100)
+                    return dt
+                except Exception:
+                    pass
+
+        return None
+
+    # ----- Pure digits: MMDD, MMDDYY, MMDDYYYY, MDD, MDDYY -----
+    digits = re.sub(r"\D", "", t)
+    if digits:
+        try:
+            if len(digits) == 4:
+                # MMDD
+                mm, dd = int(digits[0:2]), int(digits[2:4])
+                return datetime(default_year, mm, dd)
+
+            if len(digits) == 3:
+                # MDD (e.g. 528 -> 5/28)
+                mm, dd = int(digits[0:1]), int(digits[1:3])
+                return datetime(default_year, mm, dd)
+
+            if len(digits) == 6:
+                # MMDDYY
+                mm, dd = int(digits[0:2]), int(digits[2:4])
+                yy = int(digits[4:6])
+                year = 2000 + yy if yy <= 69 else 1900 + yy
+                return datetime(year, mm, dd)
+
+            if len(digits) == 5:
+                # MDDYY (e.g. 52826 -> 5/28/26)
+                mm, dd = int(digits[0:1]), int(digits[1:3])
+                yy = int(digits[3:5])
+                year = 2000 + yy if yy <= 69 else 1900 + yy
+                return datetime(year, mm, dd)
+
+            if len(digits) == 8:
+                # MMDDYYYY
+                mm, dd, yyyy = int(digits[0:2]), int(digits[2:4]), int(digits[4:8])
+                return datetime(yyyy, mm, dd)
+        except Exception:
+            pass
+
+    # ----- Separated numeric formats -----
+    # Support: M/D, M/D/YY, M/D/YYYY, YYYY-MM-DD, etc.
+    parts = re.split(r"[\/\.\-\s]+", t)
+    parts = [p for p in parts if p]
+
+    try:
+        if len(parts) == 2:
+            # M/D  (assume current year)
+            mm, dd = int(parts[0]), int(parts[1])
+            return datetime(default_year, mm, dd)
+
+        if len(parts) == 3:
+            # If first part is 4 digits => YYYY-MM-DD
+            if len(parts[0]) == 4:
+                yyyy, mm, dd = int(parts[0]), int(parts[1]), int(parts[2])
+                return datetime(yyyy, mm, dd)
+
+            # else assume MM-DD-YY(YY) / MM-DD-YYYY
+            mm, dd = int(parts[0]), int(parts[1])
+            y = parts[2]
+            if len(y) == 2:
+                yy = int(y)
+                yyyy = 2000 + yy if yy <= 69 else 1900 + yy
+            else:
+                yyyy = int(y)
+            return datetime(yyyy, mm, dd)
+    except Exception:
+        return None
+
+    return None
+
+
+def normalize_issue_date_mmddyyyy(text: str) -> str:
+    """
+    Returns normalized 'mm/dd/yyyy' string if parseable, else original text.
+    """
+    dt = parse_issue_date_flexible(text)
+    if not dt:
+        return text
+    return dt.strftime("%m/%d/%Y")
 
 # ------------------ UI HELPERS ------------------
+def build_layout_rows():
+    """
+    Read all Layout JSONs and return list of dict rows:
+    {path, issue_dt, issue_disp, product, press, format, saved_dt, saved_disp}
+    """
+    ensure_dir(LAYOUTS_DIR)
+    rows = []
+    for path in sorted(glob.glob(os.path.join(LAYOUTS_DIR, "*.json"))):
+        data = safe_read_json(path) or {}
+        press = data.get("press", "")
+        fmt = data.get("format", "")
+        issue = data.get("issue_date", "")
+        product = data.get("product", "")
+        saved_at = data.get("saved_at", "")
+
+        issue_dt = parse_issue_date_mmddyyyy(issue)
+        saved_dt = parse_saved_at(saved_at)
+
+        rows.append({
+            "path": path,
+            "issue_dt": issue_dt,
+            "issue_disp": fmt_issue_for_display(issue),
+            "product": product or "",
+            "press": press or "",
+            "format": fmt or "",
+            "saved_dt": saved_dt,
+            "saved_disp": fmt_dt_for_display(saved_dt),
+        })
+    return rows
+
 def _contrast_text_color(hex_color: str) -> str:
     hex_color = hex_color.lstrip("#")
     r = int(hex_color[0:2], 16)
@@ -796,10 +1030,17 @@ def do_save(win, ctx):
 
 
 def do_save_as(win, ctx):
+    """Prompt for file path and save."""
+    ensure_dir(TEMPLATE_DIR) if ctx.get("template_mode") else ensure_dir(LAYOUTS_DIR)
+
     default_dir = ctx.get("default_dir", LAYOUTS_DIR)
     ensure_dir(default_dir)
 
-    suggested = build_filename_suggestion(ctx)
+    # Suggested filename differs by mode
+    if ctx.get("template_mode"):
+        suggested = build_filename_suggestion(ctx)   # existing template-style name
+    else:
+        suggested = build_layout_filename_suggestion(ctx)  # MMDDYYYY - Product.json
 
     path = filedialog.asksaveasfilename(
         parent=win,
@@ -824,7 +1065,6 @@ def do_save_as(win, ctx):
     except Exception as e:
         messagebox.showerror("Save As Failed", str(e))
         return False
-
 
 # ------------------ LAYOUT WINDOW ------------------
 def build_press_layout(win, title="Press Layout", config=None, load_path=None):
@@ -1041,6 +1281,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
         "units": units,
         "file_path": None,
         "layout_name": None,
+        "template_mode": template_mode,
         "default_dir": TEMPLATE_DIR if template_mode else LAYOUTS_DIR,
     }
 
@@ -1064,6 +1305,26 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
 
     # Section count change handler with recursion guard
     _busy = {"busy": False}
+
+    def on_issue_date_focus_out(event=None):
+        if template_mode:
+            return
+
+        raw = issue_entry.get().strip()
+        dt = parse_issue_date_flexible(raw)
+        if dt:
+            normalized = dt.strftime("%m/%d/%Y")
+            if normalized != raw:
+                issue_entry.delete(0, "end")
+                issue_entry.insert(0, normalized)
+
+        update_imposition()
+
+    # Bind once (do NOT bind another FocusOut for issue_entry later)
+    issue_entry.bind("<FocusOut>", on_issue_date_focus_out)
+
+    # Normalize on Enter as well
+    issue_entry.bind("<Return>", lambda e: (on_issue_date_focus_out(), "break"))
 
     def _on_section_count_changed(event=None):
         if _busy["busy"]:
@@ -1092,7 +1353,6 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
         var.trace_add("write", lambda *_: update_imposition())
 
     issue_entry.bind("<KeyRelease>", update_imposition)
-    issue_entry.bind("<FocusOut>", update_imposition)
     product_entry.bind("<KeyRelease>", update_imposition)
     product_entry.bind("<FocusOut>", update_imposition)
 
@@ -1556,8 +1816,8 @@ def build_main_launcher():
 
     root = tk.Tk()
     root.title("Press Layouts")
-    root.geometry("720x380")
-    root.minsize(680, 340)
+    root.geometry("980x480")
+    root.minsize(920, 420)
 
     frame = ttk.Frame(root, padding=16)
     frame.pack(fill="both", expand=True)
@@ -1566,32 +1826,94 @@ def build_main_launcher():
 
     ttk.Label(frame, text="Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
 
-    list_frame = ttk.Frame(frame)
-    list_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
-    list_frame.rowconfigure(0, weight=1)
-    list_frame.columnconfigure(0, weight=1)
+    # ---- Treeview with sortable columns ----
+    columns = ("issue", "product", "press", "format", "saved")
+    tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+    tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
 
-    lb = tk.Listbox(list_frame, height=12, exportselection=False)
-    lb.grid(row=0, column=0, sticky="nsew")
-    sb = ttk.Scrollbar(list_frame, orient="vertical", command=lb.yview)
-    sb.grid(row=0, column=1, sticky="ns")
-    lb.configure(yscrollcommand=sb.set)
+    vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+    vsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
+    tree.configure(yscrollcommand=vsb.set)
 
-    layout_paths = []
+    # Column headings
+    tree.heading("issue", text="Issue Date")
+    tree.heading("product", text="Product")
+    tree.heading("press", text="Press")
+    tree.heading("format", text="Format")
+    tree.heading("saved", text="Last Saved")
+
+    # Column widths (tweak as desired)
+    tree.column("issue", width=110, anchor="center")
+    tree.column("product", width=300, anchor="w")
+    tree.column("press", width=90, anchor="center")
+    tree.column("format", width=120, anchor="center")
+    tree.column("saved", width=170, anchor="center")
+
+    # Keep path mapping by iid
+    row_by_iid = {}   # iid -> row dict
+    sort_state = {"col": None, "desc": False}
+
+    def load_rows_into_tree(rows):
+        tree.delete(*tree.get_children())
+        row_by_iid.clear()
+        for r in rows:
+            iid = r["path"]  # unique
+            tree.insert("", "end", iid=iid, values=(
+                r["issue_disp"],
+                r["product"],
+                r["press"],
+                r["format"],
+                r["saved_disp"],
+            ))
+            row_by_iid[iid] = r
 
     def refresh():
-        lb.delete(0, "end")
-        layout_paths.clear()
-        for disp, path in list_json_files(LAYOUTS_DIR):
-            lb.insert("end", disp)
-            layout_paths.append(path)
+        rows = build_layout_rows()
+        load_rows_into_tree(rows)
+
+    def sort_by(col):
+        # Toggle sort direction if same column
+        if sort_state["col"] == col:
+            sort_state["desc"] = not sort_state["desc"]
+        else:
+            sort_state["col"] = col
+            sort_state["desc"] = False
+
+        rows = list(row_by_iid.values())
+
+        def keyfunc(r):
+            if col == "issue":
+                return r["issue_dt"] or datetime.min
+            if col == "saved":
+                return r["saved_dt"] or datetime.min
+            if col == "product":
+                return (r["product"] or "").lower()
+            if col == "press":
+                return (r["press"] or "").lower()
+            if col == "format":
+                return (r["format"] or "").lower()
+            return ""
+
+        rows.sort(key=keyfunc, reverse=sort_state["desc"])
+        load_rows_into_tree(rows)
+
+    # Make headers clickable for sorting
+    tree.heading("issue", command=lambda: sort_by("issue"))
+    tree.heading("product", command=lambda: sort_by("product"))
+    tree.heading("press", command=lambda: sort_by("press"))
+    tree.heading("format", command=lambda: sort_by("format"))
+    tree.heading("saved", command=lambda: sort_by("saved"))
+
+    def selected_path():
+        sel = tree.selection()
+        return sel[0] if sel else None
 
     def open_selected():
-        sel = lb.curselection()
-        if not sel:
+        path = selected_path()
+        if not path:
             messagebox.showinfo("Select a Layout", "Select a layout to open.")
             return
-        open_json_in_layout(root, layout_paths[sel[0]], template_mode=False)
+        open_json_in_layout(root, path, template_mode=False)
 
     def new_layout():
         build_new_layout_launcher(root)
@@ -1599,7 +1921,7 @@ def build_main_launcher():
     def templates():
         build_template_editor_launcher(root)
 
-    lb.bind("<Double-Button-1>", lambda e: open_selected())
+    tree.bind("<Double-Button-1>", lambda e: open_selected())
 
     btns = ttk.Frame(frame)
     btns.grid(row=2, column=0, pady=12, sticky="w")
