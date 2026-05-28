@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "name": "P2 10D2A2C2os 8F2G2U",
+  "press": "Press 2",
+  "format": "Broadsheet",
+  "saved_at": "2026-05-28T13:32:18",
+  "issue_date": "",
+  "product": "",
+  "section_count": 2,
+  "section_pages": [
+    10,
+    8
+  ],
+  "units": [
+    {
+      "label": "E2",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "D2",
+      "section": "A",
+      "grid": [
+        [
+          "1",
+          "2"
+        ],
+        [
+          "10",
+          "9"
+        ]
+      ]
+    },
+    {
+      "label": "C2",
+      "section": "A",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "8",
+          "7"
+        ]
+      ]
+    },
+    {
+      "label": "B2-Lower",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "B2-Upper",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "A2",
+      "section": "A",
+      "grid": [
+        [
+          "3",
+          "4"
+        ],
+        [
+          "6",
+          "5"
+        ]
+      ]
+    },
+    {
+      "label": "F2",
+      "section": "B",
+      "grid": [
+        [
+          "1",
+          "2"
+        ],
+        [
+          "8",
+          "7"
+        ]
+      ]
+    },
+    {
+      "label": "G2-Lower",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "G2-Upper",
+      "section": "B",
+      "grid": [
+        [
+          "3",
+          "4"
+        ],
+        [
+          "6",
+          "5"
+        ]
+      ]
+    }
+  ]
+}

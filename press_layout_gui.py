@@ -18,18 +18,7 @@ FORMAT_MIN_PAGES = {
     "8 up": 8,
 }
 
-
-# ------------------ FILE/DIR HELPERS ------------------
-def build_layout_filename_suggestion(ctx) -> str:
-    raw_date = ctx["issue_entry"].get().strip() if ctx.get("issue_entry") else ""
-    raw_product = ctx["product_entry"].get().strip() if ctx.get("product_entry") else ""
-
-    dt = parse_issue_date_flexible(raw_date)
-    date_part = dt.strftime("%m%d%Y") if dt else "00000000"
-    product_part = raw_product if raw_product else "Layout"
-
-    return sanitize_filename(f"{date_part} - {product_part}.json").strip()
-
+# ------------------ DIR / JSON HELPERS ------------------
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
@@ -51,7 +40,6 @@ def sanitize_filename(name: str) -> str:
         name = name.replace(ch, "_")
     return name.strip()
 
-
 def list_json_files(folder):
     """Return list of (display_name, full_path) for .json files in folder."""
     ensure_dir(folder)
@@ -66,11 +54,9 @@ def list_json_files(folder):
         results.append((disp, p))
     return results
 
-
 # ------------------ SECTION MIN-PAGES HELPERS ------------------
 def min_pages_for_format(fmt: str) -> int:
     return FORMAT_MIN_PAGES.get(fmt, 1)
-
 
 def is_valid_page_count(value: str, multiple: int) -> bool:
     try:
@@ -79,12 +65,11 @@ def is_valid_page_count(value: str, multiple: int) -> bool:
     except Exception:
         return False
 
-
 def apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True):
     """
     Ensure enabled section page values are valid for the format.
-    - If fill_only_blanks=True: only fills blanks/invalids (preserves valid user input).
-    - If fill_only_blanks=False: forces enabled sections to the minimum for the format.
+    - fill_only_blanks=True: only fills blanks/invalids
+    - fill_only_blanks=False: forces enabled sections to minimum
     """
     minimum = min_pages_for_format(format_name)
 
@@ -106,14 +91,169 @@ def apply_min_pages_to_section_vars(format_name, section_count_var, section_page
         else:
             section_page_vars[i].set("")
 
+# ------------------ DATE HELPERS (flexible parsing) ------------------
+def parse_issue_date_flexible(text: str, today=None):
+    """
+    Parse many date inputs into datetime.
+    - Supports: MMDD, MDD, MMDDYY, MDDYY, MMDDYYYY
+    - Supports: M/D, M/D/YY, M/D/YYYY, M-D, M.D
+    - Supports: YYYY-MM-DD, YYYY/MM/DD
+    - Supports: Month names like "May 28", "May 28 26", "May 28 2026"
+    - If year missing: assumes current year
+    """
+    if not text:
+        return None
+    if today is None:
+        today = datetime.now()
 
-# ------------------ DINKY + FILENAME HELPERS ------------------
+    t = text.strip()
+    if not t:
+        return None
+
+    default_year = today.year
+
+    # Month-name formats
+    if any(ch.isalpha() for ch in t):
+        cleaned = re.sub(r"[,\-]+", " ", t).strip()
+        has_year = re.search(r"\b(\d{4}|\d{2})\b", cleaned) is not None
+        candidates = [cleaned] if has_year else [f"{cleaned} {default_year}"]
+
+        patterns = [
+            "%b %d %Y", "%B %d %Y",
+            "%b %d %y", "%B %d %y",
+            "%d %b %Y", "%d %B %Y",
+            "%d %b %y", "%d %B %y",
+        ]
+        for s in candidates:
+            for fmt in patterns:
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    if dt.year < 1970:
+                        dt = dt.replace(year=dt.year + 100)
+                    return dt
+                except Exception:
+                    pass
+        return None
+
+    # digits-only / digits-extracted
+    digits = re.sub(r"\D", "", t)
+    if digits:
+        try:
+            if len(digits) == 4:  # MMDD
+                mm, dd = int(digits[0:2]), int(digits[2:4])
+                return datetime(default_year, mm, dd)
+            if len(digits) == 3:  # MDD
+                mm, dd = int(digits[0:1]), int(digits[1:3])
+                return datetime(default_year, mm, dd)
+            if len(digits) == 6:  # MMDDYY
+                mm, dd = int(digits[0:2]), int(digits[2:4])
+                yy = int(digits[4:6])
+                year = 2000 + yy if yy <= 69 else 1900 + yy
+                return datetime(year, mm, dd)
+            if len(digits) == 5:  # MDDYY
+                mm, dd = int(digits[0:1]), int(digits[1:3])
+                yy = int(digits[3:5])
+                year = 2000 + yy if yy <= 69 else 1900 + yy
+                return datetime(year, mm, dd)
+            if len(digits) == 8:  # MMDDYYYY
+                mm, dd, yyyy = int(digits[0:2]), int(digits[2:4]), int(digits[4:8])
+                return datetime(yyyy, mm, dd)
+        except Exception:
+            pass
+
+    # Separated numeric formats
+    parts = re.split(r"[\/\.\-\s]+", t)
+    parts = [p for p in parts if p]
+    try:
+        if len(parts) == 2:  # M/D (no year)
+            mm, dd = int(parts[0]), int(parts[1])
+            return datetime(default_year, mm, dd)
+        if len(parts) == 3:
+            if len(parts[0]) == 4:  # YYYY-MM-DD
+                yyyy, mm, dd = int(parts[0]), int(parts[1]), int(parts[2])
+                return datetime(yyyy, mm, dd)
+            mm, dd = int(parts[0]), int(parts[1])
+            y = parts[2]
+            if len(y) == 2:
+                yy = int(y)
+                yyyy = 2000 + yy if yy <= 69 else 1900 + yy
+            else:
+                yyyy = int(y)
+            return datetime(yyyy, mm, dd)
+    except Exception:
+        return None
+
+    return None
+
+def normalize_issue_date_mmddyyyy(text: str) -> str:
+    """Return mm/dd/yyyy if parseable, else original text."""
+    dt = parse_issue_date_flexible(text)
+    if not dt:
+        return text
+    return dt.strftime("%m/%d/%Y")
+
+def parse_saved_at(text: str):
+    """Parse ISO saved_at into datetime."""
+    if not text:
+        return None
+    t = str(text).strip()
+    try:
+        return datetime.fromisoformat(t)
+    except Exception:
+        return None
+
+def fmt_dt_for_display(dt: datetime) -> str:
+    return dt.strftime("%m/%d/%Y %H:%M:%S") if dt else ""
+
+def fmt_issue_for_display(issue_text: str) -> str:
+    dt = parse_issue_date_flexible(issue_text)
+    return dt.strftime("%m/%d/%Y") if dt else (issue_text or "")
+
+def build_layout_rows():
+    ensure_dir(LAYOUTS_DIR)
+    rows = []
+
+    for path in sorted(glob.glob(os.path.join(LAYOUTS_DIR, "*.json"))):
+        data = safe_read_json(path) or {}
+
+        press = data.get("press", "") or ""
+        fmt = data.get("format", "") or ""
+        issue = data.get("issue_date", "") or ""
+        product = data.get("product", "") or ""
+        saved_at = data.get("saved_at", "") or ""
+
+        issue_dt = parse_issue_date_flexible(issue)
+        saved_dt = parse_saved_at(saved_at)
+
+        rows.append({
+            "path": path,
+            "issue_dt": issue_dt,
+            "issue_disp": fmt_issue_for_display(issue),
+            "product": product,
+            "press": press,
+            "format": fmt,
+            "saved_dt": saved_dt,
+            "saved_disp": fmt_dt_for_display(saved_dt),
+        })
+
+    return rows
+
+# ------------------ LAYOUT FILENAME SUGGESTION (layouts only) ------------------
+def build_layout_filename_suggestion(ctx) -> str:
+    raw_date = ctx["issue_entry"].get().strip() if ctx.get("issue_entry") else ""
+    raw_product = ctx["product_entry"].get().strip() if ctx.get("product_entry") else ""
+
+    dt = parse_issue_date_flexible(raw_date)
+    date_part = dt.strftime("%m%d%Y") if dt else "00000000"
+    product_part = raw_product if raw_product else "Layout"
+    return sanitize_filename(f"{date_part} - {product_part}.json").strip()
+
+# ------------------ TEMPLATE NAME (existing) HELPERS ------------------
 def safe_int(value):
     try:
         return int(str(value).strip())
     except Exception:
         return None
-
 
 def unit_row_has_numbers(unit_dict, row_index: int) -> bool:
     entries_2d = unit_dict["entries"]
@@ -124,56 +264,40 @@ def unit_row_has_numbers(unit_dict, row_index: int) -> bool:
             return True
     return False
 
-
 def unit_dinky_suffix(unit_dict) -> str:
-    """
-    ds if only TOP row has numbers
-    os if only BOTTOM row has numbers
-    """
+    # ds if only TOP row has numbers; os if only BOTTOM row has numbers
     top_has = unit_row_has_numbers(unit_dict, 0)
     bottom_has = unit_row_has_numbers(unit_dict, 1)
-
     if top_has and not bottom_has:
         return "ds"
     if bottom_has and not top_has:
         return "os"
     return ""
 
-
 def parse_section_id(text: str):
-    """Parse section id from unit section entry: 1-4, S1- S4, A-D."""
     if text is None:
         return None
     t = text.strip().upper()
     if not t:
         return None
-
     if t.startswith("S") and len(t) >= 2 and t[1:].isdigit():
         n = int(t[1:])
         return n if 1 <= n <= 4 else None
-
     if t.isdigit():
         n = int(t)
         return n if 1 <= n <= 4 else None
-
     if t in ("A", "B", "C", "D"):
         return ord(t) - ord("A") + 1
-
     return None
 
-
 def abbrev_unit_label(label: str) -> str:
-    """Compact unit label for filename: G1-Lower->G1L, B2-Upper->B2U."""
     if not label:
         return ""
     s = label.replace("-Lower", "L").replace("-Upper", "U")
-    s = s.replace("-", "")
-    s = s.replace(" ", "")
+    s = s.replace("-", "").replace(" ", "")
     return s
 
-
 def unit_min_page_number(unit_dict):
-    """Smallest integer found in unit grid; None if none."""
     mins = None
     for row in unit_dict["entries"]:
         for cell in row:
@@ -184,16 +308,8 @@ def unit_min_page_number(unit_dict):
                 mins = v
     return mins
 
-
 def build_filename_suggestion(ctx) -> str:
-    """
-    Filename template:
-      P# {pages}{units...} {pages}{units...} ...
-
-    Units grouped by unit section_entry.
-    Units within section sorted by smallest page number found.
-    Appends ds/os after unit abbrev when unit is a dinky.
-    """
+    # Template-style suggestion
     press_name = ctx.get("press_name", "")
     press_num = "1" if "1" in press_name else "2"
     prefix = f"P{press_num}"
@@ -234,7 +350,6 @@ def build_filename_suggestion(ctx) -> str:
             f"{abbrev_unit_label(u['label'])}{unit_dinky_suffix(u)}"
             for u in sec_units_sorted
         )
-
         segments.append(f"{sec_pages}{units_part}")
 
     name = prefix + " " + " ".join(segments)
@@ -243,19 +358,11 @@ def build_filename_suggestion(ctx) -> str:
         name += ".json"
     return name
 
-
 def build_imposition_text(ctx) -> str:
-    """Imposition = suggested filename without extension."""
     return os.path.splitext(build_filename_suggestion(ctx))[0]
-
 
 # ------------------ TAB ORDER + ARROWS ------------------
 def build_focus_order(issue_entry, product_entry, units, grid_rows, grid_cols, press_name, extra_widgets=None):
-    """
-    Custom tab order:
-      Issue -> Product -> (extra_widgets) -> unit section entries in preferred order
-      -> top row cells forward, bottom row cells reverse with columns reversed.
-    """
     unit_map = {u["label"]: u for u in units}
     press_num = "1" if "1" in press_name else "2"
 
@@ -278,6 +385,7 @@ def build_focus_order(issue_entry, product_entry, units, grid_rows, grid_cols, p
     for lab in unit_order:
         focus_widgets.append(unit_map[lab]["section_entry"])
 
+    # top row forward
     if grid_rows >= 1:
         r = 0
         for lab in unit_order:
@@ -285,6 +393,7 @@ def build_focus_order(issue_entry, product_entry, units, grid_rows, grid_cols, p
             for c in range(min(grid_cols, len(row_entries))):
                 focus_widgets.append(row_entries[c])
 
+    # bottom row reverse, columns reversed
     for r in range(1, grid_rows):
         for lab in reversed(unit_order):
             row_entries = unit_map[lab]["entries"][r]
@@ -294,11 +403,8 @@ def build_focus_order(issue_entry, product_entry, units, grid_rows, grid_cols, p
 
     return focus_widgets
 
-
 def set_custom_tab_order(widgets):
-    """Force Tab/Shift-Tab order for a list; wraps."""
     widgets = [w for w in widgets if w is not None]
-
     seen = set()
     ordered = []
     for w in widgets:
@@ -306,7 +412,6 @@ def set_custom_tab_order(widgets):
         if key not in seen:
             ordered.append(w)
             seen.add(key)
-
     if not ordered:
         return
 
@@ -319,22 +424,17 @@ def set_custom_tab_order(widgets):
     for i, w in enumerate(ordered):
         nxt = ordered[(i + 1) % n]
         prv = ordered[(i - 1) % n]
-
         try:
             w.configure(takefocus=True)
         except Exception:
             pass
-
         w.bind("<Tab>", lambda e, _n=nxt: _goto(_n))
         w.bind("<Shift-Tab>", lambda e, _p=prv: _goto(_p))
         w.bind("<ISO_Left_Tab>", lambda e, _p=prv: _goto(_p))
 
-
 def get_unit_order(units, press_name):
-    """Preferred unit traversal order filtered to existing labels."""
     unit_map = {u["label"]: u for u in units}
     press_num = "1" if "1" in press_name else "2"
-
     preferred_labels = [
         f"F{press_num}",
         f"G{press_num}-Lower",
@@ -347,16 +447,7 @@ def get_unit_order(units, press_name):
     ]
     return [lab for lab in preferred_labels if lab in unit_map]
 
-
 def enable_arrow_navigation(focus_list, units, press_name):
-    """
-    Grid arrows ALWAYS move focus.
-    - Left/Right: adjacent col; wrap across units F<->A
-    - Up/Down: toggles row (wrap)
-    Non-grid fields:
-    - Left/Up = prev focus_list
-    - Right/Down = next focus_list
-    """
     focus_list = [w for w in focus_list if w is not None]
     if len(focus_list) < 2:
         return
@@ -449,244 +540,41 @@ def enable_arrow_navigation(focus_list, units, press_name):
             w.configure(takefocus=True)
         except Exception:
             pass
-
         w.bind("<KeyPress-Left>", on_left)
         w.bind("<KeyPress-Right>", on_right)
         w.bind("<KeyPress-Up>", on_up)
         w.bind("<KeyPress-Down>", on_down)
-
         w.bind("<KP_Left>", on_left)
         w.bind("<KP_Right>", on_right)
         w.bind("<KP_Up>", on_up)
         w.bind("<KP_Down>", on_down)
 
-# ------------------ DATE/TIME HELPERS ------------------
-import re
-from datetime import datetime
-
-def parse_issue_date_mmddyyyy(text: str):
-    """
-    Parse issue date text into datetime (local naive), trying common formats.
-    Returns datetime or None.
-    Accepts:
-      - MMDDYYYY
-      - MM/DD/YYYY
-      - M/D/YYYY
-      - YYYY-MM-DD
-      - YYYY/MM/DD
-    """
-    if not text:
-        return None
-    t = text.strip()
-
-    # digits only => MMDDYYYY (allow 8 digits)
-    digits = re.sub(r"\D", "", t)
-    if len(digits) == 8:
-        mm, dd, yyyy = digits[0:2], digits[2:4], digits[4:8]
-        try:
-            return datetime(int(yyyy), int(mm), int(dd))
-        except Exception:
-            pass
-
-    # Try common patterns
-    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%Y/%m/%d"):
-        try:
-            return datetime.strptime(t, fmt)
-        except Exception:
-            continue
-
-    return None
-
-
-def format_mmddyyyy(dt: datetime) -> str:
-    return dt.strftime("%m%d%Y")
-
-def parse_saved_at(text: str):
-    """Parse saved_at from JSON (ISO). Return datetime or None."""
-    if not text:
-        return None
-    t = str(text).strip()
-    try:
-        # your saved_at uses isoformat(timespec="seconds")
-        return datetime.fromisoformat(t)
-    except Exception:
-        return None
-
-
-def fmt_dt_for_display(dt: datetime):
-    """Display-friendly datetime."""
-    if not dt:
-        return ""
-    return dt.strftime("%m/%d/%Y %H:%M:%S")
-
-
-def fmt_issue_for_display(issue_text: str):
-    dt = parse_issue_date_mmddyyyy(issue_text)
-    if dt:
-        return dt.strftime("%m/%d/%Y")
-    return issue_text or ""
-
-def parse_issue_date_flexible(text: str, today=None):
-    """
-    Parse many common date inputs into a datetime.
-    - Accepts: MMDD, MMDDYY, MMDDYYYY
-    - Accepts: M/D, M/D/YY, M/D/YYYY, M-D, M.D, etc.
-    - Accepts: YYYY-MM-DD, YYYY/MM/DD
-    - Accepts: Month names: May 28, May 28 2026, May 28, 2026, etc.
-    - If year missing: assumes current year (from `today`).
-    Returns datetime or None.
-    """
-    if not text:
-        return None
-
-    if today is None:
-        today = datetime.now()
-
-    t = text.strip()
-    if not t:
-        return None
-
-    default_year = today.year
-
-    # ----- Month-name formats (May 28, 2026 / May 28 / May 28 26 / etc.) -----
-    # If there are letters, try strptime with common patterns
-    if any(ch.isalpha() for ch in t):
-        # normalize punctuation
-        cleaned = re.sub(r"[,\-]+", " ", t).strip()
-        # If year is missing, append default year
-        has_year = re.search(r"\b(\d{4}|\d{2})\b", cleaned) is not None
-        candidates = [cleaned] if has_year else [f"{cleaned} {default_year}"]
-
-        patterns = [
-            "%b %d %Y",   # May 28 2026
-            "%B %d %Y",   # May 28 2026
-            "%b %d %y",   # May 28 26
-            "%B %d %y",   # May 28 26
-            "%d %b %Y",   # 28 May 2026
-            "%d %B %Y",   # 28 May 2026
-            "%d %b %y",   # 28 May 26
-            "%d %B %y",   # 28 May 26
-        ]
-
-        for s in candidates:
-            for fmt in patterns:
-                try:
-                    dt = datetime.strptime(s, fmt)
-                    # If 2-digit year produced 19xx unexpectedly, you can pivot it:
-                    if dt.year < 1970:
-                        dt = dt.replace(year=dt.year + 100)
-                    return dt
-                except Exception:
-                    pass
-
-        return None
-
-    # ----- Pure digits: MMDD, MMDDYY, MMDDYYYY, MDD, MDDYY -----
-    digits = re.sub(r"\D", "", t)
-    if digits:
-        try:
-            if len(digits) == 4:
-                # MMDD
-                mm, dd = int(digits[0:2]), int(digits[2:4])
-                return datetime(default_year, mm, dd)
-
-            if len(digits) == 3:
-                # MDD (e.g. 528 -> 5/28)
-                mm, dd = int(digits[0:1]), int(digits[1:3])
-                return datetime(default_year, mm, dd)
-
-            if len(digits) == 6:
-                # MMDDYY
-                mm, dd = int(digits[0:2]), int(digits[2:4])
-                yy = int(digits[4:6])
-                year = 2000 + yy if yy <= 69 else 1900 + yy
-                return datetime(year, mm, dd)
-
-            if len(digits) == 5:
-                # MDDYY (e.g. 52826 -> 5/28/26)
-                mm, dd = int(digits[0:1]), int(digits[1:3])
-                yy = int(digits[3:5])
-                year = 2000 + yy if yy <= 69 else 1900 + yy
-                return datetime(year, mm, dd)
-
-            if len(digits) == 8:
-                # MMDDYYYY
-                mm, dd, yyyy = int(digits[0:2]), int(digits[2:4]), int(digits[4:8])
-                return datetime(yyyy, mm, dd)
-        except Exception:
-            pass
-
-    # ----- Separated numeric formats -----
-    # Support: M/D, M/D/YY, M/D/YYYY, YYYY-MM-DD, etc.
-    parts = re.split(r"[\/\.\-\s]+", t)
-    parts = [p for p in parts if p]
-
-    try:
-        if len(parts) == 2:
-            # M/D  (assume current year)
-            mm, dd = int(parts[0]), int(parts[1])
-            return datetime(default_year, mm, dd)
-
-        if len(parts) == 3:
-            # If first part is 4 digits => YYYY-MM-DD
-            if len(parts[0]) == 4:
-                yyyy, mm, dd = int(parts[0]), int(parts[1]), int(parts[2])
-                return datetime(yyyy, mm, dd)
-
-            # else assume MM-DD-YY(YY) / MM-DD-YYYY
-            mm, dd = int(parts[0]), int(parts[1])
-            y = parts[2]
-            if len(y) == 2:
-                yy = int(y)
-                yyyy = 2000 + yy if yy <= 69 else 1900 + yy
-            else:
-                yyyy = int(y)
-            return datetime(yyyy, mm, dd)
-    except Exception:
-        return None
-
-    return None
-
-
-def normalize_issue_date_mmddyyyy(text: str) -> str:
-    """
-    Returns normalized 'mm/dd/yyyy' string if parseable, else original text.
-    """
-    dt = parse_issue_date_flexible(text)
-    if not dt:
-        return text
-    return dt.strftime("%m/%d/%Y")
-
 # ------------------ UI HELPERS ------------------
-def build_layout_rows():
-    """
-    Read all Layout JSONs and return list of dict rows:
-    {path, issue_dt, issue_disp, product, press, format, saved_dt, saved_disp}
-    """
-    ensure_dir(LAYOUTS_DIR)
-    rows = []
-    for path in sorted(glob.glob(os.path.join(LAYOUTS_DIR, "*.json"))):
-        data = safe_read_json(path) or {}
-        press = data.get("press", "")
-        fmt = data.get("format", "")
-        issue = data.get("issue_date", "")
-        product = data.get("product", "")
-        saved_at = data.get("saved_at", "")
+def overlay_render_cell(overlay: tk.Canvas, text: str, circled: bool):
+    """Render the cell's text and optional red circle on top."""
+    overlay.delete("all")
 
-        issue_dt = parse_issue_date_mmddyyyy(issue)
-        saved_dt = parse_saved_at(saved_at)
+    overlay.update_idletasks()
+    w = overlay.winfo_width()
+    h = overlay.winfo_height()
 
-        rows.append({
-            "path": path,
-            "issue_dt": issue_dt,
-            "issue_disp": fmt_issue_for_display(issue),
-            "product": product or "",
-            "press": press or "",
-            "format": fmt or "",
-            "saved_dt": saved_dt,
-            "saved_disp": fmt_dt_for_display(saved_dt),
-        })
-    return rows
+    # draw text in the middle
+    overlay.create_text(
+        w // 2,
+        h // 2,
+        text=text,
+        fill="black",
+        font=(None, 11),
+        tags=("txt",)
+    )
+
+    # draw red circle if selected
+    if circled:
+        pad = 3
+        overlay.create_oval(
+            pad, pad, max(pad + 1, w - pad), max(pad + 1, h - pad),
+            outline="red", width=2, tags=("circle",)
+        )
 
 def _contrast_text_color(hex_color: str) -> str:
     hex_color = hex_color.lstrip("#")
@@ -696,175 +584,30 @@ def _contrast_text_color(hex_color: str) -> str:
     luminance = 0.299 * r + 0.587 * g + 0.114 * b
     return "black" if luminance > 150 else "white"
 
+def overlay_show(overlay: tk.Canvas):
+    if not getattr(overlay, "_shown", False):
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay._shown = True
 
-def create_press_unit(
-    parent,
-    unit_label,
-    use_cmyk=True,
-    grid_rows=2,
-    grid_cols=2,
-    swatch_cols=2,
-    cell_pad=0,
-    midline_thickness=4,
-    midline_color="#444444",
-    unit_padding=(6, 6, 6, 6),
-    cell_font=None,
-    cell_width=None,
-    swatch_size=(4, 1),
-):
-    unit_frame = ttk.Frame(parent, style="Unit.TFrame", padding=unit_padding)
+def overlay_hide(overlay: tk.Canvas):
+    if getattr(overlay, "_shown", False):
+        overlay.place_forget()
+        overlay._shown = False
 
-    section_entry = ttk.Entry(unit_frame, width=8, justify="center", font=(None, 10))
-    section_entry.pack(pady=(0, 6))
-
-    box_frame = ttk.Frame(unit_frame, style="Box.TFrame")
-    box_frame.pack(fill="both", expand=True)
-
-    # Default sizing
-    if cell_font is None or cell_width is None:
-        total_cells = grid_rows * grid_cols
-        if grid_cols >= 8:
-            default_font = (None, 9)
-            default_width = 2
-        elif grid_cols == 4:
-            default_font = (None, 11)
-            default_width = 4
-        elif total_cells >= 16:
-            default_font = (None, 9)
-            default_width = 3
-        else:
-            default_font = (None, 11)
-            default_width = 4
-        if cell_font is None:
-            cell_font = default_font
-        if cell_width is None:
-            cell_width = default_width
-
-    # Divider insertion logic
-    use_v_sep = (grid_cols % 2 == 0 and grid_cols > 1)
-    use_h_sep = (grid_rows % 2 == 0 and grid_rows > 1)
-    mid_col = grid_cols // 2
-    mid_row = grid_rows // 2
-    total_grid_cols = grid_cols + (1 if use_v_sep else 0)
-    total_grid_rows = grid_rows + (1 if use_h_sep else 0)
-
-    def map_col(c):
-        if use_v_sep and c >= mid_col:
-            return c + 1
-        return c
-
-    def map_row(r):
-        if use_h_sep and r >= mid_row:
-            return r + 1
-        return r
-
-    for r in range(total_grid_rows):
-        if use_h_sep and r == mid_row:
-            box_frame.rowconfigure(r, weight=0, minsize=midline_thickness)
-        else:
-            box_frame.rowconfigure(r, weight=1)
-
-    for c in range(total_grid_cols):
-        if use_v_sep and c == mid_col:
-            box_frame.columnconfigure(c, weight=0, minsize=midline_thickness)
-        else:
-            box_frame.columnconfigure(c, weight=1)
-
-    grid_entries = []
-    for r in range(grid_rows):
-        row_entries = []
-        for c in range(grid_cols):
-            cell_entry = ttk.Entry(
-                box_frame,
-                justify="center",
-                font=cell_font,
-                width=cell_width,
-            )
-            cell_entry.grid(
-                row=map_row(r),
-                column=map_col(c),
-                sticky="nsew",
-                padx=cell_pad,
-                pady=cell_pad
-            )
-            row_entries.append(cell_entry)
-        grid_entries.append(row_entries)
-
-    # Draw divider lines (as frames)
-    if use_v_sep:
-        if use_h_sep:
-            tk.Frame(box_frame, bg=midline_color).grid(row=0, column=mid_col, rowspan=mid_row, sticky="nsew")
-            tk.Frame(box_frame, bg=midline_color).grid(
-                row=mid_row + 1, column=mid_col,
-                rowspan=total_grid_rows - (mid_row + 1),
-                sticky="nsew"
-            )
-        else:
-            tk.Frame(box_frame, bg=midline_color).grid(row=0, column=mid_col, rowspan=total_grid_rows, sticky="nsew")
-
-    if use_h_sep:
-        if use_v_sep:
-            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=0, columnspan=mid_col, sticky="nsew")
-            tk.Frame(box_frame, bg=midline_color).grid(
-                row=mid_row, column=mid_col + 1,
-                columnspan=total_grid_cols - (mid_col + 1),
-                sticky="nsew"
-            )
-            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=mid_col, sticky="nsew")
-        else:
-            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=0, columnspan=total_grid_cols, sticky="nsew")
-
-    ttk.Label(unit_frame, text=unit_label, font=(None, 10, "bold")).pack(pady=(6, 0))
-
-    # Color swatches centered with letters inside
-    color_frame = ttk.Frame(unit_frame)
-    color_frame.pack(pady=(6, 0), fill="x")
-
-    if use_cmyk:
-        colors = [
-            ("K", "#7f7f7f"),
-            ("Y", "#fff176"),
-            ("M", "#f48fb1"),
-            ("C", "#90caf9"),
-        ]
-    else:
-        colors = [("K", "#7f7f7f")]
-
-    sw_w, sw_h = swatch_size
-    unit_bg = ttk.Style(unit_frame).lookup("Unit.TFrame", "background") or "#f0f0f0"
-
-    for key, color in colors:
-        row_frame = tk.Frame(color_frame, bg=unit_bg, height=24)
-        row_frame.pack(fill="x", pady=1)
-        row_frame.pack_propagate(False)
-
-        swatch_container = tk.Frame(row_frame, bg=unit_bg)
-        swatch_container.place(relx=0.5, rely=0.5, anchor="center")
-
-        text_color = _contrast_text_color(color)
-
-        for i in range(swatch_cols):
-            swatch = tk.Label(
-                swatch_container,
-                text=key,
-                fg=text_color,
-                bg=color,
-                font=(None, 9, "bold"),
-                relief="solid",
-                borderwidth=1,
-                width=sw_w,
-                height=sw_h,
-            )
-            swatch.pack(side="left")
-
-            if i != swatch_cols - 1:
-                tk.Frame(swatch_container, bg=midline_color, width=midline_thickness, height=18).pack(side="left", padx=1)
-
-    return unit_frame, section_entry, grid_entries
-
+def overlay_set_circle(overlay: tk.Canvas, on: bool):
+    overlay.delete("circle")
+    overlay._circle_id = None
+    if on:
+        overlay.update_idletasks()
+        w = overlay.winfo_width()
+        h = overlay.winfo_height()
+        pad = 3
+        overlay._circle_id = overlay.create_oval(
+            pad, pad, max(pad+1, w - pad), max(pad+1, h - pad),
+            outline="red", width=2, tags=("circle",)
+        )
 
 def make_press_area(parent, enable_hscroll=False, height_hint=320):
-    """Optional horizontal scroll container for 8-up."""
     outer = ttk.Frame(parent)
     outer.pack(fill="both", expand=True)
 
@@ -892,7 +635,6 @@ def make_press_area(parent, enable_hscroll=False, height_hint=320):
     inner.bind("<Configure>", _on_inner_configure)
     canvas.bind("<Configure>", _on_canvas_configure)
     return outer, inner, canvas
-
 
 def apply_window_sizing(win, config):
     autosize = config.get("autosize", False)
@@ -923,8 +665,165 @@ def apply_window_sizing(win, config):
         y = max(0, (scr_h - h) // 2)
         win.geometry(f"{w}x{h}+{x}+{y}")
 
+def create_press_unit(
+    parent,
+    unit_label,
+    use_cmyk=True,
+    grid_rows=2,
+    grid_cols=2,
+    swatch_cols=2,
+    cell_pad=0,
+    midline_thickness=4,
+    midline_color="#444444",
+    unit_padding=(6, 6, 6, 6),
+    cell_font=None,
+    cell_width=None,
+    swatch_size=(4, 1),
+):
+    unit_frame = ttk.Frame(parent, style="Unit.TFrame", padding=unit_padding)
 
-# ------------------ SAVE/LOAD (Layout window) ------------------
+    section_entry = ttk.Entry(unit_frame, width=8, justify="center", font=(None, 10))
+    section_entry.pack(pady=(0, 6))
+
+    box_frame = ttk.Frame(unit_frame, style="Box.TFrame")
+    box_frame.pack(fill="both", expand=True)
+
+    # Defaults
+    if cell_font is None or cell_width is None:
+        total_cells = grid_rows * grid_cols
+        if grid_cols >= 8:
+            default_font = (None, 9)
+            default_width = 2
+        elif grid_cols == 4:
+            default_font = (None, 11)
+            default_width = 4
+        elif total_cells >= 16:
+            default_font = (None, 9)
+            default_width = 3
+        else:
+            default_font = (None, 11)
+            default_width = 4
+        cell_font = cell_font or default_font
+        cell_width = cell_width or default_width
+
+    # Divider insertion logic
+    use_v_sep = (grid_cols % 2 == 0 and grid_cols > 1)
+    use_h_sep = (grid_rows % 2 == 0 and grid_rows > 1)
+    mid_col = grid_cols // 2
+    mid_row = grid_rows // 2
+    total_grid_cols = grid_cols + (1 if use_v_sep else 0)
+    total_grid_rows = grid_rows + (1 if use_h_sep else 0)
+
+    def map_col(c):
+        return c + 1 if (use_v_sep and c >= mid_col) else c
+
+    def map_row(r):
+        return r + 1 if (use_h_sep and r >= mid_row) else r
+
+    for r in range(total_grid_rows):
+        if use_h_sep and r == mid_row:
+            box_frame.rowconfigure(r, weight=0, minsize=midline_thickness)
+        else:
+            box_frame.rowconfigure(r, weight=1)
+
+    for c in range(total_grid_cols):
+        if use_v_sep and c == mid_col:
+            box_frame.columnconfigure(c, weight=0, minsize=midline_thickness)
+        else:
+            box_frame.columnconfigure(c, weight=1)
+
+    # ---- IMPORTANT: correct entries + overlays (aligned) ----
+    grid_entries = []
+    cell_overlays = []
+
+    for r in range(grid_rows):
+        row_entries = []
+        row_overlays = []
+        for c in range(grid_cols):
+            cell_container = ttk.Frame(box_frame)
+            cell_container.grid(row=map_row(r), column=map_col(c), sticky="nsew", padx=cell_pad, pady=cell_pad)
+
+            cell_entry = ttk.Entry(cell_container, justify="center", font=cell_font, width=cell_width)
+            cell_entry.pack(fill="both", expand=True)
+
+            overlay = tk.Canvas(cell_container, highlightthickness=0, bg="#ffffff")
+            overlay.place_forget()
+            overlay._shown = False
+            overlay._circle_id = None
+
+            row_entries.append(cell_entry)
+            row_overlays.append(overlay)
+
+        grid_entries.append(row_entries)
+        cell_overlays.append(row_overlays)
+
+    # Divider visuals
+    if use_v_sep:
+        if use_h_sep:
+            tk.Frame(box_frame, bg=midline_color).grid(row=0, column=mid_col, rowspan=mid_row, sticky="nsew")
+            tk.Frame(box_frame, bg=midline_color).grid(
+                row=mid_row + 1, column=mid_col,
+                rowspan=total_grid_rows - (mid_row + 1),
+                sticky="nsew"
+            )
+        else:
+            tk.Frame(box_frame, bg=midline_color).grid(row=0, column=mid_col, rowspan=total_grid_rows, sticky="nsew")
+
+    if use_h_sep:
+        if use_v_sep:
+            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=0, columnspan=mid_col, sticky="nsew")
+            tk.Frame(box_frame, bg=midline_color).grid(
+                row=mid_row, column=mid_col + 1,
+                columnspan=total_grid_cols - (mid_col + 1),
+                sticky="nsew"
+            )
+            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=mid_col, sticky="nsew")
+        else:
+            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=0, columnspan=total_grid_cols, sticky="nsew")
+
+    ttk.Label(unit_frame, text=unit_label, font=(None, 10, "bold")).pack(pady=(6, 0))
+
+    # Color swatches
+    color_frame = ttk.Frame(unit_frame)
+    color_frame.pack(pady=(6, 0), fill="x")
+
+    if use_cmyk:
+        colors = [("K", "#7f7f7f"), ("Y", "#fff176"), ("M", "#f48fb1"), ("C", "#90caf9")]
+    else:
+        colors = [("K", "#7f7f7f")]
+
+    sw_w, sw_h = swatch_size
+    unit_bg = ttk.Style(unit_frame).lookup("Unit.TFrame", "background") or "#f0f0f0"
+
+    for key, color in colors:
+        row_frame = tk.Frame(color_frame, bg=unit_bg, height=24)
+        row_frame.pack(fill="x", pady=1)
+        row_frame.pack_propagate(False)
+
+        swatch_container = tk.Frame(row_frame, bg=unit_bg)
+        swatch_container.place(relx=0.5, rely=0.5, anchor="center")
+
+        text_color = _contrast_text_color(color)
+
+        for i in range(swatch_cols):
+            swatch = tk.Label(
+                swatch_container,
+                text=key,
+                fg=text_color,
+                bg=color,
+                font=(None, 9, "bold"),
+                relief="solid",
+                borderwidth=1,
+                width=sw_w,
+                height=sw_h,
+            )
+            swatch.pack(side="left")
+            if i != swatch_cols - 1:
+                tk.Frame(swatch_container, bg=midline_color, width=midline_thickness, height=18).pack(side="left", padx=1)
+
+    return unit_frame, section_entry, grid_entries, cell_overlays
+
+# ------------------ SAVE/LOAD ------------------
 def collect_layout_data(ctx):
     now = datetime.now().isoformat(timespec="seconds")
     data = {
@@ -946,6 +845,7 @@ def collect_layout_data(ctx):
         except Exception:
             section_count = 1
         section_count = max(1, min(4, section_count))
+
         pages = []
         for i in range(section_count):
             text = ctx["section_page_vars"][i].get().strip()
@@ -953,6 +853,7 @@ def collect_layout_data(ctx):
                 pages.append(max(1, int(text)))
             except Exception:
                 pages.append(min_pages_for_format(ctx.get("format_name", "")))
+
         data["section_count"] = section_count
         data["section_pages"] = pages
 
@@ -963,17 +864,30 @@ def collect_layout_data(ctx):
             grid.append([cell.get().strip() for cell in row])
         data["units"].append({"label": u["label"], "section": section, "grid": grid})
 
-    return data
+    # ---- per-cell color selection (layouts only) ----
+    if not ctx.get("template_mode", False):
+        # store list of dicts for JSON stability
+        data["color_cells"] = [
+            {"unit": unit, "r": int(r), "c": int(c)}
+            for (unit, r, c) in sorted(ctx.get("color_cells", set()))
+        ]
 
+    return data
 
 def populate_layout_from_data(ctx, data):
     if ctx.get("issue_entry"):
+        ctx["issue_entry"].state(["!disabled"])
         ctx["issue_entry"].delete(0, "end")
         ctx["issue_entry"].insert(0, data.get("issue_date", ""))
+        if ctx.get("template_mode"):
+            ctx["issue_entry"].state(["disabled"])
 
     if ctx.get("product_entry"):
+        ctx["product_entry"].state(["!disabled"])
         ctx["product_entry"].delete(0, "end")
         ctx["product_entry"].insert(0, data.get("product", ""))
+        if ctx.get("template_mode"):
+            ctx["product_entry"].state(["disabled"])
 
     if ctx.get("section_count_var") and ctx.get("section_page_vars"):
         section_count = data.get("section_count", 1)
@@ -1015,6 +929,18 @@ def populate_layout_from_data(ctx, data):
                 cell.delete(0, "end")
                 cell.insert(0, val)
 
+    # ---- load per-cell color selection (layouts only) ----
+    if not ctx.get("template_mode", False):
+        ctx["color_cells"] = set()
+        raw = data.get("color_cells", [])
+        for item in raw:
+            try:
+                unit = str(item.get("unit"))
+                r = int(item.get("r"))
+                c = int(item.get("c"))
+                ctx["color_cells"].add((unit, r, c))
+            except Exception:
+                pass
 
 def do_save(win, ctx):
     if not ctx.get("file_path"):
@@ -1028,19 +954,14 @@ def do_save(win, ctx):
         messagebox.showerror("Save Failed", str(e))
         return False
 
-
 def do_save_as(win, ctx):
-    """Prompt for file path and save."""
-    ensure_dir(TEMPLATE_DIR) if ctx.get("template_mode") else ensure_dir(LAYOUTS_DIR)
-
     default_dir = ctx.get("default_dir", LAYOUTS_DIR)
     ensure_dir(default_dir)
 
-    # Suggested filename differs by mode
     if ctx.get("template_mode"):
-        suggested = build_filename_suggestion(ctx)   # existing template-style name
+        suggested = build_filename_suggestion(ctx)
     else:
-        suggested = build_layout_filename_suggestion(ctx)  # MMDDYYYY - Product.json
+        suggested = build_layout_filename_suggestion(ctx)
 
     path = filedialog.asksaveasfilename(
         parent=win,
@@ -1067,19 +988,27 @@ def do_save_as(win, ctx):
         return False
 
 # ------------------ LAYOUT WINDOW ------------------
-def build_press_layout(win, title="Press Layout", config=None, load_path=None):
+def build_press_layout(win, title="Press Layout", config=None, load_path=None, load_as_copy=False):
     config = config or {}
 
     style = ttk.Style(win)
     style.configure("Unit.TFrame", background="#f0f0f0", relief="solid", borderwidth=1)
     style.configure("Box.TFrame", background="#ffffff", relief="solid", borderwidth=1)
+    style.configure("SlideToggle.TCheckbutton",
+                    indicatoron=False,
+                    relief="flat",
+                    padding=(8, 4),
+                    background="#d9d9d9",
+                    foreground="#000000")
+    style.map("SlideToggle.TCheckbutton",
+              background=[("selected", "#4caf50"), ("!selected", "#e0e0e0")],
+              foreground=[("selected", "#ffffff"), ("!selected", "#000000")])
 
     title_base = title
     win.title(title_base)
 
     template_mode = bool(config.get("template_mode", False))
 
-    # Header
     header_frame = ttk.Frame(win, padding=(16, 12, 16, 8))
     header_frame.pack(fill="x")
 
@@ -1106,7 +1035,6 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
     )
     imposition_entry.pack(side="left", fill="x", expand=True)
 
-    # Save buttons
     btn_frame = ttk.Frame(header_frame)
     btn_frame.grid(row=0, column=6, sticky="e")
 
@@ -1116,24 +1044,18 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
     header_frame.columnconfigure(5, weight=1)
     header_frame.columnconfigure(6, weight=0)
 
-    # Disable issue/product for template mode
+    # template mode disables issue/product
     if template_mode:
         issue_entry.state(["disabled"])
         product_entry.state(["disabled"])
 
-    # Section metadata row
+    # Sections
     section_count_var = tk.StringVar(value=str(config.get("section_count", 1)))
     section_page_vars = []
     section_page_entries = []
 
     ttk.Label(header_frame, text="Sections:", font=(None, 12, "bold")).grid(row=1, column=0, sticky="w", pady=6)
-    sections_spinbox = ttk.Spinbox(
-        header_frame,
-        from_=1, to=4,
-        textvariable=section_count_var,
-        width=3,
-        justify="center"
-    )
+    sections_spinbox = ttk.Spinbox(header_frame, from_=1, to=4, textvariable=section_count_var, width=3, justify="center")
     sections_spinbox.grid(row=1, column=1, sticky="w", padx=(8, 32))
 
     pages_frame = ttk.Frame(header_frame)
@@ -1153,7 +1075,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
         ttk.Label(pages_frame, text=f"S{idx + 1}", font=(None, 10)).grid(
             row=0, column=1 + idx * 2, sticky="e", padx=(10, 2)
         )
-        spinbox = ttk.Spinbox(
+        sp = ttk.Spinbox(
             pages_frame,
             from_=page_increment,
             to=max_pages,
@@ -1162,8 +1084,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
             width=4,
             justify="center"
         )
-        spinbox.grid(row=0, column=2 + idx * 2, sticky="w")
-        section_page_entries.append(spinbox)
+        sp.grid(row=0, column=2 + idx * 2, sticky="w")
+        section_page_entries.append(sp)
 
     def _update_section_page_states(count):
         for idx, entry in enumerate(section_page_entries):
@@ -1173,7 +1095,6 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
                 entry.state(["disabled"])
                 section_page_vars[idx].set("")
 
-    # Apply initial enable/disable and min pages
     try:
         _update_section_page_states(int(section_count_var.get()))
     except Exception:
@@ -1186,11 +1107,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
     press_area_frame.pack(fill="both", expand=True)
 
     enable_hscroll = config.get("enable_hscroll", False)
-    _, press_frame, _canvas = make_press_area(
-        press_area_frame,
-        enable_hscroll=enable_hscroll,
-        height_hint=config.get("scroll_height_hint", 340)
-    )
+    _, press_frame, _canvas = make_press_area(press_area_frame, enable_hscroll=enable_hscroll,
+                                              height_hint=config.get("scroll_height_hint", 340))
 
     left_labels = config.get("left_labels", [])
     right_labels = config.get("right_labels", [])
@@ -1217,9 +1135,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
 
     units = []
 
+    # Left bank
     for idx, label in enumerate(left_labels):
         use_cmyk = label not in only_k_labels
-        unit_frame, section_entry, grid_entries = create_press_unit(
+        unit_frame, section_entry, grid_entries, cell_overlays = create_press_unit(
             press_frame,
             label,
             use_cmyk=use_cmyk,
@@ -1234,8 +1153,15 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
             cell_width=cell_width,
         )
         unit_frame.grid(row=0, column=idx, padx=unit_padx, pady=unit_pady, sticky="n")
-        units.append({"label": label, "section_entry": section_entry, "entries": grid_entries})
+        units.append({
+            "label": label,
+            "section_entry": section_entry,
+            "entries": grid_entries,
+            "overlays": cell_overlays,
+            "color_capable": bool(use_cmyk),
+        })
 
+    # Folder
     folder_frame = ttk.Frame(press_frame, padding=folder_padding)
     folder_frame.grid(row=0, column=len(left_labels), padx=folder_padx, sticky="n")
 
@@ -1247,9 +1173,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
     arrow_canvas.create_polygon(15, 64, 45, 64, 30, 94, fill="#666666", outline="#666666")
     ttk.Label(folder_frame, text=folder_label, font=(None, 12, "bold")).pack()
 
+    # Right bank
     for idx, label in enumerate(right_labels):
         use_cmyk = label not in only_k_labels
-        unit_frame, section_entry, grid_entries = create_press_unit(
+        unit_frame, section_entry, grid_entries, cell_overlays = create_press_unit(
             press_frame,
             label,
             use_cmyk=use_cmyk,
@@ -1264,13 +1191,19 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
             cell_width=cell_width,
         )
         unit_frame.grid(row=0, column=len(left_labels) + 1 + idx, padx=unit_padx, pady=unit_pady, sticky="n")
-        units.append({"label": label, "section_entry": section_entry, "entries": grid_entries})
+        units.append({
+            "label": label,
+            "section_entry": section_entry,
+            "entries": grid_entries,
+            "overlays": cell_overlays,
+            "color_capable": bool(use_cmyk),
+        })
 
     # Context
     ctx = {
         "title_base": title_base,
         "press_name": config.get("press_name", ""),
-        "format_name": config.get("format_name", ""),
+        "format_name": format_name,
         "issue_entry": issue_entry,
         "product_entry": product_entry,
         "section_count_var": section_count_var,
@@ -1283,7 +1216,21 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
         "layout_name": None,
         "template_mode": template_mode,
         "default_dir": TEMPLATE_DIR if template_mode else LAYOUTS_DIR,
+        "color_cells": set(),  # per-cell storage
     }
+
+    # ---- Color Select toggle (layouts only) ----
+    color_select_var = tk.BooleanVar(value=False)
+    color_toggle = None
+    if not template_mode:
+        color_toggle = ttk.Checkbutton(
+            btn_frame,
+            style="SlideToggle.TCheckbutton",
+            text="Color Select",
+            variable=color_select_var,
+            takefocus=False
+        )
+        color_toggle.pack(side="left", padx=(0, 12))
 
     # Save buttons
     ttk.Button(btn_frame, text="Save", command=lambda: do_save(win, ctx), width=10, takefocus=False)\
@@ -1303,13 +1250,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
         finally:
             ctx["_imposition_updating"] = False
 
-    # Section count change handler with recursion guard
-    _busy = {"busy": False}
-
+    # ---- Issue Date normalize on FocusOut (Tab/Click away) ----
     def on_issue_date_focus_out(event=None):
         if template_mode:
             return
-
         raw = issue_entry.get().strip()
         dt = parse_issue_date_flexible(raw)
         if dt:
@@ -1317,15 +1261,17 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
             if normalized != raw:
                 issue_entry.delete(0, "end")
                 issue_entry.insert(0, normalized)
-
         update_imposition()
 
-    # Bind once (do NOT bind another FocusOut for issue_entry later)
     issue_entry.bind("<FocusOut>", on_issue_date_focus_out)
-
-    # Normalize on Enter as well
     issue_entry.bind("<Return>", lambda e: (on_issue_date_focus_out(), "break"))
+    issue_entry.bind("<KeyRelease>", lambda e: update_imposition())
 
+    product_entry.bind("<KeyRelease>", lambda e: update_imposition())
+    product_entry.bind("<FocusOut>", lambda e: update_imposition())
+
+    # ---- Section count handler w/ recursion guard ----
+    _busy = {"busy": False}
     def _on_section_count_changed(event=None):
         if _busy["busy"]:
             return
@@ -1337,46 +1283,93 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
                 count = 1
             count = max(1, min(4, count))
             section_count_var.set(str(count))
-
             _update_section_page_states(count)
             apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True)
             update_imposition()
+            refresh_color_overlays()
         finally:
             _busy["busy"] = False
 
-    # IMPORTANT: Attach command/trace AFTER update_imposition exists
     sections_spinbox.configure(command=_on_section_count_changed)
     section_count_var.trace_add("write", lambda *_: _on_section_count_changed())
 
-    # Other live bindings
     for var in section_page_vars:
         var.trace_add("write", lambda *_: update_imposition())
 
-    issue_entry.bind("<KeyRelease>", update_imposition)
-    product_entry.bind("<KeyRelease>", update_imposition)
-    product_entry.bind("<FocusOut>", update_imposition)
+    # ---- Per-cell color selection logic ----
+    def toggle_color_cell(unit_dict, r, c):
+        if template_mode:
+            return
+        if not color_select_var.get():
+            return
+        if not unit_dict.get("color_capable"):
+            return
 
-    for u in units:
-        u["section_entry"].bind("<KeyRelease>", update_imposition)
-        u["section_entry"].bind("<FocusOut>", update_imposition)
-        for row in u["entries"]:
-            for cell in row:
-                cell.bind("<KeyRelease>", update_imposition)
-                cell.bind("<FocusOut>", update_imposition)
+        key = (unit_dict["label"], r, c)
+        overlay = unit_dict["overlays"][r][c]
 
-    # Load file if provided
+        if key in ctx["color_cells"]:
+            ctx["color_cells"].remove(key)
+            overlay_set_circle(overlay, False)
+        else:
+            ctx["color_cells"].add(key)
+            overlay_set_circle(overlay, True)
+
+    def refresh_color_overlays():
+        selecting = (not template_mode) and color_select_var.get()
+
+        for u in ctx["units"]:
+            color_ok = u.get("color_capable", False)
+            overlays = u.get("overlays", [])
+            entries = u.get("entries", [])
+
+            for r in range(len(overlays)):
+                for c in range(len(overlays[r])):
+                    overlay = overlays[r][c]
+                    entry = entries[r][c]
+                    key = (u["label"], r, c)
+                    circled = key in ctx["color_cells"]
+
+                    if circled or (selecting and color_ok):
+                        overlay_show(overlay)
+                        overlay_render_cell(overlay, entry.get(), circled)
+                    else:
+                        overlay_hide(overlay)
+                        overlay.delete("all")
+
+    # bind overlay clicks
+    for u in ctx["units"]:
+        overlays = u["overlays"]
+        for r in range(len(overlays)):
+            for c in range(len(overlays[r])):
+                ov = overlays[r][c]
+                ov.bind("<Button-1>", lambda e, _u=u, _r=r, _c=c: toggle_color_cell(_u, _r, _c))
+
+    if color_toggle is not None:
+        color_toggle.configure(command=refresh_color_overlays)
+
+    # ---- Load file (open vs copy) ----
     if load_path:
         data = safe_read_json(load_path)
         if data:
-            ctx["file_path"] = load_path
-            ctx["layout_name"] = data.get("name") or os.path.splitext(os.path.basename(load_path))[0]
-            win.title(f"{title_base}  —  {os.path.basename(load_path)}")
             populate_layout_from_data(ctx, data)
             apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True)
 
-    update_imposition()
+            if load_as_copy:
+                ctx["file_path"] = None
+                ctx["layout_name"] = None
+                tmpl = os.path.splitext(os.path.basename(load_path))[0]
+                win.title(f"{title_base}  —  (from template: {tmpl})")
+            else:
+                ctx["file_path"] = load_path
+                ctx["layout_name"] = data.get("name") or os.path.splitext(os.path.basename(load_path))[0]
+                win.title(f"{title_base}  —  {os.path.basename(load_path)}")
 
-    # Tab order + arrows
+    # initial refreshes
+    update_imposition()
+    refresh_color_overlays()
+
+    # ---- tab order + arrows ----
     focus_list = build_focus_order(
         issue_entry=issue_entry,
         product_entry=product_entry,
@@ -1393,6 +1386,9 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None):
     apply_window_sizing(win, config)
     return units
 
+# =========================
+# PART 3 — CONFIGS + LAUNCHERS + MAIN
+# =========================
 
 # ------------------ CONFIGS ------------------
 BASE_COMMON = {
@@ -1418,14 +1414,35 @@ PRESS_1_BASE = {
     "folder_label": "Folder - 1",
 }
 
-PRESS_1_BROADSHEET = {**PRESS_1_BASE, "format_name": "Broadsheet", "grid_rows": 2, "grid_cols": 2, "autosize": True}
-PRESS_1_TAB = {
-    **PRESS_1_BASE, "format_name": "Tab", "grid_rows": 2, "grid_cols": 4, "autosize": True,
-    "unit_padding": (4, 4, 4, 4), "unit_padx": 3, "folder_padx": 10, "cell_font": (None, 10), "cell_width": 3
+PRESS_1_BROADSHEET = {
+    **PRESS_1_BASE,
+    "format_name": "Broadsheet",
+    "grid_rows": 2,
+    "grid_cols": 2,
+    "autosize": True,
 }
+
+PRESS_1_TAB = {
+    **PRESS_1_BASE,
+    "format_name": "Tab",
+    "grid_rows": 2,
+    "grid_cols": 4,
+    "autosize": True,
+    "unit_padding": (4, 4, 4, 4),
+    "unit_padx": 3,
+    "folder_padx": 10,
+    "cell_font": (None, 10),
+    "cell_width": 3,
+}
+
 PRESS_1_8UP = {
-    **PRESS_1_BASE, "format_name": "8 up", "grid_rows": 2, "grid_cols": 8,
-    "enable_hscroll": True, "full_width": True, "scroll_height_hint": 360
+    **PRESS_1_BASE,
+    "format_name": "8 up",
+    "grid_rows": 2,
+    "grid_cols": 8,
+    "enable_hscroll": True,
+    "full_width": True,
+    "scroll_height_hint": 360,
 }
 
 # Press 2
@@ -1438,14 +1455,35 @@ PRESS_2_BASE = {
     "folder_label": "Folder - 2",
 }
 
-PRESS_2_BROADSHEET = {**PRESS_2_BASE, "format_name": "Broadsheet", "grid_rows": 2, "grid_cols": 2, "autosize": True}
-PRESS_2_TAB = {
-    **PRESS_2_BASE, "format_name": "Tab", "grid_rows": 2, "grid_cols": 4, "autosize": True,
-    "unit_padding": (4, 4, 4, 4), "unit_padx": 3, "folder_padx": 10, "cell_font": (None, 10), "cell_width": 3
+PRESS_2_BROADSHEET = {
+    **PRESS_2_BASE,
+    "format_name": "Broadsheet",
+    "grid_rows": 2,
+    "grid_cols": 2,
+    "autosize": True,
 }
+
+PRESS_2_TAB = {
+    **PRESS_2_BASE,
+    "format_name": "Tab",
+    "grid_rows": 2,
+    "grid_cols": 4,
+    "autosize": True,
+    "unit_padding": (4, 4, 4, 4),
+    "unit_padx": 3,
+    "folder_padx": 10,
+    "cell_font": (None, 10),
+    "cell_width": 3,
+}
+
 PRESS_2_8UP = {
-    **PRESS_2_BASE, "format_name": "8 up", "grid_rows": 2, "grid_cols": 8,
-    "enable_hscroll": True, "full_width": True, "scroll_height_hint": 360
+    **PRESS_2_BASE,
+    "format_name": "8 up",
+    "grid_rows": 2,
+    "grid_cols": 8,
+    "enable_hscroll": True,
+    "full_width": True,
+    "scroll_height_hint": 360,
 }
 
 CONFIG_MAP = {
@@ -1458,11 +1496,11 @@ CONFIG_MAP = {
 }
 
 
-# ------------------ TEMPLATE MATCHING FOR NEW LAYOUT LAUNCHER ------------------
+# ------------------ TEMPLATE MATCHING (New Layout launcher) ------------------
 def list_matching_templates(press_name, format_name, section_count=None, section_pages=None):
     """
-    Templates are stored in TEMPLATE_DIR.
-    Match by JSON metadata press/format and optional section_count/pages.
+    Templates live in TEMPLATE_DIR and are matched by JSON metadata.
+    In the New Layout launcher, we additionally filter by section_count & section_pages.
     """
     ensure_dir(TEMPLATE_DIR)
     paths = sorted(glob.glob(os.path.join(TEMPLATE_DIR, "*.json")))
@@ -1471,25 +1509,27 @@ def list_matching_templates(press_name, format_name, section_count=None, section
     for p in paths:
         data = safe_read_json(p)
         stem = os.path.splitext(os.path.basename(p))[0]
-        if data and isinstance(data, dict):
-            if data.get("press") != press_name or data.get("format") != format_name:
-                continue
 
-            if section_count is not None:
-                file_section_count = data.get("section_count")
-                file_section_pages = data.get("section_pages", [])
-                if file_section_count != section_count:
-                    continue
-                if len(file_section_pages) < section_count:
-                    continue
-                if any(file_section_pages[i] != section_pages[i] for i in range(section_count)):
-                    continue
-
-            disp = data.get("name") or stem
-            results.append((disp, p))
-        else:
+        if not (data and isinstance(data, dict)):
             # fallback display if corrupt
             results.append((stem, p))
+            continue
+
+        if data.get("press") != press_name or data.get("format") != format_name:
+            continue
+
+        if section_count is not None:
+            file_section_count = data.get("section_count")
+            file_section_pages = data.get("section_pages", [])
+            if file_section_count != section_count:
+                continue
+            if len(file_section_pages) < section_count:
+                continue
+            if any(file_section_pages[i] != section_pages[i] for i in range(section_count)):
+                continue
+
+        disp = data.get("name") or stem
+        results.append((disp, p))
 
     return results
 
@@ -1519,10 +1559,16 @@ def open_json_in_layout(root, json_path, template_mode=False):
 
     title = f"{press} - {fmt}"
     win = tk.Toplevel(root)
-    build_press_layout(win, title=title, config=cfg, load_path=json_path)
+    build_press_layout(
+        win,
+        title=title,
+        config=cfg,
+        load_path=json_path,
+        load_as_copy=False
+    )
 
 
-# ------------------ NEW LAYOUT LAUNCHER (your current launcher, renamed) ------------------
+# ------------------ NEW LAYOUT LAUNCHER ------------------
 def build_new_layout_launcher(parent):
     root = tk.Toplevel(parent)
     root.title("New Layout")
@@ -1543,7 +1589,7 @@ def build_new_layout_launcher(parent):
     format_combo = ttk.Combobox(frame, textvariable=format_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=16)
     format_combo.grid(row=1, column=1, sticky="w", padx=(0, 24))
 
-    # Sections + Pages (spinboxes)
+    # Sections + Pages
     ttk.Label(frame, text="Sections:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="w", pady=8, padx=(0, 8))
     section_count_var = tk.StringVar(value="1")
     section_count_spinbox = ttk.Spinbox(frame, from_=1, to=4, textvariable=section_count_var, width=3, justify="center")
@@ -1662,17 +1708,14 @@ def build_new_layout_launcher(parent):
         apply_min_pages_to_sections(fill_only_blanks=False)
         refresh_templates()
 
-    # Hook spinbox change mechanisms
     section_count_spinbox.configure(command=_on_section_count_changed)
     section_count_var.trace_add("write", lambda *_: _on_section_count_changed())
 
     format_combo.bind("<<ComboboxSelected>>", _on_format_changed)
     press_combo.bind("<<ComboboxSelected>>", lambda e: refresh_templates())
-
     for var in section_page_vars:
         var.trace_add("write", lambda *_: refresh_templates())
 
-    # initial setup
     _update_section_page_states(int(section_count_var.get()))
     _on_format_changed()
     refresh_templates()
@@ -1708,13 +1751,15 @@ def build_new_layout_launcher(parent):
         load_path = template_paths[sel[0]] if sel else None
 
         win = tk.Toplevel(parent)
-        build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=load_path)
+        build_press_layout(
+            win,
+            title=f"{press} - {fmt}",
+            config=cfg,
+            load_path=load_path,
+            load_as_copy=True  # NEW LAYOUT from template => copy
+        )
 
-    def on_template_double_click(event=None):
-        if templates_listbox.curselection():
-            on_new_or_open()
-
-    templates_listbox.bind("<Double-Button-1>", on_template_double_click)
+    templates_listbox.bind("<Double-Button-1>", lambda e: on_new_or_open())
 
     btn_row = ttk.Frame(frame)
     btn_row.grid(row=4, column=0, columnspan=8, pady=(12, 0), sticky="w")
@@ -1793,7 +1838,7 @@ def build_template_editor_launcher(parent):
         cfg["section_pages"] = [min_pages_for_format(fmt)]
         cfg["template_mode"] = True
         win = tk.Toplevel(parent)
-        build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=None)
+        build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=None, load_as_copy=False)
 
     press_combo.bind("<<ComboboxSelected>>", lambda e: refresh())
     format_combo.bind("<<ComboboxSelected>>", lambda e: refresh())
@@ -1826,7 +1871,6 @@ def build_main_launcher():
 
     ttk.Label(frame, text="Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
 
-    # ---- Treeview with sortable columns ----
     columns = ("issue", "product", "press", "format", "saved")
     tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
     tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
@@ -1835,29 +1879,26 @@ def build_main_launcher():
     vsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
     tree.configure(yscrollcommand=vsb.set)
 
-    # Column headings
     tree.heading("issue", text="Issue Date")
     tree.heading("product", text="Product")
     tree.heading("press", text="Press")
     tree.heading("format", text="Format")
     tree.heading("saved", text="Last Saved")
 
-    # Column widths (tweak as desired)
     tree.column("issue", width=110, anchor="center")
     tree.column("product", width=300, anchor="w")
     tree.column("press", width=90, anchor="center")
     tree.column("format", width=120, anchor="center")
     tree.column("saved", width=170, anchor="center")
 
-    # Keep path mapping by iid
-    row_by_iid = {}   # iid -> row dict
+    row_by_iid = {}
     sort_state = {"col": None, "desc": False}
 
     def load_rows_into_tree(rows):
         tree.delete(*tree.get_children())
         row_by_iid.clear()
         for r in rows:
-            iid = r["path"]  # unique
+            iid = r["path"]
             tree.insert("", "end", iid=iid, values=(
                 r["issue_disp"],
                 r["product"],
@@ -1872,7 +1913,6 @@ def build_main_launcher():
         load_rows_into_tree(rows)
 
     def sort_by(col):
-        # Toggle sort direction if same column
         if sort_state["col"] == col:
             sort_state["desc"] = not sort_state["desc"]
         else:
@@ -1897,7 +1937,6 @@ def build_main_launcher():
         rows.sort(key=keyfunc, reverse=sort_state["desc"])
         load_rows_into_tree(rows)
 
-    # Make headers clickable for sorting
     tree.heading("issue", command=lambda: sort_by("issue"))
     tree.heading("product", command=lambda: sort_by("product"))
     tree.heading("press", command=lambda: sort_by("press"))
