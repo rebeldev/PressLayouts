@@ -1,0 +1,184 @@
+{
+  "version": 1,
+  "name": "P1 4F1 6A1B1Los",
+  "press": "Press 1",
+  "format": "Broadsheet",
+  "saved_at": "2026-05-28T09:38:46",
+  "issue_date": "",
+  "product": "",
+  "section_count": 2,
+  "section_pages": [
+    4,
+    6
+  ],
+  "units": [
+    {
+      "label": "E1",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "D1",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "C1",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "B1-Lower",
+      "section": "B",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "4",
+          "3"
+        ]
+      ]
+    },
+    {
+      "label": "B1-Upper",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "A1",
+      "section": "B",
+      "grid": [
+        [
+          "1",
+          "2"
+        ],
+        [
+          "6",
+          "5"
+        ]
+      ]
+    },
+    {
+      "label": "F1",
+      "section": "A",
+      "grid": [
+        [
+          "1",
+          "2"
+        ],
+        [
+          "4",
+          "3"
+        ]
+      ]
+    },
+    {
+      "label": "G1-Lower",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "G1-Upper",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "E2",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "D2",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "label": "C2",
+      "section": "",
+      "grid": [
+        [
+          "",
+          ""
+        ],
+        [
+          "",
+          ""
+        ]
+      ]
+    }
+  ]
+}
