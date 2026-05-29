@@ -1158,6 +1158,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         unit_frame.grid(row=0, column=idx, padx=unit_padx, pady=unit_pady, sticky="n")
         units.append({
             "label": label,
+            "frame": unit_frame,
             "section_entry": section_entry,
             "entries": grid_entries,
             "overlays": cell_overlays,
@@ -1196,6 +1197,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         unit_frame.grid(row=0, column=len(left_labels) + 1 + idx, padx=unit_padx, pady=unit_pady, sticky="n")
         units.append({
             "label": label,
+            "frame": unit_frame,
             "section_entry": section_entry,
             "entries": grid_entries,
             "overlays": cell_overlays,
@@ -1252,6 +1254,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         # hide only the button/toggle group while capturing so the printout
         # still includes the Color Pages / Plates counters
         was_btn_visible = False
+        hidden_unused_press1_unit_frames = []
         try:
             try:
                 was_btn_visible = btn_frame.winfo_ismapped()
@@ -1260,7 +1263,22 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             except Exception:
                 was_btn_visible = False
 
-            # ensure UI redraw after removing buttons
+            # In Press 1 layouts, do not print unused E2 / D2 / C2 units.
+            try:
+                if ctx.get("press_name") == "Press 1":
+                    for unit in ctx.get("units", []):
+                        if unit.get("label") not in {"E2", "D2", "C2"}:
+                            continue
+                        if unit_min_page_number(unit) is not None:
+                            continue
+                        frame = unit.get("frame")
+                        if frame is not None and frame.winfo_ismapped():
+                            hidden_unused_press1_unit_frames.append(frame)
+                            frame.grid_remove()
+            except Exception:
+                hidden_unused_press1_unit_frames = []
+
+            # ensure UI redraw after removing buttons / unused units
             try:
                 win.update()
             except Exception:
@@ -1501,6 +1519,12 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             try:
                 if was_btn_visible:
                     btn_frame.pack(side="left")
+            except Exception:
+                pass
+            # restore any unused Press 1 units that were temporarily hidden
+            try:
+                for frame in hidden_unused_press1_unit_frames:
+                    frame.grid()
             except Exception:
                 pass
 
