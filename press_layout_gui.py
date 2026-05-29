@@ -746,7 +746,7 @@ def create_press_unit(
             cell_entry = ttk.Entry(cell_container, justify="center", font=cell_font, width=cell_width)
             cell_entry.pack(fill="both", expand=True)
 
-            overlay = tk.Canvas(cell_container, highlightthickness=0, bg="#ffffff")
+            overlay = tk.Canvas(cell_container, highlightthickness=0, bg="#ffffff", takefocus=False)
             overlay.place_forget()
             overlay._shown = False
             overlay._circle_id = None
@@ -1034,15 +1034,17 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         takefocus=False
     )
     imposition_entry.pack(side="left", fill="x", expand=True)
-
-    btn_frame = ttk.Frame(header_frame)
-    btn_frame.grid(row=0, column=6, sticky="e")
+    
 
     header_frame.columnconfigure(2, weight=1)
     header_frame.columnconfigure(3, weight=1)
     header_frame.columnconfigure(4, weight=1)
     header_frame.columnconfigure(5, weight=1)
-    header_frame.columnconfigure(6, weight=0)
+
+    controls_outer_frame = ttk.Frame(win, padding=(16, 0, 16, 12))
+    controls_center_frame = ttk.Frame(controls_outer_frame)
+    controls_center_frame.pack(anchor="center")
+    btn_frame = ttk.Frame(controls_center_frame)
 
     # template mode disables issue/product
     if template_mode:
@@ -1105,6 +1107,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     # Press area
     press_area_frame = ttk.Frame(win, padding=(16, 0, 16, 12))
     press_area_frame.pack(fill="both", expand=True)
+    controls_outer_frame.pack(fill="x")
 
     enable_hscroll = config.get("enable_hscroll", False)
     _, press_frame, _canvas = make_press_area(press_area_frame, enable_hscroll=enable_hscroll,
@@ -1200,6 +1203,9 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         })
 
     # Context
+    # count vars (defined before ctx so ctx can reference them)
+    color_pages_var = tk.StringVar(value="0")
+    plates_var = tk.StringVar(value="0")
     ctx = {
         "title_base": title_base,
         "press_name": config.get("press_name", ""),
@@ -1211,6 +1217,9 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "_update_section_page_states": _update_section_page_states,
         "imposition_var": imposition_var,
         "imposition_entry": imposition_entry,
+        "color_pages_var": color_pages_var,
+        "plates_var": plates_var,
+        "grid_cols": grid_cols,
         "units": units,
         "file_path": None,
         "layout_name": None,
@@ -1233,10 +1242,282 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         color_toggle.pack(side="left", padx=(0, 12))
 
     # Save buttons
+    def print_layout(win, ctx):
+        try:
+            from PIL import ImageGrab, Image
+        except Exception:
+            messagebox.showerror("Print Failed", "Pillow is required for printing. Please install pillow (pip install pillow).")
+            return
+
+        # hide only the button/toggle group while capturing so the printout
+        # still includes the Color Pages / Plates counters
+        was_btn_visible = False
+        try:
+            try:
+                was_btn_visible = btn_frame.winfo_ismapped()
+                if was_btn_visible:
+                    btn_frame.pack_forget()
+            except Exception:
+                was_btn_visible = False
+
+            # ensure UI redraw after removing buttons
+            try:
+                win.update()
+            except Exception:
+                try:
+                    win.update_idletasks()
+                except Exception:
+                    pass
+            try:
+                import time
+                time.sleep(0.08)
+            except Exception:
+                pass
+
+            # capture window contents
+            win.update_idletasks()
+            x = win.winfo_rootx()
+            y = win.winfo_rooty()
+            w = win.winfo_width()
+            h = win.winfo_height()
+            bbox = (x, y, x + w, y + h)
+            img = ImageGrab.grab(bbox)
+
+            # target: 11 x 8.5 inches in landscape at 200 DPI
+            dpi = 200
+            target_w = int(11 * dpi)
+            target_h = int(8.5 * dpi)
+
+            img.thumbnail((target_w, target_h), Image.LANCZOS)
+
+            import tempfile, os
+            fd, path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            img.save(path, format="PNG")
+
+            # direct print using native Windows print dialog when available
+            direct_print_error = {"message": None}
+
+            def _show_printer_dialog():
+                try:
+                    import win32print
+                except Exception as e:
+                    direct_print_error["message"] = f"Missing win32print dependency: {e}"
+                    return None
+
+                try:
+                    printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+                except Exception as e:
+                    direct_print_error["message"] = f"Could not enumerate printers: {e}"
+                    return None
+
+                printer_names = [info[2] for info in printers if info and len(info) >= 3 and info[2]]
+                if not printer_names:
+                    direct_print_error["message"] = "No printers were found on this system."
+                    return None
+
+                default_printer = None
+                try:
+                    default_printer = win32print.GetDefaultPrinter()
+                except Exception:
+                    default_printer = None
+                if default_printer not in printer_names:
+                    default_printer = printer_names[0]
+
+                result = {}
+
+                dialog = tk.Toplevel(win)
+                dialog.title("Print")
+                dialog.transient(win)
+                dialog.resizable(False, False)
+                dialog.grab_set()
+
+                printer_var = tk.StringVar(value=default_printer)
+                copies_var = tk.IntVar(value=1)
+                orientation_var = tk.StringVar(value="Landscape")
+                left_margin_var = tk.StringVar(value="0.15")
+                top_margin_var = tk.StringVar(value="0.15")
+                right_margin_var = tk.StringVar(value="0.15")
+                bottom_margin_var = tk.StringVar(value="0.15")
+
+                ttk.Label(dialog, text="Printer:").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+                printer_combo = ttk.Combobox(dialog, textvariable=printer_var, values=printer_names, state="readonly", width=50)
+                printer_combo.grid(row=0, column=1, sticky="ew", padx=12, pady=(12, 4))
+                printer_combo.focus_set()
+
+                ttk.Label(dialog, text="Copies:").grid(row=1, column=0, sticky="w", padx=12, pady=4)
+                copies_spin = ttk.Spinbox(dialog, from_=1, to=999, textvariable=copies_var, width=8)
+                copies_spin.grid(row=1, column=1, sticky="w", padx=12, pady=4)
+
+                ttk.Label(dialog, text="Orientation:").grid(row=2, column=0, sticky="w", padx=12, pady=4)
+                orient_frame = ttk.Frame(dialog)
+                orient_frame.grid(row=2, column=1, sticky="w", padx=12, pady=4)
+                ttk.Radiobutton(orient_frame, text="Landscape", variable=orientation_var, value="Landscape").pack(side="left")
+                ttk.Radiobutton(orient_frame, text="Portrait", variable=orientation_var, value="Portrait").pack(side="left", padx=(12, 0))
+
+                ttk.Label(dialog, text="Margins (inches):").grid(row=3, column=0, sticky="nw", padx=12, pady=4)
+                margins_frame = ttk.Frame(dialog)
+                margins_frame.grid(row=3, column=1, sticky="w", padx=12, pady=4)
+                ttk.Label(margins_frame, text="Left").grid(row=0, column=0, sticky="w")
+                ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=left_margin_var, width=6).grid(row=0, column=1, padx=(6, 12), pady=2)
+                ttk.Label(margins_frame, text="Top").grid(row=0, column=2, sticky="w")
+                ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=top_margin_var, width=6).grid(row=0, column=3, padx=(6, 0), pady=2)
+                ttk.Label(margins_frame, text="Right").grid(row=1, column=0, sticky="w")
+                ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=right_margin_var, width=6).grid(row=1, column=1, padx=(6, 12), pady=2)
+                ttk.Label(margins_frame, text="Bottom").grid(row=1, column=2, sticky="w")
+                ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=bottom_margin_var, width=6).grid(row=1, column=3, padx=(6, 0), pady=2)
+
+                button_frame = ttk.Frame(dialog)
+                button_frame.grid(row=4, column=0, columnspan=2, pady=(8, 12), padx=12, sticky="e")
+
+                def _parse_margin_inches(value, default=0.15):
+                    try:
+                        return max(0.0, float(str(value).strip()))
+                    except Exception:
+                        return default
+
+                def _on_print():
+                    result["printer"] = printer_var.get()
+                    try:
+                        val = int(copies_var.get())
+                        result["copies"] = max(1, val)
+                    except Exception:
+                        result["copies"] = 1
+                    result["margins_inches"] = {
+                        "left": _parse_margin_inches(left_margin_var.get()),
+                        "top": _parse_margin_inches(top_margin_var.get()),
+                        "right": _parse_margin_inches(right_margin_var.get()),
+                        "bottom": _parse_margin_inches(bottom_margin_var.get()),
+                    }
+                    dialog.destroy()
+
+                def _on_cancel():
+                    dialog.destroy()
+
+                ttk.Button(button_frame, text="Print", command=_on_print, width=10).pack(side="left", padx=(0, 8))
+                ttk.Button(button_frame, text="Cancel", command=_on_cancel, width=10).pack(side="left")
+
+                dialog.protocol("WM_DELETE_WINDOW", _on_cancel)
+                dialog.columnconfigure(1, weight=1)
+                win.wait_window(dialog)
+
+                if "printer" not in result:
+                    direct_print_error["message"] = "Printer selection was canceled."
+                    return None
+                return result["printer"], result["copies"], orientation_var.get(), result.get("margins_inches", {"left": 0.15, "top": 0.15, "right": 0.15, "bottom": 0.15})
+
+            def _direct_print(img_path, printer_name, copies, orientation, margins_inches=None):
+                try:
+                    import win32ui
+                    import win32con
+                    from PIL import Image, ImageWin
+                    import traceback
+                except Exception as e:
+                    direct_print_error["message"] = f"Missing dependency: {e}"
+                    return False
+
+                try:
+                    dc = win32ui.CreateDC()
+                    dc.CreatePrinterDC(printer_name)
+                    img = Image.open(img_path)
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+
+                    if orientation == 'Landscape':
+                        img = img.transpose(Image.ROTATE_90)
+
+                    printable_area = (
+                        dc.GetDeviceCaps(win32con.HORZRES),
+                        dc.GetDeviceCaps(win32con.VERTRES)
+                    )
+                    printer_size = (
+                        dc.GetDeviceCaps(win32con.PHYSICALWIDTH),
+                        dc.GetDeviceCaps(win32con.PHYSICALHEIGHT)
+                    )
+                    offset_x = dc.GetDeviceCaps(win32con.PHYSICALOFFSETX)
+                    offset_y = dc.GetDeviceCaps(win32con.PHYSICALOFFSETY)
+                    dpi_x = max(1, dc.GetDeviceCaps(win32con.LOGPIXELSX))
+                    dpi_y = max(1, dc.GetDeviceCaps(win32con.LOGPIXELSY))
+
+                    margins_inches = margins_inches or {"left": 0.15, "top": 0.15, "right": 0.15, "bottom": 0.15}
+                    left_margin = max(0, int(round(float(margins_inches.get("left", 0.15)) * dpi_x)))
+                    top_margin = max(0, int(round(float(margins_inches.get("top", 0.15)) * dpi_y)))
+                    right_margin = max(0, int(round(float(margins_inches.get("right", 0.15)) * dpi_x)))
+                    bottom_margin = max(0, int(round(float(margins_inches.get("bottom", 0.15)) * dpi_y)))
+
+                    safe_w = max(1, printable_area[0] - left_margin - right_margin)
+                    safe_h = max(1, printable_area[1] - top_margin - bottom_margin)
+
+                    ratios = (safe_w / img.size[0], safe_h / img.size[1])
+                    scale = min(ratios)
+                    scaled = img.resize(
+                        (max(1, int(img.size[0] * scale)), max(1, int(img.size[1] * scale))),
+                        Image.LANCZOS
+                    )
+                    dib = ImageWin.Dib(scaled)
+                    x = int(offset_x + left_margin + ((safe_w - scaled.size[0]) / 2))
+                    y = int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
+                    dc.StartDoc(img_path)
+                    for _ in range(max(1, copies)):
+                        dc.StartPage()
+                        dib.draw(dc.GetHandleOutput(), (x, y, x + scaled.size[0], y + scaled.size[1]))
+                        dc.EndPage()
+                    dc.EndDoc()
+                    dc.DeleteDC()
+                    return True
+                except Exception as e:
+                    direct_print_error["message"] = traceback.format_exc()
+                    try:
+                        dc.DeleteDC()
+                    except Exception:
+                        pass
+                    return False
+
+            printed = False
+            if os.name == 'nt':
+                try:
+                    printer_selection = _show_printer_dialog()
+                    if printer_selection:
+                        printer_name, copies, orientation, margins_inches = printer_selection
+                        printed = _direct_print(path, printer_name, copies, orientation, margins_inches)
+                except Exception as e:
+                    direct_print_error["message"] = str(e)
+                    printed = False
+
+            if not printed:
+                if os.name == 'nt' and direct_print_error["message"]:
+                    messagebox.showwarning(
+                        "Print Failed",
+                        f"Direct print failed:\n{direct_print_error['message']}\n\nOpening image preview instead."
+                    )
+                try:
+                    os.startfile(path)
+                except Exception:
+                    messagebox.showinfo("Print", f"Saved preview to:\n{path}\nPlease open this file and print to your printer in landscape mode.")
+        except Exception as e:
+            messagebox.showerror("Print Failed", str(e))
+        finally:
+            # restore button/toggle group visibility
+            try:
+                if was_btn_visible:
+                    btn_frame.pack(side="left")
+            except Exception:
+                pass
+
+    ttk.Button(btn_frame, text="Print", command=lambda: print_layout(win, ctx), width=10, takefocus=False).pack(side="left", padx=(0, 8))
     ttk.Button(btn_frame, text="Save", command=lambda: do_save(win, ctx), width=10, takefocus=False)\
         .pack(side="left", padx=(0, 8))
     ttk.Button(btn_frame, text="Save As", command=lambda: do_save_as(win, ctx), width=10, takefocus=False)\
         .pack(side="left")
+    btn_frame.pack(side="left")
+
+    # Color / Plate counters (placed beside the bottom controls)
+    stats_frame = ttk.Frame(controls_center_frame)
+    stats_frame.pack(side="left", padx=(18, 0))
+    ttk.Label(stats_frame, text="Color Pages:", font=(None, 10)).pack(side="left")
+    ttk.Label(stats_frame, textvariable=color_pages_var, font=(None, 10, "bold")).pack(side="left", padx=(4, 12))
+    ttk.Label(stats_frame, text="Plates:", font=(None, 10)).pack(side="left")
+    ttk.Label(stats_frame, textvariable=plates_var, font=(None, 10, "bold")).pack(side="left", padx=(4, 0))
 
     # Live imposition updater
     ctx["_imposition_updating"] = False
@@ -1314,36 +1595,120 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         else:
             ctx["color_cells"].add(key)
             overlay_set_circle(overlay, True)
+        # update counts after toggling
+        try:
+            update_color_and_plate_counts()
+        except Exception:
+            pass
+
+    def refresh_cell_overlay(unit_dict, r, c):
+        overlay = unit_dict["overlays"][r][c]
+        entry = unit_dict["entries"][r][c]
+        key = (unit_dict["label"], r, c)
+        circled = key in ctx["color_cells"]
+        selecting = (not template_mode) and color_select_var.get() and unit_dict.get("color_capable", False)
+        is_focused = entry == entry.focus_get()
+
+        if is_focused and not color_select_var.get():
+            overlay_hide(overlay)
+            return
+
+        if circled or selecting:
+            overlay_show(overlay)
+            overlay_render_cell(overlay, entry.get(), circled)
+        else:
+            overlay_hide(overlay)
+            overlay.delete("all")
 
     def refresh_color_overlays():
-        selecting = (not template_mode) and color_select_var.get()
-
         for u in ctx["units"]:
-            color_ok = u.get("color_capable", False)
             overlays = u.get("overlays", [])
-            entries = u.get("entries", [])
-
             for r in range(len(overlays)):
                 for c in range(len(overlays[r])):
-                    overlay = overlays[r][c]
-                    entry = entries[r][c]
-                    key = (u["label"], r, c)
-                    circled = key in ctx["color_cells"]
+                    refresh_cell_overlay(u, r, c)
+        # update counts after overlays refreshed
+        try:
+            update_color_and_plate_counts()
+        except Exception:
+            pass
 
-                    if circled or (selecting and color_ok):
-                        overlay_show(overlay)
-                        overlay_render_cell(overlay, entry.get(), circled)
-                    else:
-                        overlay_hide(overlay)
-                        overlay.delete("all")
+    def update_color_and_plate_counts():
+        # Color pages = number of marked color cells
+        try:
+            cp = len(ctx.get("color_cells", set()))
+            ctx.get("color_pages_var", color_pages_var).set(str(cp))
+        except Exception:
+            pass
 
-    # bind overlay clicks
+        # Plates: for each unit, for each side (left/right split at vertical center),
+        # if any cell on that side is color -> 4 plates, else 1 plate.
+        plates = 0
+        for u in ctx.get("units", []):
+            entries = u.get("entries", [])
+            if not entries:
+                continue
+            rows = len(entries)
+            cols_unit = len(entries[0]) if rows > 0 else 0
+            mid_unit = cols_unit // 2
+
+            for side in (0, 1):
+                if side == 0:
+                    cols_range = range(0, mid_unit)
+                else:
+                    cols_range = range(mid_unit, cols_unit)
+
+                has_color = False
+                has_pages = False
+                for r in range(rows):
+                    for c in cols_range:
+                        if (u["label"], r, c) in ctx.get("color_cells", set()):
+                            has_color = True
+                            break
+                        try:
+                            val = u["entries"][r][c].get().strip()
+                            if val != "":
+                                has_pages = True
+                        except Exception:
+                            pass
+                    if has_color:
+                        break
+
+                if has_color:
+                    plates += 4
+                elif has_pages:
+                    plates += 1
+                else:
+                    plates += 0
+
+        try:
+            ctx.get("plates_var", plates_var).set(str(plates))
+        except Exception:
+            pass
+
+    # bind overlay clicks and entry redraws
     for u in ctx["units"]:
         overlays = u["overlays"]
+        entries = u["entries"]
         for r in range(len(overlays)):
             for c in range(len(overlays[r])):
                 ov = overlays[r][c]
-                ov.bind("<Button-1>", lambda e, _u=u, _r=r, _c=c: toggle_color_cell(_u, _r, _c))
+                entry = entries[r][c]
+
+                def on_overlay_click(event, _u=u, _r=r, _c=c):
+                    if not color_select_var.get():
+                        target = _u["entries"][_r][_c]
+                        target.focus_set()
+                        try:
+                            target.selection_range(0, "end")
+                        except Exception:
+                            pass
+                        return "break"
+                    toggle_color_cell(_u, _r, _c)
+
+                ov.bind("<Button-1>", on_overlay_click)
+                entry.bind("<FocusIn>", lambda e, _ov=ov: overlay_hide(_ov) if not color_select_var.get() else None)
+                entry.bind("<FocusOut>", lambda e, _u=u, _r=r, _c=c: refresh_cell_overlay(_u, _r, _c))
+                entry.bind("<KeyRelease>", lambda e, _u=u, _r=r, _c=c: refresh_cell_overlay(_u, _r, _c))
 
     if color_toggle is not None:
         color_toggle.configure(command=refresh_color_overlays)
