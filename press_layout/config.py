@@ -1,6 +1,6 @@
 import os
 
-MAIN_DIR = r"C:\Users\MBradbury\Documents\Press Layouts"
+MAIN_DIR = r"C:\PressLayouts"
 LAYOUTS_DIR = os.path.join(MAIN_DIR, "Layouts")
 TEMPLATE_DIR = os.path.join(MAIN_DIR, "Templates")
 FORMAT_MIN_PAGES = {

@@ -814,6 +814,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     for u in ctx["units"]:
         overlays = u["overlays"]
         entries = u["entries"]
+        section_entry = u.get("section_entry")
+        if section_entry is not None:
+            section_entry.bind("<KeyRelease>", lambda e: update_imposition())
+            section_entry.bind("<FocusOut>", lambda e: update_imposition())
         for r in range(len(overlays)):
             for c in range(len(overlays[r])):
                 ov = overlays[r][c]
@@ -832,8 +836,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
 
                 ov.bind("<Button-1>", on_overlay_click)
                 entry.bind("<FocusIn>", lambda e, _ov=ov: overlay_hide(_ov) if not color_select_var.get() else None)
-                entry.bind("<FocusOut>", lambda e, _u=u, _r=r, _c=c: refresh_cell_overlay(_u, _r, _c))
-                entry.bind("<KeyRelease>", lambda e, _u=u, _r=r, _c=c: refresh_cell_overlay(_u, _r, _c))
+                entry.bind("<FocusOut>", lambda e, _u=u, _r=r, _c=c: (refresh_cell_overlay(_u, _r, _c), update_imposition()))
+                entry.bind("<KeyRelease>", lambda e, _u=u, _r=r, _c=c: (refresh_cell_overlay(_u, _r, _c), update_imposition()))
 
     if color_toggle is not None:
         color_toggle.configure(command=refresh_color_overlays)
