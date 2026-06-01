@@ -261,6 +261,317 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         )
         color_toggle.pack(side="left", padx=(0, 12))
 
+    starter_format_var = tk.StringVar(value="Standard")
+    ctx["starter_format_var"] = starter_format_var
+
+    def _persist_starter_format_to_file():
+        if template_mode:
+            return
+        path = ctx.get("file_path")
+        if not path:
+            return
+        try:
+            data = safe_read_json(path)
+            if not isinstance(data, dict):
+                return
+            data["starter_format"] = starter_format_var.get().strip() or "Standard"
+            safe_write_json(path, data)
+        except Exception:
+            pass
+
+    def do_save_with_starter():
+        ok = do_save(win, ctx)
+        if ok:
+            _persist_starter_format_to_file()
+        return ok
+
+    def do_save_as_with_starter():
+        ok = do_save_as(win, ctx)
+        if ok:
+            _persist_starter_format_to_file()
+        return ok
+
+    def _starter_sheet_fields():
+        try:
+            update_color_and_plate_counts()
+        except Exception:
+            pass
+        raw_issue = issue_entry.get().strip()
+        dt = parse_issue_date_flexible(raw_issue)
+        issue_text = dt.strftime("%m/%d/%Y") if dt else raw_issue
+        return {
+            "publication": product_entry.get().strip(),
+            "issue_date": issue_text,
+            "color_pages": (ctx.get("color_pages_var", color_pages_var).get() or "").strip(),
+            "plates": (ctx.get("plates_var", plates_var).get() or "").strip(),
+        }
+
+    def _load_starter_font(size, bold=False):
+        try:
+            from PIL import ImageFont
+        except Exception:
+            return None
+        font_names = []
+        if bold:
+            font_names.extend(["arialbd.ttf", "Arial Bold.ttf", "ARIALBD.TTF", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf"])
+        font_names.extend(["arial.ttf", "Arial.ttf", "ARIAL.TTF", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"])
+        search_paths = [os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"), "/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/truetype/liberation2", "/usr/share/fonts/truetype/liberation"]
+        for folder in search_paths:
+            for name in font_names:
+                try:
+                    candidate = os.path.join(folder, name)
+                    if os.path.exists(candidate):
+                        return ImageFont.truetype(candidate, size=size)
+                except Exception:
+                    pass
+        for name in font_names:
+            try:
+                return ImageFont.truetype(name, size=size)
+            except Exception:
+                pass
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return None
+
+    def _draw_line(draw, xy, width=4):
+        draw.line(xy, fill="black", width=width)
+
+    def _draw_text(draw, xy, text, font):
+        draw.text(xy, text or "", fill="black", font=font)
+
+    def _make_starter_sheet_image(format_name, fields):
+        try:
+            from PIL import Image, ImageDraw
+        except Exception:
+            raise RuntimeError("Pillow is required for starter sheet printing. Please install pillow (pip install pillow).")
+
+        publication = fields.get("publication", "")
+        issue_date = fields.get("issue_date", "")
+        color_pages = fields.get("color_pages", "")
+        plates = fields.get("plates", "")
+        fmt = (format_name or "Standard").strip().upper()
+
+        if fmt == "NYT":
+            img = Image.new("RGB", (2200, 2000), "white")
+            draw = ImageDraw.Draw(img)
+            title_font = _load_starter_font(100, bold=True)
+            label_font = _load_starter_font(64, bold=True)
+            value_font = _load_starter_font(72, bold=True)
+            _draw_text(draw, (700, 55), "NYT CLOSE SHEET", title_font)
+            _draw_line(draw, (350, 175, 2000, 175), width=6)
+            _draw_text(draw, (10, 315), "Date:", label_font)
+            _draw_text(draw, (270, 315), issue_date, value_font)
+            _draw_line(draw, (190, 385, 720, 385), width=3)
+            _draw_text(draw, (1320, 315), "Kills:", label_font)
+            _draw_line(draw, (1510, 385, 1850, 385), width=3)
+            _draw_text(draw, (1360, 435), "PS:", label_font)
+            _draw_line(draw, (1510, 505, 1850, 505), width=3)
+            _draw_text(draw, (10, 650), "Publication:", label_font)
+            _draw_text(draw, (540, 650), publication, value_font)
+            _draw_line(draw, (450, 720, 1850, 720), width=3)
+            _draw_text(draw, (10, 900), "Color Pages:", label_font)
+            _draw_text(draw, (540, 900), color_pages, value_font)
+            _draw_line(draw, (450, 970, 1000, 970), width=3)
+            _draw_text(draw, (1130, 900), "Color add:", label_font)
+            _draw_line(draw, (1510, 970, 1850, 970), width=3)
+            _draw_text(draw, (1110, 1000), "Color drop:", label_font)
+            _draw_line(draw, (1510, 1070, 1850, 1070), width=3)
+            _draw_text(draw, (10, 1125), "Plates Needed:", label_font)
+            _draw_text(draw, (540, 1125), plates, value_font)
+            _draw_line(draw, (450, 1195, 870, 1195), width=3)
+            _draw_text(draw, (10, 1340), "Starter Image Time:", label_font)
+            _draw_line(draw, (720, 1410, 1130, 1410), width=3)
+            _draw_text(draw, (10, 1555), "Starter Plate Time:", label_font)
+            _draw_line(draw, (720, 1625, 1130, 1625), width=3)
+            _draw_text(draw, (10, 1765), "Closed:", label_font)
+            _draw_line(draw, (240, 1835, 880, 1835), width=3)
+            return img
+
+        if fmt == "USAT":
+            img = Image.new("RGB", (1900, 1820), "white")
+            draw = ImageDraw.Draw(img)
+            label_font = _load_starter_font(64, bold=True)
+            value_font = _load_starter_font(72, bold=True)
+            _draw_text(draw, (10, 70), "PUBLICATION:", label_font)
+            _draw_text(draw, (820, 70), publication, value_font)
+            _draw_line(draw, (660, 140, 1830, 140), width=4)
+            _draw_text(draw, (10, 305), "ISSUE DATE:", label_font)
+            _draw_text(draw, (980, 305), issue_date, value_font)
+            _draw_line(draw, (660, 375, 1830, 375), width=4)
+            _draw_text(draw, (10, 565), "COLOR PAGES:", label_font)
+            _draw_text(draw, (920, 565), color_pages, value_font)
+            _draw_line(draw, (660, 635, 1830, 635), width=4)
+            _draw_text(draw, (10, 825), "# OF PLATES:", label_font)
+            _draw_text(draw, (920, 825), plates, value_font)
+            _draw_line(draw, (660, 895, 1830, 895), width=4)
+            _draw_text(draw, (10, 1115), "FIRST IMAGE:", label_font)
+            _draw_line(draw, (660, 1185, 1830, 1185), width=4)
+            _draw_text(draw, (10, 1375), "LAST IMAGE:", label_font)
+            _draw_line(draw, (660, 1445, 1830, 1445), width=4)
+            _draw_text(draw, (10, 1635), "LAST PLATE:", label_font)
+            _draw_line(draw, (660, 1705, 1830, 1705), width=4)
+            return img
+
+        img = Image.new("RGB", (2100, 1700), "white")
+        draw = ImageDraw.Draw(img)
+        label_font = _load_starter_font(64, bold=True)
+        value_font = _load_starter_font(72, bold=True)
+        _draw_text(draw, (10, 80), "PUBLICATION:", label_font)
+        _draw_text(draw, (760, 80), publication, value_font)
+        _draw_line(draw, (560, 150, 2010, 150), width=4)
+        _draw_text(draw, (10, 360), "ISSUE DATE:", label_font)
+        _draw_text(draw, (980, 360), issue_date, value_font)
+        _draw_line(draw, (560, 430, 2010, 430), width=4)
+        _draw_text(draw, (10, 640), "COLOR PAGES:", label_font)
+        _draw_text(draw, (980, 640), color_pages, value_font)
+        _draw_line(draw, (560, 710, 2010, 710), width=4)
+        _draw_text(draw, (10, 920), "# OF PLATES:", label_font)
+        _draw_text(draw, (980, 920), plates, value_font)
+        _draw_line(draw, (560, 990, 2010, 990), width=4)
+        _draw_text(draw, (10, 1220), "LAST IMAGE:", label_font)
+        _draw_line(draw, (560, 1290, 2010, 1290), width=4)
+        _draw_text(draw, (10, 1520), "LAST PLATE:", label_font)
+        _draw_line(draw, (560, 1590, 2010, 1590), width=4)
+        return img
+
+    def _show_starter_printer_dialog():
+        try:
+            import win32print
+        except Exception as e:
+            raise RuntimeError(f"Missing win32print dependency: {e}")
+        printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+        printer_names = [info[2] for info in printers if info and len(info) >= 3 and info[2]]
+        if not printer_names:
+            raise RuntimeError("No printers were found on this system.")
+        try:
+            default_printer = win32print.GetDefaultPrinter()
+        except Exception:
+            default_printer = None
+        if default_printer not in printer_names:
+            default_printer = printer_names[0]
+        result = {}
+        dialog = tk.Toplevel(win)
+        dialog.title("Print Starter")
+        dialog.transient(win)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        printer_var = tk.StringVar(value=default_printer)
+        copies_var = tk.IntVar(value=1)
+        ttk.Label(dialog, text="Printer:").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+        printer_combo = ttk.Combobox(dialog, textvariable=printer_var, values=printer_names, state="readonly", width=50)
+        printer_combo.grid(row=0, column=1, sticky="ew", padx=12, pady=(12, 4))
+        printer_combo.focus_set()
+        ttk.Label(dialog, text="Copies:").grid(row=1, column=0, sticky="w", padx=12, pady=4)
+        copies_spin = ttk.Spinbox(dialog, from_=1, to=999, textvariable=copies_var, width=8)
+        copies_spin.grid(row=1, column=1, sticky="w", padx=12, pady=4)
+        ttk.Label(dialog, text="Orientation: Landscape", font=(None, 10, "bold")).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 4))
+        button_frame = ttk.Frame(dialog)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=(8, 12), padx=12, sticky="e")
+        def _on_print():
+            result["printer"] = printer_var.get()
+            try:
+                result["copies"] = max(1, int(copies_var.get()))
+            except Exception:
+                result["copies"] = 1
+            dialog.destroy()
+        def _on_cancel():
+            dialog.destroy()
+        ttk.Button(button_frame, text="Print", command=_on_print, width=10).pack(side="left", padx=(0, 8))
+        ttk.Button(button_frame, text="Cancel", command=_on_cancel, width=10).pack(side="left")
+        dialog.protocol("WM_DELETE_WINDOW", _on_cancel)
+        dialog.columnconfigure(1, weight=1)
+        win.wait_window(dialog)
+        if "printer" not in result:
+            return None
+        return result["printer"], result["copies"]
+
+    def _direct_print_image(img_path, printer_name, copies, orientation="Landscape", margins_inches=None):
+        try:
+            import win32ui
+            import win32con
+            from PIL import Image, ImageWin
+            import traceback
+        except Exception as e:
+            raise RuntimeError(f"Missing dependency: {e}")
+        try:
+            dc = win32ui.CreateDC()
+            dc.CreatePrinterDC(printer_name)
+            img = Image.open(img_path)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            if orientation == 'Landscape':
+                img = img.transpose(Image.ROTATE_90)
+            printable_area = (dc.GetDeviceCaps(win32con.HORZRES), dc.GetDeviceCaps(win32con.VERTRES))
+            offset_x = dc.GetDeviceCaps(win32con.PHYSICALOFFSETX)
+            offset_y = dc.GetDeviceCaps(win32con.PHYSICALOFFSETY)
+            dpi_x = max(1, dc.GetDeviceCaps(win32con.LOGPIXELSX))
+            dpi_y = max(1, dc.GetDeviceCaps(win32con.LOGPIXELSY))
+            margins_inches = margins_inches or {"left": 0.15, "top": 0.15, "right": 0.15, "bottom": 0.15}
+            left_margin = max(0, int(round(float(margins_inches.get("left", 0.15)) * dpi_x)))
+            top_margin = max(0, int(round(float(margins_inches.get("top", 0.15)) * dpi_y)))
+            right_margin = max(0, int(round(float(margins_inches.get("right", 0.15)) * dpi_x)))
+            bottom_margin = max(0, int(round(float(margins_inches.get("bottom", 0.15)) * dpi_y)))
+            safe_w = max(1, printable_area[0] - left_margin - right_margin)
+            safe_h = max(1, printable_area[1] - top_margin - bottom_margin)
+            scale = min(safe_w / img.size[0], safe_h / img.size[1])
+            scaled = img.resize((max(1, int(img.size[0] * scale)), max(1, int(img.size[1] * scale))), Image.LANCZOS)
+            dib = ImageWin.Dib(scaled)
+            x = int(offset_x + left_margin + ((safe_w - scaled.size[0]) / 2))
+            y = int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
+            dc.StartDoc(img_path)
+            for _ in range(max(1, copies)):
+                dc.StartPage()
+                dib.draw(dc.GetHandleOutput(), (x, y, x + scaled.size[0], y + scaled.size[1]))
+                dc.EndPage()
+            dc.EndDoc()
+            dc.DeleteDC()
+            return True
+        except Exception as e:
+            try:
+                err = traceback.format_exc()
+            except Exception:
+                err = str(e)
+            try:
+                dc.DeleteDC()
+            except Exception:
+                pass
+            raise RuntimeError(err)
+
+    def print_starter_sheet():
+        if template_mode:
+            return
+        format_name = starter_format_var.get().strip() or "Standard"
+        try:
+            img = _make_starter_sheet_image(format_name, _starter_sheet_fields())
+            import tempfile
+            fd, path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            img.save(path, format="PNG")
+        except Exception as e:
+            messagebox.showerror("Starter Sheet", str(e))
+            return
+        try:
+            printed = False
+            error_message = None
+            if os.name == 'nt':
+                try:
+                    selection = _show_starter_printer_dialog()
+                    if selection:
+                        printer_name, copies = selection
+                        printed = _direct_print_image(path, printer_name, copies, orientation="Landscape")
+                except Exception as e:
+                    error_message = str(e)
+            if not printed:
+                if error_message:
+                    messagebox.showwarning("Starter Sheet", f"Direct print failed:\n{error_message}\n\nOpening image preview instead.")
+                try:
+                    os.startfile(path)
+                except Exception:
+                    messagebox.showinfo("Starter Sheet", f"Saved starter sheet preview to:\n{path}\nPlease open this file and print it in landscape mode.")
+        except Exception as e:
+            messagebox.showerror("Starter Sheet", str(e))
+
     # Save buttons
     def print_layout(win, ctx):
         try:
@@ -629,11 +940,15 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             except Exception:
                 pass
 
+    if not template_mode:
+        ttk.Label(btn_frame, text="Starter:").pack(side="left", padx=(0, 6))
+        starter_combo = ttk.Combobox(btn_frame, textvariable=starter_format_var, values=["Standard", "NYT", "USAT"], state="readonly", width=10)
+        starter_combo.pack(side="left", padx=(0, 8))
+        starter_combo.bind("<<ComboboxSelected>>", lambda e: _persist_starter_format_to_file())
+        ttk.Button(btn_frame, text="Print Starter", command=print_starter_sheet, width=12, takefocus=False).pack(side="left", padx=(0, 12))
     ttk.Button(btn_frame, text="Print", command=lambda: print_layout(win, ctx), width=10, takefocus=False).pack(side="left", padx=(0, 8))
-    ttk.Button(btn_frame, text="Save", command=lambda: do_save(win, ctx), width=10, takefocus=False)\
-        .pack(side="left", padx=(0, 8))
-    ttk.Button(btn_frame, text="Save As", command=lambda: do_save_as(win, ctx), width=10, takefocus=False)\
-        .pack(side="left")
+    ttk.Button(btn_frame, text="Save", command=do_save_with_starter, width=10, takefocus=False).pack(side="left", padx=(0, 8))
+    ttk.Button(btn_frame, text="Save As", command=do_save_as_with_starter, width=10, takefocus=False).pack(side="left")
     btn_frame.pack(side="left")
 
     # Color / Plate counters (placed beside the bottom controls)
@@ -848,6 +1163,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         if data:
             populate_layout_from_data(ctx, data)
             apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True)
+            if not template_mode:
+                starter_format_var.set(data.get("starter_format") or "Standard")
 
             if load_as_copy:
                 ctx["file_path"] = None
