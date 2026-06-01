@@ -318,6 +318,7 @@ def build_main_launcher():
     root.title("Press Layouts")  
     root.geometry("980x480")  
     root.minsize(920, 420)  
+    remember_window_geometry(root, "main_launcher", default_geometry="980x480", minsize=(920, 420))  
     frame = ttk.Frame(root, padding=16)  
     frame.pack(fill="both", expand=True)  
     frame.rowconfigure(1, weight=1)  

@@ -455,6 +455,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         dialog.title("Print Starter")
         dialog.transient(win)
         dialog.resizable(False, False)
+        remember_window_geometry(dialog, "starter_print_dialog", default_geometry="560x150", minsize=(520, 150))
         dialog.grab_set()
         printer_var = tk.StringVar(value=default_printer)
         copies_var = tk.IntVar(value=1)
@@ -738,6 +739,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 dialog.title("Print")
                 dialog.transient(win)
                 dialog.resizable(False, False)
+                remember_window_geometry(dialog, "layout_print_dialog", default_geometry="620x240", minsize=(560, 220))
                 dialog.grab_set()
 
                 printer_var = tk.StringVar(value=default_printer)
@@ -1195,4 +1197,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
 
     win.after(50, issue_entry.focus_set)
     apply_window_sizing(win, config)
+    remember_window_geometry(
+        win,
+        "template_layout_window" if template_mode else "layout_window",
+    )
     return units

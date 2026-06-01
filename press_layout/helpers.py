@@ -771,3 +771,368 @@ def create_press_unit(
                 tk.Frame(swatch_container, bg=midline_color, width=midline_thickness, height=18).pack(side="left", padx=1)
 
     return unit_frame, section_entry, grid_entries, cell_overlays
+
+
+WINDOW_STATE_DIRNAME = "Press Layout"
+WINDOW_STATE_FILENAME = "window_state.json"
+WINDOW_DEBUG_FILENAME = "window_state_debug.log"
+
+
+def user_config_dir() -> str:
+    base = (
+        os.environ.get("LOCALAPPDATA")
+        or os.environ.get("APPDATA")
+        or os.path.expanduser("~")
+    )
+    path = os.path.join(base, WINDOW_STATE_DIRNAME)
+    ensure_dir(path)
+    return path
+
+
+def window_state_file_path() -> str:
+    return os.path.join(user_config_dir(), WINDOW_STATE_FILENAME)
+
+
+def window_debug_file_path() -> str:
+    return os.path.join(user_config_dir(), WINDOW_DEBUG_FILENAME)
+
+
+def append_window_debug_log(event_type: str, state_key: str, payload=None):
+    try:
+        entry = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "event": str(event_type or ""),
+            "state_key": str(state_key or ""),
+            "payload": payload if isinstance(payload, dict) else {"value": payload},
+        }
+        ensure_dir(user_config_dir())
+        with open(window_debug_file_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+def load_window_state_map():
+    data = safe_read_json(window_state_file_path())
+    return data if isinstance(data, dict) else {}
+
+
+def save_window_state_map(state_map):
+    if not isinstance(state_map, dict):
+        return
+    safe_write_json(window_state_file_path(), state_map)
+
+
+def parse_geometry_string(geometry: str):
+    if not geometry:
+        return None
+    text = str(geometry).strip()
+    # Tk can report a negative X position as '+-1166+265' when a window is on
+    # a monitor left of the primary display. Normalize those forms first.
+    text = text.replace('+-', '-').replace('-+', '-').replace('++', '+')
+    m = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', text)
+    if not m:
+        return None
+    try:
+        return {
+            "width": int(m.group(1)),
+            "height": int(m.group(2)),
+            "x": int(m.group(3)),
+            "y": int(m.group(4)),
+        }
+    except Exception:
+        return None
+
+
+def _monitor_rects_win32():
+    if os.name != 'nt':
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        MONITORINFOF_PRIMARY = 1
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", RECT),
+                ("rcWork", RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        monitors = []
+        callback_type = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            wintypes.HMONITOR,
+            wintypes.HDC,
+            ctypes.POINTER(RECT),
+            wintypes.LPARAM,
+        )
+
+        def _callback(hmonitor, _hdc, _lprc, _lparam):
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+                work = info.rcWork
+                monitors.append({
+                    "left": int(work.left),
+                    "top": int(work.top),
+                    "right": int(work.right),
+                    "bottom": int(work.bottom),
+                    "primary": bool(info.dwFlags & MONITORINFOF_PRIMARY),
+                })
+            return 1
+
+        user32.EnumDisplayMonitors(0, 0, callback_type(_callback), 0)
+        return monitors
+    except Exception as exc:
+        append_window_debug_log("monitor_enum_error", "", {"error": str(exc)})
+        return []
+
+
+def _monitor_signature(monitor):
+    return {
+        "left": int(monitor["left"]),
+        "top": int(monitor["top"]),
+        "right": int(monitor["right"]),
+        "bottom": int(monitor["bottom"]),
+        "primary": bool(monitor.get("primary", False)),
+    }
+
+
+def _monitor_width(monitor):
+    return max(1, int(monitor["right"]) - int(monitor["left"]))
+
+
+def _monitor_height(monitor):
+    return max(1, int(monitor["bottom"]) - int(monitor["top"]))
+
+
+def _rect_intersection_area(a, b):
+    left = max(a["left"], b["left"])
+    top = max(a["top"], b["top"])
+    right = min(a["right"], b["right"])
+    bottom = min(a["bottom"], b["bottom"])
+    if right <= left or bottom <= top:
+        return 0
+    return (right - left) * (bottom - top)
+
+
+def _find_best_monitor_for_rect(rect, monitors):
+    if not monitors:
+        return None
+    best = None
+    best_area = -1
+    for monitor in monitors:
+        area = _rect_intersection_area(rect, monitor)
+        if area > best_area:
+            best_area = area
+            best = monitor
+    if best is not None and best_area > 0:
+        return best
+    center_x = (rect["left"] + rect["right"]) / 2.0
+    center_y = (rect["top"] + rect["bottom"]) / 2.0
+    best = monitors[0]
+    best_dist = None
+    for monitor in monitors:
+        mon_center_x = (monitor["left"] + monitor["right"]) / 2.0
+        mon_center_y = (monitor["top"] + monitor["bottom"]) / 2.0
+        dist = (center_x - mon_center_x) ** 2 + (center_y - mon_center_y) ** 2
+        if best_dist is None or dist < best_dist:
+            best = monitor
+            best_dist = dist
+    return best
+
+
+def _match_saved_monitor(saved_monitor, monitors):
+    if not saved_monitor or not monitors:
+        return None
+    for monitor in monitors:
+        if all(int(monitor.get(key, 0)) == int(saved_monitor.get(key, 0)) for key in ("left", "top", "right", "bottom")):
+            return monitor
+    saved_width = int(saved_monitor.get("right", 0)) - int(saved_monitor.get("left", 0))
+    saved_height = int(saved_monitor.get("bottom", 0)) - int(saved_monitor.get("top", 0))
+    same_shape = [m for m in monitors if _monitor_width(m) == saved_width and _monitor_height(m) == saved_height]
+    if same_shape:
+        saved_left = int(saved_monitor.get("left", 0))
+        saved_top = int(saved_monitor.get("top", 0))
+        same_shape.sort(key=lambda m: abs(int(m["left"]) - saved_left) + abs(int(m["top"]) - saved_top))
+        return same_shape[0]
+    primary = [m for m in monitors if bool(m.get("primary", False))]
+    return primary[0] if primary else monitors[0]
+
+
+def _capture_window_state(win):
+    parsed = parse_geometry_string(win.geometry())
+    if not parsed:
+        return None
+    state = dict(parsed)
+    monitors = _monitor_rects_win32()
+    if monitors:
+        rect = {
+            "left": parsed["x"],
+            "top": parsed["y"],
+            "right": parsed["x"] + parsed["width"],
+            "bottom": parsed["y"] + parsed["height"],
+        }
+        monitor = _find_best_monitor_for_rect(rect, monitors)
+        if monitor:
+            state["monitor"] = _monitor_signature(monitor)
+            state["rel_x"] = parsed["x"] - int(monitor["left"])
+            state["rel_y"] = parsed["y"] - int(monitor["top"])
+            state["rel_x_ratio"] = state["rel_x"] / max(1, _monitor_width(monitor) - parsed["width"])
+            state["rel_y_ratio"] = state["rel_y"] / max(1, _monitor_height(monitor) - parsed["height"])
+    return state
+
+
+def normalize_window_state_for_display(win, state):
+    if not isinstance(state, dict):
+        return None
+    try:
+        parsed = {
+            "width": max(160, int(state.get("width", 0))),
+            "height": max(120, int(state.get("height", 0))),
+            "x": int(state.get("x", 0)),
+            "y": int(state.get("y", 0)),
+        }
+    except Exception:
+        return None
+    monitors = _monitor_rects_win32()
+    if monitors:
+        saved_monitor = state.get("monitor") if isinstance(state.get("monitor"), dict) else None
+        target_monitor = _match_saved_monitor(saved_monitor, monitors)
+        if target_monitor is None:
+            rect = {
+                "left": parsed["x"],
+                "top": parsed["y"],
+                "right": parsed["x"] + parsed["width"],
+                "bottom": parsed["y"] + parsed["height"],
+            }
+            target_monitor = _find_best_monitor_for_rect(rect, monitors)
+        if target_monitor is None:
+            target_monitor = monitors[0]
+        parsed["width"] = min(parsed["width"], _monitor_width(target_monitor))
+        parsed["height"] = min(parsed["height"], _monitor_height(target_monitor))
+        available_x = max(0, _monitor_width(target_monitor) - parsed["width"])
+        available_y = max(0, _monitor_height(target_monitor) - parsed["height"])
+        rel_x = state.get("rel_x")
+        rel_y = state.get("rel_y")
+        rel_x_ratio = state.get("rel_x_ratio")
+        rel_y_ratio = state.get("rel_y_ratio")
+        if rel_x is None and rel_x_ratio is not None:
+            rel_x = int(round(float(rel_x_ratio) * available_x))
+        if rel_y is None and rel_y_ratio is not None:
+            rel_y = int(round(float(rel_y_ratio) * available_y))
+        if rel_x is None:
+            rel_x = parsed["x"] - int(target_monitor["left"])
+        if rel_y is None:
+            rel_y = parsed["y"] - int(target_monitor["top"])
+        rel_x = max(0, min(int(rel_x), available_x))
+        rel_y = max(0, min(int(rel_y), available_y))
+        parsed["x"] = int(target_monitor["left"]) + rel_x
+        parsed["y"] = int(target_monitor["top"]) + rel_y
+        return parsed
+    return parsed
+
+
+def restore_window_geometry(win, state_key: str, default_geometry=None, minsize=None):
+    if minsize:
+        try:
+            win.minsize(int(minsize[0]), int(minsize[1]))
+        except Exception:
+            pass
+    if default_geometry:
+        try:
+            win.geometry(default_geometry)
+        except Exception:
+            pass
+
+    def _apply_saved_geometry():
+        state_map = load_window_state_map()
+        saved = state_map.get(state_key)
+        append_window_debug_log("restore_attempt", state_key, {"saved": saved, "monitors": _monitor_rects_win32(), "default_geometry": default_geometry})
+        if not saved:
+            return
+        normalized = normalize_window_state_for_display(win, saved)
+        append_window_debug_log("restore_normalized", state_key, {"saved": saved, "normalized": normalized, "monitors": _monitor_rects_win32()})
+        if not normalized:
+            return
+        try:
+            win.geometry(f'{normalized["width"]}x{normalized["height"]}+{normalized["x"]}+{normalized["y"]}')
+            append_window_debug_log("restore_applied", state_key, {"applied": normalized})
+        except Exception as exc:
+            append_window_debug_log("restore_error", state_key, {"error": str(exc), "normalized": normalized})
+
+    try:
+        win.after_idle(_apply_saved_geometry)
+    except Exception:
+        _apply_saved_geometry()
+
+
+def track_window_geometry(win, state_key: str):
+    if getattr(win, "_window_state_tracking_key", None) == state_key:
+        return
+    win._window_state_tracking_key = state_key
+    pending = {"id": None}
+
+    def _save_now():
+        try:
+            if not win.winfo_exists() or str(win.state()) in ("iconic", "withdrawn"):
+                return
+            state = _capture_window_state(win)
+            append_window_debug_log("save_attempt", state_key, {"geometry": win.geometry(), "state": state, "monitors": _monitor_rects_win32()})
+            if not state:
+                append_window_debug_log("save_parse_failed", state_key, {"geometry": win.geometry()})
+                return
+            state_map = load_window_state_map()
+            state_map[state_key] = state
+            save_window_state_map(state_map)
+            append_window_debug_log("save_applied", state_key, {"state": state})
+        except Exception as exc:
+            append_window_debug_log("save_error", state_key, {"error": str(exc)})
+
+    def _commit():
+        pending["id"] = None
+        _save_now()
+
+    def _schedule(_event=None):
+        try:
+            if pending["id"] is not None:
+                win.after_cancel(pending["id"])
+            pending["id"] = win.after(250, _commit)
+        except Exception:
+            pass
+
+    def _on_destroy(event=None):
+        try:
+            if event is not None and event.widget is not win:
+                return
+        except Exception:
+            pass
+        _save_now()
+
+    try:
+        win.bind("<Configure>", _schedule, add="+")
+        win.bind("<Map>", _schedule, add="+")
+        win.bind("<Destroy>", _on_destroy, add="+")
+        win.after(300, _save_now)
+    except Exception:
+        pass
+
+
+def remember_window_geometry(win, state_key: str, default_geometry=None, minsize=None):
+    append_window_debug_log("remember_window_geometry", state_key, {"default_geometry": default_geometry, "minsize": list(minsize) if minsize else None})
+    restore_window_geometry(win, state_key, default_geometry=default_geometry, minsize=minsize)
+    track_window_geometry(win, state_key)
+    return state_key
+
