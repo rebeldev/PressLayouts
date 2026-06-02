@@ -66,6 +66,7 @@ def build_new_layout_launcher(parent):
     root.title("New Layout")  
     root.geometry("760x420")  
     root.minsize(720, 380)  
+    remember_window_geometry(root, "new_layout_launcher", default_geometry="760x420", minsize=(720, 380))  
     frame = ttk.Frame(root, padding=16)  
     frame.pack(fill="both", expand=True)  
     # Press / Format  
@@ -229,6 +230,7 @@ def build_template_editor_launcher(parent):
     root.title("Template Editor")  
     root.geometry("680x360")  
     root.minsize(640, 320)  
+    remember_window_geometry(root, "template_editor_launcher", default_geometry="680x360", minsize=(640, 320))  
     frame = ttk.Frame(root, padding=16)  
     frame.pack(fill="both", expand=True)  
     frame.rowconfigure(2, weight=1)  
@@ -430,6 +432,19 @@ def build_main_launcher():
         build_new_layout_launcher(root)  
     def templates():  
         build_template_editor_launcher(root)  
+    def reset_window_positions():  
+        if not messagebox.askyesno(  
+            "Reset Window Positions",  
+            "Reset saved window positions for the current user?\n\nAll windows will reopen at their default sizes and locations next time.",  
+            parent=root,  
+        ):  
+            return  
+        clear_window_state()  
+        messagebox.showinfo(  
+            "Reset Window Positions",  
+            "Saved window positions were cleared for the current user.\n\nClose and reopen any currently open windows to use their default positions.",  
+            parent=root,  
+        )  
     def cleanup_old_layouts():  
         today = datetime.now().date()  
         stale_rows = []  
@@ -446,6 +461,7 @@ def build_main_launcher():
         dialog.transient(root)  
         dialog.geometry("920x420")  
         dialog.minsize(820, 360)  
+        remember_window_geometry(dialog, "cleanup_dialog", default_geometry="920x420", minsize=(820, 360))  
         dialog.grab_set()  
         outer = ttk.Frame(dialog, padding=16)  
         outer.pack(fill="both", expand=True)  
@@ -541,6 +557,7 @@ def build_main_launcher():
     ttk.Button(btns, text="Open", command=open_selected, width=12).pack(side="left", padx=(0, 8))  
     ttk.Button(btns, text="Templates", command=templates, width=12).pack(side="left", padx=(0, 8))  
     ttk.Button(btns, text="Cleanup", command=cleanup_old_layouts, width=12).pack(side="left", padx=(0, 8))  
+    ttk.Button(btns, text="Reset Windows", command=reset_window_positions, width=14).pack(side="left", padx=(0, 8))  
     ttk.Button(btns, text="Refresh", command=lambda: refresh(preserve_state=True), width=12).pack(side="left")  
     def on_close():  
         try:  
