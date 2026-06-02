@@ -126,7 +126,6 @@ def do_save(win, ctx):
     try:
         data = collect_layout_data(ctx)
         safe_write_json(ctx["file_path"], data)
-        messagebox.showinfo("Saved", f"Saved:\n{ctx['file_path']}")
         return True
     except Exception as e:
         messagebox.showerror("Save Failed", str(e))
@@ -158,7 +157,6 @@ def do_save_as(win, ctx):
         ctx["file_path"] = path
         ctx["layout_name"] = data["name"]
         win.title(f"{ctx['title_base']}  —  {os.path.basename(path)}")
-        messagebox.showinfo("Saved", f"Saved:\n{path}")
         return True
     except Exception as e:
         messagebox.showerror("Save As Failed", str(e))
