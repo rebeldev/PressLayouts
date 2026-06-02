@@ -54,6 +54,7 @@ def open_json_in_layout(root, json_path, template_mode=False):
     cfg["template_mode"] = bool(template_mode)  
     title = f"{press} - {fmt}"  
     win = tk.Toplevel(root)  
+    win.withdraw()  
     build_press_layout(  
         win,  
         title=title,  
@@ -219,6 +220,7 @@ def build_new_layout_launcher(parent):
             load_path=load_path,  
             load_as_copy=True  # NEW LAYOUT from template => copy  
         )  
+        root.destroy()  
     templates_listbox.bind("<Double-Button-1>", lambda e: on_new_or_open())  
     btn_row = ttk.Frame(frame)  
     btn_row.grid(row=4, column=0, columnspan=8, pady=(12, 0), sticky="w")  
@@ -270,6 +272,7 @@ def build_template_editor_launcher(parent):
             messagebox.showinfo("Select a Template", "Select a template to open.")  
             return  
         open_json_in_layout(parent, template_paths[sel[0]], template_mode=True)  
+        root.destroy()  
     def new_template():  
         press = press_var.get()  
         fmt = format_var.get()  
@@ -283,6 +286,7 @@ def build_template_editor_launcher(parent):
         cfg["template_mode"] = True  
         win = tk.Toplevel(parent)  
         build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=None, load_as_copy=False)  
+        root.destroy()  
     def delete_selected():
         sel = lb.curselection()
         if not sel:
@@ -432,19 +436,6 @@ def build_main_launcher():
         build_new_layout_launcher(root)  
     def templates():  
         build_template_editor_launcher(root)  
-    def reset_window_positions():  
-        if not messagebox.askyesno(  
-            "Reset Window Positions",  
-            "Reset saved window positions for the current user?\n\nAll windows will reopen at their default sizes and locations next time.",  
-            parent=root,  
-        ):  
-            return  
-        clear_window_state()  
-        messagebox.showinfo(  
-            "Reset Window Positions",  
-            "Saved window positions were cleared for the current user.\n\nClose and reopen any currently open windows to use their default positions.",  
-            parent=root,  
-        )  
     def cleanup_old_layouts():  
         today = datetime.now().date()  
         stale_rows = []  
@@ -557,7 +548,6 @@ def build_main_launcher():
     ttk.Button(btns, text="Open", command=open_selected, width=12).pack(side="left", padx=(0, 8))  
     ttk.Button(btns, text="Templates", command=templates, width=12).pack(side="left", padx=(0, 8))  
     ttk.Button(btns, text="Cleanup", command=cleanup_old_layouts, width=12).pack(side="left", padx=(0, 8))  
-    ttk.Button(btns, text="Reset Windows", command=reset_window_positions, width=14).pack(side="left", padx=(0, 8))  
     ttk.Button(btns, text="Refresh", command=lambda: refresh(preserve_state=True), width=12).pack(side="left")  
     def on_close():  
         try:  

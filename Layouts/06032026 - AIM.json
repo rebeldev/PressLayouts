@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "name": "P2 12D2C2A2 8F2G2U",
+  "name": "06032026 - AIM",
   "press": "Press 2",
   "format": "Broadsheet",
-  "saved_at": "2026-06-02T08:26:22",
-  "issue_date": "",
-  "product": "",
+  "saved_at": "2026-06-02T09:39:11",
+  "issue_date": "06/03/2026",
+  "product": "Anderson Main",
   "section_count": 2,
   "section_pages": [
     12,
@@ -138,5 +138,78 @@
         ]
       ]
     }
-  ]
+  ],
+  "color_cells": [
+    {
+      "unit": "A2",
+      "r": 0,
+      "c": 0
+    },
+    {
+      "unit": "A2",
+      "r": 0,
+      "c": 1
+    },
+    {
+      "unit": "A2",
+      "r": 1,
+      "c": 0
+    },
+    {
+      "unit": "A2",
+      "r": 1,
+      "c": 1
+    },
+    {
+      "unit": "C2",
+      "r": 0,
+      "c": 0
+    },
+    {
+      "unit": "C2",
+      "r": 1,
+      "c": 0
+    },
+    {
+      "unit": "C2",
+      "r": 1,
+      "c": 1
+    },
+    {
+      "unit": "D2",
+      "r": 0,
+      "c": 0
+    },
+    {
+      "unit": "D2",
+      "r": 0,
+      "c": 1
+    },
+    {
+      "unit": "D2",
+      "r": 1,
+      "c": 0
+    },
+    {
+      "unit": "D2",
+      "r": 1,
+      "c": 1
+    },
+    {
+      "unit": "F2",
+      "r": 0,
+      "c": 0
+    },
+    {
+      "unit": "F2",
+      "r": 1,
+      "c": 0
+    },
+    {
+      "unit": "F2",
+      "r": 1,
+      "c": 1
+    }
+  ],
+  "starter_format": "Standard"
 }

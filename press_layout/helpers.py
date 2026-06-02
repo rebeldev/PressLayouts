@@ -772,8 +772,10 @@ def create_press_unit(
 
     return unit_frame, section_entry, grid_entries, cell_overlays
 
+
 WINDOW_STATE_DIRNAME = "Press Layout"
 WINDOW_STATE_FILENAME = "window_state.json"
+WINDOW_DEBUG_FILENAME = "window_state_debug.log"
 
 
 def user_config_dir() -> str:
@@ -791,6 +793,25 @@ def window_state_file_path() -> str:
     return os.path.join(user_config_dir(), WINDOW_STATE_FILENAME)
 
 
+def window_debug_file_path() -> str:
+    return os.path.join(user_config_dir(), WINDOW_DEBUG_FILENAME)
+
+
+def append_window_debug_log(event_type: str, state_key: str, payload=None):
+    try:
+        entry = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "event": str(event_type or ""),
+            "state_key": str(state_key or ""),
+            "payload": payload if isinstance(payload, dict) else {"value": payload},
+        }
+        ensure_dir(user_config_dir())
+        with open(window_debug_file_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
 def load_window_state_map():
     data = safe_read_json(window_state_file_path())
     return data if isinstance(data, dict) else {}
@@ -802,28 +823,12 @@ def save_window_state_map(state_map):
     safe_write_json(window_state_file_path(), state_map)
 
 
-def clear_window_state(reset_debug: bool = False):
-    try:
-        path = window_state_file_path()
-        if os.path.exists(path):
-            os.remove(path)
-    except Exception:
-        pass
-    if reset_debug:
-        try:
-            debug_path = os.path.join(user_config_dir(), "window_state_debug.log")
-            if os.path.exists(debug_path):
-                os.remove(debug_path)
-        except Exception:
-            pass
-
-
 def parse_geometry_string(geometry: str):
     if not geometry:
         return None
     text = str(geometry).strip()
-    # Tk may report a negative X position as '+-1166+265' for windows on a
-    # monitor left of the primary display. Normalize those forms first.
+    # Tk can report a negative X position as '+-1166+265' when a window is on
+    # a monitor left of the primary display. Normalize those forms first.
     text = text.replace('+-', '-').replace('-+', '-').replace('++', '+')
     m = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', text)
     if not m:
@@ -890,7 +895,8 @@ def _monitor_rects_win32():
 
         user32.EnumDisplayMonitors(0, 0, callback_type(_callback), 0)
         return monitors
-    except Exception:
+    except Exception as exc:
+        append_window_debug_log("monitor_enum_error", "", {"error": str(exc)})
         return []
 
 
@@ -1045,30 +1051,49 @@ def restore_window_geometry(win, state_key: str, default_geometry=None, minsize=
             win.minsize(int(minsize[0]), int(minsize[1]))
         except Exception:
             pass
+
+    hidden_for_restore = False
+    try:
+        hidden_for_restore = str(win.state()) == "withdrawn"
+        if not hidden_for_restore:
+            win.withdraw()
+            hidden_for_restore = True
+    except Exception:
+        hidden_for_restore = False
+
     if default_geometry:
         try:
             win.geometry(default_geometry)
         except Exception:
             pass
 
+    def _finish_show():
+        try:
+            win.update_idletasks()
+        except Exception:
+            pass
+        if hidden_for_restore:
+            try:
+                win.deiconify()
+            except Exception:
+                pass
+
     def _apply_saved_geometry():
         state_map = load_window_state_map()
         saved = state_map.get(state_key)
-        if not saved:
-            return
-        normalized = normalize_window_state_for_display(win, saved)
-        if not normalized:
-            return
-        try:
-            win.geometry(f'{normalized["width"]}x{normalized["height"]}+{normalized["x"]}+{normalized["y"]}')
-        except Exception:
-            pass
+        if saved:
+            normalized = normalize_window_state_for_display(win, saved)
+            if normalized:
+                try:
+                    win.geometry(f'{normalized["width"]}x{normalized["height"]}+{normalized["x"]}+{normalized["y"]}')
+                except Exception:
+                    pass
+        _finish_show()
 
     try:
         win.after_idle(_apply_saved_geometry)
     except Exception:
         _apply_saved_geometry()
-
 
 def track_window_geometry(win, state_key: str):
     if getattr(win, "_window_state_tracking_key", None) == state_key:
@@ -1081,13 +1106,16 @@ def track_window_geometry(win, state_key: str):
             if not win.winfo_exists() or str(win.state()) in ("iconic", "withdrawn"):
                 return
             state = _capture_window_state(win)
+            append_window_debug_log("save_attempt", state_key, {"geometry": win.geometry(), "state": state, "monitors": _monitor_rects_win32()})
             if not state:
+                append_window_debug_log("save_parse_failed", state_key, {"geometry": win.geometry()})
                 return
             state_map = load_window_state_map()
             state_map[state_key] = state
             save_window_state_map(state_map)
-        except Exception:
-            pass
+            append_window_debug_log("save_applied", state_key, {"state": state})
+        except Exception as exc:
+            append_window_debug_log("save_error", state_key, {"error": str(exc)})
 
     def _commit():
         pending["id"] = None
@@ -1119,6 +1147,8 @@ def track_window_geometry(win, state_key: str):
 
 
 def remember_window_geometry(win, state_key: str, default_geometry=None, minsize=None):
+    append_window_debug_log("remember_window_geometry", state_key, {"default_geometry": default_geometry, "minsize": list(minsize) if minsize else None})
     restore_window_geometry(win, state_key, default_geometry=default_geometry, minsize=minsize)
     track_window_geometry(win, state_key)
     return state_key
+

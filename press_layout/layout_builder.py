@@ -26,6 +26,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     win.title(title_base)
 
     template_mode = bool(config.get("template_mode", False))
+    window_state_key = "template_layout_window" if template_mode else "layout_window"
+    has_saved_window_state = bool(load_window_state_map().get(window_state_key))
 
     header_frame = ttk.Frame(win, padding=(16, 12, 16, 8))
     header_frame.pack(fill="x")
@@ -283,12 +285,14 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         ok = do_save(win, ctx)
         if ok:
             _persist_starter_format_to_file()
+            win.destroy()
         return ok
 
     def do_save_as_with_starter():
         ok = do_save_as(win, ctx)
         if ok:
             _persist_starter_format_to_file()
+            win.destroy()
         return ok
 
     def _starter_sheet_fields():
@@ -1196,9 +1200,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     enable_arrow_navigation(focus_list, units, config.get("press_name", ""))
 
     win.after(50, issue_entry.focus_set)
-    apply_window_sizing(win, config)
+    if not has_saved_window_state:
+        apply_window_sizing(win, config)
     remember_window_geometry(
         win,
-        "template_layout_window" if template_mode else "layout_window",
+        window_state_key,
     )
     return units
