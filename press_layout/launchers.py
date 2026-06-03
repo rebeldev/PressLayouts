@@ -53,15 +53,16 @@ def open_json_in_layout(root, json_path, template_mode=False):
     cfg["section_pages"] = data.get("section_pages", [min_pages_for_format(fmt)])  
     cfg["template_mode"] = bool(template_mode)  
     title = f"{press} - {fmt}"  
-    win = tk.Toplevel(root)  
-    win.withdraw()  
-    build_press_layout(  
-        win,  
-        title=title,  
-        config=cfg,  
-        load_path=json_path,  
-        load_as_copy=False  
-    )  
+    win = tk.Toplevel(root)
+    win.withdraw()
+    build_press_layout(
+        win,
+        title=title,
+        config=cfg,
+        load_path=json_path,
+        load_as_copy=False,
+    )
+    return win
 def build_new_layout_launcher(parent):  
     root = tk.Toplevel(parent)  
     root.title("New Layout")  
@@ -227,72 +228,164 @@ def build_new_layout_launcher(parent):
     ttk.Button(btn_row, text="New / Open", command=on_new_or_open, width=14).pack(side="left", padx=(0, 8))  
     ttk.Button(btn_row, text="Refresh Templates", command=refresh_templates, width=16).pack(side="left")  
     return root  
-def build_template_editor_launcher(parent):  
-    root = tk.Toplevel(parent)  
-    root.title("Template Editor")  
-    root.geometry("680x360")  
-    root.minsize(640, 320)  
-    remember_window_geometry(root, "template_editor_launcher", default_geometry="680x360", minsize=(640, 320))  
-    frame = ttk.Frame(root, padding=16)  
-    frame.pack(fill="both", expand=True)  
-    frame.rowconfigure(2, weight=1)  
-    frame.columnconfigure(1, weight=1)  
-    ttk.Label(frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", pady=8)  
-    press_var = tk.StringVar(value="Press 1")  
-    press_combo = ttk.Combobox(frame, textvariable=press_var, values=["Press 1", "Press 2"], state="readonly", width=16)  
-    press_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))  
-    ttk.Label(frame, text="Format:", font=(None, 11, "bold")).grid(row=1, column=0, sticky="w", pady=8)  
-    format_var = tk.StringVar(value="Broadsheet")  
-    format_combo = ttk.Combobox(frame, textvariable=format_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=16)  
-    format_combo.grid(row=1, column=1, sticky="w", padx=(8, 0))  
-    ttk.Label(frame, text="Templates:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="nw", pady=(8, 0))  
-    list_frame = ttk.Frame(frame)  
-    list_frame.grid(row=2, column=1, sticky="nsew", pady=(8, 0))  
-    list_frame.rowconfigure(0, weight=1)  
-    list_frame.columnconfigure(0, weight=1)  
-    lb = tk.Listbox(list_frame, height=10, exportselection=False)  
-    lb.grid(row=0, column=0, sticky="nsew")  
-    sb = ttk.Scrollbar(list_frame, orient="vertical", command=lb.yview)  
-    sb.grid(row=0, column=1, sticky="ns")  
-    lb.configure(yscrollcommand=sb.set)  
-    template_paths = []  
-    def refresh():  
-        lb.delete(0, "end")  
-        template_paths.clear()  
-        press = press_var.get()  
-        fmt = format_var.get()  
-        for disp, path in list_json_files(TEMPLATE_DIR):  
-            data = safe_read_json(path)  
-            if data and data.get("press") == press and data.get("format") == fmt:  
-                lb.insert("end", disp)  
-                template_paths.append(path)  
-    def open_selected():  
-        sel = lb.curselection()  
-        if not sel:  
-            messagebox.showinfo("Select a Template", "Select a template to open.")  
-            return  
-        open_json_in_layout(parent, template_paths[sel[0]], template_mode=True)  
-        root.destroy()  
-    def new_template():  
-        press = press_var.get()  
-        fmt = format_var.get()  
-        base_cfg = CONFIG_MAP.get((press, fmt))  
-        if not base_cfg:  
-            messagebox.showwarning("Not Configured", f"{press} - {fmt} not configured.")  
-            return  
-        cfg = dict(base_cfg)  
-        cfg["section_count"] = 1  
-        cfg["section_pages"] = [min_pages_for_format(fmt)]  
-        cfg["template_mode"] = True  
-        win = tk.Toplevel(parent)  
-        build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=None, load_as_copy=False)  
-        root.destroy()  
+def build_template_editor_launcher(parent):
+    root = tk.Toplevel(parent)
+    root.title("Template Editor")
+    root.geometry("760x420")
+    root.minsize(720, 380)
+    remember_window_geometry(root, "template_editor_launcher", default_geometry="760x420", minsize=(720, 380))
+    frame = ttk.Frame(root, padding=16)
+    frame.pack(fill="both", expand=True)
+    frame.rowconfigure(2, weight=1)
+    frame.columnconfigure(0, weight=1)
+
+    filter_frame = ttk.Frame(frame)
+    filter_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    filter_frame.columnconfigure(3, weight=1)
+    ttk.Label(filter_frame, text="Filter:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    search_var = tk.StringVar(value="")
+    search_entry = ttk.Entry(filter_frame, textvariable=search_var)
+    search_entry.grid(row=0, column=1, sticky="ew", padx=(8, 8))
+    ttk.Label(filter_frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=2, sticky="w")
+    press_var = tk.StringVar(value="All")
+    press_combo = ttk.Combobox(filter_frame, textvariable=press_var, values=["All", "Press 1", "Press 2"], state="readonly", width=12)
+    press_combo.grid(row=0, column=3, sticky="w", padx=(8, 8))
+    ttk.Label(filter_frame, text="Format:", font=(None, 11, "bold")).grid(row=0, column=4, sticky="w")
+    format_var = tk.StringVar(value="All")
+    format_combo = ttk.Combobox(filter_frame, textvariable=format_var, values=["All", "Broadsheet", "Tab", "8 up"], state="readonly", width=12)
+    format_combo.grid(row=0, column=5, sticky="w", padx=(8, 0))
+    search_var.trace_add("write", lambda *_: refresh())
+    press_var.trace_add("write", lambda *_: refresh())
+    format_var.trace_add("write", lambda *_: refresh())
+
+    list_frame = ttk.Frame(frame)
+    list_frame.grid(row=1, column=0, sticky="nsew")
+    list_frame.rowconfigure(0, weight=1)
+    list_frame.columnconfigure(0, weight=1)
+
+    columns = ("name", "press", "format", "saved")
+    tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="browse")
+    tree.grid(row=0, column=0, sticky="nsew")
+    vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+    vsb.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=vsb.set)
+
+    tree.heading("name", text="Template Name")
+    tree.heading("press", text="Press")
+    tree.heading("format", text="Format")
+    tree.heading("saved", text="Last Saved")
+    tree.column("name", width=280, anchor="w")
+    tree.column("press", width=90, anchor="center")
+    tree.column("format", width=120, anchor="center")
+    tree.column("saved", width=170, anchor="center")
+
+    template_rows = []
+    row_by_iid = {}
+    sort_state = {"col": None, "desc": False}
+
+    def sort_rows(rows):
+        col = sort_state.get("col")
+        if not col:
+            return rows
+
+        def keyfunc(r):
+            if col == "name":
+                return (r["name"] or "").lower()
+            if col == "press":
+                return (r["press"] or "").lower()
+            if col == "format":
+                return (r["format"] or "").lower()
+            if col == "saved":
+                return r["saved_dt"] or datetime.min
+            return ""
+
+        return sorted(rows, key=keyfunc, reverse=sort_state["desc"])
+
+    def load_rows(rows):
+        tree.delete(*tree.get_children())
+        row_by_iid.clear()
+        for row in rows:
+            iid = row["path"]
+            tree.insert("", "end", iid=iid, values=(row["name"], row["press"], row["format"], row["saved_disp"]))
+            row_by_iid[iid] = row
+
+    def _matches_template_filter(row):
+        search_text = (search_var.get() or "").strip().lower()
+        press_filter = (press_var.get() or "All").strip()
+        format_filter = (format_var.get() or "All").strip()
+        if search_text:
+            searchable = " ".join([row.get("name", ""), row.get("press", ""), row.get("format", "")]).lower()
+            if search_text not in searchable:
+                return False
+        if press_filter != "All" and row.get("press", "") != press_filter:
+            return False
+        if format_filter != "All" and row.get("format", "") != format_filter:
+            return False
+        return True
+
+    def refresh():
+        template_rows.clear()
+        for disp, path in list_json_files(TEMPLATE_DIR):
+            data = safe_read_json(path)
+            name = os.path.splitext(os.path.basename(path))[0]
+            press = ""
+            fmt = ""
+            if isinstance(data, dict):
+                name = data.get("name") or name
+                press = data.get("press") or ""
+                fmt = data.get("format") or ""
+            try:
+                saved_dt = datetime.fromtimestamp(os.path.getmtime(path))
+                saved_disp = saved_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                saved_dt = None
+                saved_disp = ""
+            row = {
+                "path": path,
+                "name": name,
+                "press": press,
+                "format": fmt,
+                "saved_dt": saved_dt,
+                "saved_disp": saved_disp,
+            }
+            if _matches_template_filter(row):
+                template_rows.append(row)
+        load_rows(sort_rows(list(template_rows)))
+
+    def sort_by(col):
+        if sort_state["col"] == col:
+            sort_state["desc"] = not sort_state["desc"]
+        else:
+            sort_state["col"] = col
+            sort_state["desc"] = False
+        refresh()
+
+    tree.heading("name", command=lambda: sort_by("name"))
+    tree.heading("press", command=lambda: sort_by("press"))
+    tree.heading("format", command=lambda: sort_by("format"))
+    tree.heading("saved", command=lambda: sort_by("saved"))
+
+    def selected_path():
+        sel = tree.selection()
+        return sel[0] if sel else None
+
+    def open_selected():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Template", "Select a template to open.")
+            return
+        open_json_in_layout(parent, path, template_mode=True)
+        root.destroy()
+
+    def new_template():
+        build_new_layout_launcher(root)
+        root.destroy()
+
     def delete_selected():
-        sel = lb.curselection()
-        if not sel:
+        path = selected_path()
+        if not path:
             messagebox.showinfo("Select a Template", "Select a template to delete.")
             return
-        path = template_paths[sel[0]]
         name = os.path.basename(path)
         if not messagebox.askyesno(
             "Delete Template",
@@ -306,17 +399,22 @@ def build_template_editor_launcher(parent):
             messagebox.showerror("Delete Template", f"Could not delete template:\n{exc}", parent=root)
             return
         refresh()
-    press_combo.bind("<<ComboboxSelected>>", lambda e: refresh())  
-    format_combo.bind("<<ComboboxSelected>>", lambda e: refresh())  
-    lb.bind("<Double-Button-1>", lambda e: open_selected())  
-    btns = ttk.Frame(frame)  
-    btns.grid(row=3, column=0, columnspan=2, pady=12, sticky="w")  
-    ttk.Button(btns, text="New Template", command=new_template, width=14).pack(side="left", padx=(0, 8))  
-    ttk.Button(btns, text="Open Template", command=open_selected, width=14).pack(side="left", padx=(0, 8))  
-    ttk.Button(btns, text="Delete", command=delete_selected, width=10).pack(side="left", padx=(0, 8))
-    ttk.Button(btns, text="Refresh", command=refresh, width=10).pack(side="left")  
-    refresh()  
-    return root  
+
+    tree.bind("<Double-Button-1>", lambda e: open_selected())
+    btns = ttk.Frame(frame)
+    btns.grid(row=2, column=0, pady=12, sticky="ew")
+    btns.columnconfigure(0, weight=1)
+    left_btns = ttk.Frame(btns)
+    left_btns.grid(row=0, column=0, sticky="w")
+    right_btns = ttk.Frame(btns)
+    right_btns.grid(row=0, column=1, sticky="e")
+    ttk.Button(left_btns, text="New Template", command=new_template, width=14).pack(side="left", padx=(0, 8))
+    ttk.Button(left_btns, text="Open Template", command=open_selected, width=14).pack(side="left", padx=(0, 8))
+    ttk.Button(left_btns, text="Delete", command=delete_selected, width=10).pack(side="left", padx=(0, 8))
+    ttk.Button(right_btns, text="Refresh", command=refresh, width=10).pack(side="right")
+    refresh()
+    return root
+
 def build_main_launcher():  
     ensure_dir(LAYOUTS_DIR)  
     ensure_dir(TEMPLATE_DIR)  
@@ -325,16 +423,36 @@ def build_main_launcher():
     root.geometry("980x480")  
     root.minsize(920, 420)  
     remember_window_geometry(root, "main_launcher", default_geometry="980x480", minsize=(920, 420))  
-    frame = ttk.Frame(root, padding=16)  
-    frame.pack(fill="both", expand=True)  
-    frame.rowconfigure(1, weight=1)  
-    frame.columnconfigure(0, weight=1)  
-    ttk.Label(frame, text="Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")  
-    columns = ("issue", "product", "press", "format", "saved")  
-    tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")  
-    tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))  
-    vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)  
-    vsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))  
+    frame = ttk.Frame(root, padding=16)
+    frame.pack(fill="both", expand=True)
+    frame.rowconfigure(2, weight=1)
+    frame.columnconfigure(0, weight=1)
+    ttk.Label(frame, text="Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    filter_frame = ttk.Frame(frame)
+    filter_frame.grid(row=1, column=0, sticky="ew", pady=(8, 8))
+    filter_frame.columnconfigure(5, weight=1)
+    ttk.Label(filter_frame, text="Search:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    search_var = tk.StringVar(value="")
+    search_entry = ttk.Entry(filter_frame, textvariable=search_var)
+    search_entry.grid(row=0, column=1, sticky="ew", padx=(8, 12))
+    ttk.Label(filter_frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=2, sticky="w")
+    press_var = tk.StringVar(value="All")
+    press_combo = ttk.Combobox(filter_frame, textvariable=press_var, values=["All", "Press 1", "Press 2"], state="readonly", width=12)
+    press_combo.grid(row=0, column=3, sticky="w", padx=(8, 12))
+    ttk.Label(filter_frame, text="Format:", font=(None, 11, "bold")).grid(row=0, column=4, sticky="w")
+    format_var = tk.StringVar(value="All")
+    format_combo = ttk.Combobox(filter_frame, textvariable=format_var, values=["All", "Broadsheet", "Tab", "8 up"], state="readonly", width=12)
+    format_combo.grid(row=0, column=5, sticky="w", padx=(8, 12))
+    ttk.Label(filter_frame, text="Issue Date:", font=(None, 11, "bold")).grid(row=0, column=6, sticky="w")
+    issue_date_var = tk.StringVar(value="All")
+    issue_date_combo = ttk.Combobox(filter_frame, textvariable=issue_date_var, values=["All"], state="readonly", width=16)
+    issue_date_combo.grid(row=0, column=7, sticky="w", padx=(8, 0))
+
+    columns = ("issue", "product", "press", "format", "saved")
+    tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+    tree.grid(row=2, column=0, sticky="nsew", pady=(0, 0))
+    vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+    vsb.grid(row=2, column=1, sticky="ns", pady=(0, 0))
     tree.configure(yscrollcommand=vsb.set)  
     tree.heading("issue", text="Issue Date")  
     tree.heading("product", text="Product")  
@@ -391,12 +509,50 @@ def build_main_launcher():
                 tree.yview_moveto(preserve_yview[0])  
             except Exception:  
                 pass  
-    def refresh(preserve_state=True):  
-        selected = tree.selection() if preserve_state else ()  
-        focused = tree.focus() if preserve_state else None  
-        yview = tree.yview() if preserve_state else None  
-        rows = sort_rows(build_layout_rows())  
-        load_rows_into_tree(rows, preserve_selection=selected, preserve_focus=focused, preserve_yview=yview)  
+    def _matches_layout_filter(row):
+        search_text = (search_var.get() or "").strip().lower()
+        press_filter = (press_var.get() or "All").strip()
+        format_filter = (format_var.get() or "All").strip()
+        issue_filter = (issue_date_var.get() or "All").strip()
+        if search_text:
+            searchable = " ".join([row.get("issue_disp", ""), row.get("product", ""), row.get("press", ""), row.get("format", "")]).lower()
+            if search_text not in searchable:
+                return False
+        if press_filter != "All" and row.get("press", "") != press_filter:
+            return False
+        if format_filter != "All" and row.get("format", "") != format_filter:
+            return False
+        if issue_filter != "All" and row.get("issue_disp", "") != issue_filter:
+            return False
+        return True
+
+    def _matches_layout_filter_no_issue(row):
+        search_text = (search_var.get() or "").strip().lower()
+        press_filter = (press_var.get() or "All").strip()
+        format_filter = (format_var.get() or "All").strip()
+        if search_text:
+            searchable = " ".join([row.get("issue_disp", ""), row.get("product", ""), row.get("press", ""), row.get("format", "")]).lower()
+            if search_text not in searchable:
+                return False
+        if press_filter != "All" and row.get("press", "") != press_filter:
+            return False
+        if format_filter != "All" and row.get("format", "") != format_filter:
+            return False
+        return True
+
+    def refresh(preserve_state=True):
+        selected = tree.selection() if preserve_state else ()
+        focused = tree.focus() if preserve_state else None
+        yview = tree.yview() if preserve_state else None
+        all_rows = build_layout_rows()
+        date_values = [row.get("issue_disp", "") for row in all_rows if _matches_layout_filter_no_issue(row) and row.get("issue_disp")]
+        unique_dates = ["All"] + sorted(set(date_values), key=lambda t: datetime.strptime(t, "%m/%d/%Y") if parse_issue_date_flexible(t) else t)
+        issue_date_combo.configure(values=unique_dates)
+        if issue_date_var.get() not in unique_dates:
+            issue_date_var.set("All")
+        rows = [row for row in all_rows if _matches_layout_filter(row)]
+        rows = sort_rows(rows)
+        load_rows_into_tree(rows, preserve_selection=selected, preserve_focus=focused, preserve_yview=yview)
     def schedule_refresh():  
         try:  
             if refresh_job["id"] is not None:  
@@ -411,18 +567,22 @@ def build_main_launcher():
         finally:  
             if root.winfo_exists():  
                 schedule_refresh()  
-    def sort_by(col):  
-        if sort_state["col"] == col:  
-            sort_state["desc"] = not sort_state["desc"]  
-        else:  
-            sort_state["col"] = col  
-            sort_state["desc"] = False  
-        refresh(preserve_state=True)  
-    tree.heading("issue", command=lambda: sort_by("issue"))  
-    tree.heading("product", command=lambda: sort_by("product"))  
-    tree.heading("press", command=lambda: sort_by("press"))  
-    tree.heading("format", command=lambda: sort_by("format"))  
-    tree.heading("saved", command=lambda: sort_by("saved"))  
+    def sort_by(col):
+        if sort_state["col"] == col:
+            sort_state["desc"] = not sort_state["desc"]
+        else:
+            sort_state["col"] = col
+            sort_state["desc"] = False
+        refresh(preserve_state=True)
+    tree.heading("issue", command=lambda: sort_by("issue"))
+    tree.heading("product", command=lambda: sort_by("product"))
+    tree.heading("press", command=lambda: sort_by("press"))
+    tree.heading("format", command=lambda: sort_by("format"))
+    tree.heading("saved", command=lambda: sort_by("saved"))
+    search_var.trace_add("write", lambda *_: refresh(preserve_state=False))
+    press_var.trace_add("write", lambda *_: refresh(preserve_state=False))
+    format_var.trace_add("write", lambda *_: refresh(preserve_state=False))
+    issue_date_var.trace_add("write", lambda *_: refresh(preserve_state=False))
     def selected_path():  
         sel = tree.selection()  
         return sel[0] if sel else None  
@@ -434,6 +594,20 @@ def build_main_launcher():
         open_json_in_layout(root, path, template_mode=False)  
     def new_layout():  
         build_new_layout_launcher(root)  
+    def delete_selected():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Layout", "Select a layout to delete.")
+            return
+        name = os.path.basename(path)
+        if not messagebox.askyesno("Delete Layout", f"Delete the selected layout file:\n\n{name}"):
+            return
+        try:
+            os.remove(path)
+        except Exception as exc:
+            messagebox.showerror("Delete Failed", f"Could not delete {name}:\n{exc}")
+            return
+        refresh(preserve_state=False)
     def templates():  
         build_template_editor_launcher(root)  
     def cleanup_old_layouts():  
@@ -542,13 +716,58 @@ def build_main_launcher():
         ttk.Button(btns, text="Delete", command=delete_selected_cleanup, width=12).pack(side="left", padx=(0, 8))  
         ttk.Button(btns, text="Cancel", command=dialog.destroy, width=12).pack(side="left")  
     tree.bind("<Double-Button-1>", lambda e: open_selected())  
-    btns = ttk.Frame(frame)  
-    btns.grid(row=2, column=0, pady=12, sticky="w")  
-    ttk.Button(btns, text="New", command=new_layout, width=12).pack(side="left", padx=(0, 8))  
-    ttk.Button(btns, text="Open", command=open_selected, width=12).pack(side="left", padx=(0, 8))  
-    ttk.Button(btns, text="Templates", command=templates, width=12).pack(side="left", padx=(0, 8))  
-    ttk.Button(btns, text="Cleanup", command=cleanup_old_layouts, width=12).pack(side="left", padx=(0, 8))  
-    ttk.Button(btns, text="Refresh", command=lambda: refresh(preserve_state=True), width=12).pack(side="left")  
+    btns = ttk.Frame(frame)
+    btns.grid(row=3, column=0, columnspan=2, pady=12, sticky="ew")
+    btns.columnconfigure(0, weight=1)
+    left_btns = ttk.Frame(btns)
+    left_btns.grid(row=0, column=0, sticky="w")
+    right_btns = ttk.Frame(btns)
+    right_btns.grid(row=0, column=1, sticky="e")
+    ttk.Button(left_btns, text="New", command=new_layout, width=12).pack(side="left", padx=(0, 8))
+    ttk.Button(left_btns, text="Open", command=open_selected, width=12).pack(side="left", padx=(0, 8))
+    ttk.Button(right_btns, text="Templates", command=templates, width=12).pack(side="right", padx=(0, 8))
+    ttk.Button(right_btns, text="Delete", command=delete_selected, width=12).pack(side="right", padx=(0, 8))
+    ttk.Button(right_btns, text="Cleanup", command=cleanup_old_layouts, width=12).pack(side="right", padx=(0, 8))
+    ttk.Button(right_btns, text="Refresh", command=lambda: refresh(preserve_state=True), width=12).pack(side="right")
+    # Print buttons for selected layout
+    def _print_selected_starter():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Layout", "Select a layout to print.")
+            return
+        try:
+            win = open_json_in_layout(root, path, template_mode=False)
+            if hasattr(win, "print_starter"):
+                win.print_starter()
+        except Exception as e:
+            messagebox.showerror("Print Failed", str(e))
+        finally:
+            try:
+                if win and win.winfo_exists():
+                    win.destroy()
+            except Exception:
+                pass
+
+    def _print_selected_layout():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Layout", "Select a layout to print.")
+            return
+        try:
+            win = open_json_in_layout(root, path, template_mode=False)
+            if hasattr(win, "print_layout"):
+                win.print_layout()
+        except Exception as e:
+            messagebox.showerror("Print Failed", str(e))
+        finally:
+            try:
+                if win and win.winfo_exists():
+                    win.destroy()
+            except Exception:
+                pass
+
+    ttk.Button(left_btns, text="Print Starter", command=_print_selected_starter, width=14).pack(side="left", padx=(8, 8))
+    ttk.Button(left_btns, text="Print Layout", command=_print_selected_layout, width=12).pack(side="left", padx=(0, 8))
     def on_close():  
         try:  
             if refresh_job["id"] is not None:  

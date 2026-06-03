@@ -631,8 +631,33 @@ def create_press_unit(
 ):
     unit_frame = ttk.Frame(parent, style="Unit.TFrame", padding=unit_padding)
 
-    section_entry = ttk.Entry(unit_frame, width=8, justify="center", font=(None, 10))
+    section_var = tk.StringVar()
+    section_entry = ttk.Entry(
+        unit_frame,
+        width=8,
+        justify="center",
+        font=(None, 10),
+        textvariable=section_var,
+    )
     section_entry.pack(pady=(0, 6))
+
+    def _force_section_uppercase(*_):
+        value = section_var.get()
+        upper = value.upper()
+        if value == upper:
+            return
+        try:
+            cursor = section_entry.index(tk.INSERT)
+        except Exception:
+            cursor = None
+        section_var.set(upper)
+        if cursor is not None:
+            try:
+                section_entry.icursor(min(cursor, len(upper)))
+            except Exception:
+                pass
+
+    section_var.trace_add("write", _force_section_uppercase)
 
     box_frame = ttk.Frame(unit_frame, style="Box.TFrame")
     box_frame.pack(fill="both", expand=True)
@@ -1085,7 +1110,25 @@ def restore_window_geometry(win, state_key: str, default_geometry=None, minsize=
             normalized = normalize_window_state_for_display(win, saved)
             if normalized:
                 try:
-                    win.geometry(f'{normalized["width"]}x{normalized["height"]}+{normalized["x"]}+{normalized["y"]}')
+                    # Instead of forcing the saved width/height, keep the window
+                    # sized to its requested content size but position it at the
+                    # saved x,y so the last saved position is respected.
+                    try:
+                        win.update_idletasks()
+                    except Exception:
+                        pass
+                    req_w = win.winfo_reqwidth() if hasattr(win, 'winfo_reqwidth') else normalized["width"]
+                    req_h = win.winfo_reqheight() if hasattr(win, 'winfo_reqheight') else normalized["height"]
+                    # clamp to current screen size to avoid off-screen sizing
+                    try:
+                        screen_w = win.winfo_screenwidth()
+                        screen_h = win.winfo_screenheight()
+                    except Exception:
+                        screen_w = normalized.get("width", req_w)
+                        screen_h = normalized.get("height", req_h)
+                    w = min(req_w, max(100, screen_w))
+                    h = min(req_h, max(100, screen_h))
+                    win.geometry(f'{w}x{h}+{normalized["x"]}+{normalized["y"]}')
                 except Exception:
                     pass
         _finish_show()
