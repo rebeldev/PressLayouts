@@ -6,6 +6,65 @@ from tkinter import filedialog, messagebox
 from .config import LAYOUTS_DIR, TEMPLATE_DIR
 from .helpers import *
 
+
+def _set_widget_value(widget, value):
+    """Set Entry/Combobox-like widget text safely."""
+    value = "" if value is None else str(value).strip()
+    try:
+        widget.set(value)
+        return
+    except Exception:
+        pass
+    try:
+        widget.delete(0, "end")
+        widget.insert(0, value)
+    except Exception:
+        pass
+
+def _normalize_template_data(data):
+    """Canonicalize template section names/assignments to S1..S4 style."""
+    if not isinstance(data, dict):
+        return data
+    normalized = dict(data)
+    try:
+        section_count = max(1, min(4, int(normalized.get("section_count", 1))))
+    except Exception:
+        section_count = 1
+    source_names = normalized.get("section_names") or []
+    canonical_names = [f"S{i+1}" for i in range(section_count)]
+    alias_to_canonical = {}
+    for i in range(section_count):
+        canonical = canonical_names[i]
+        alias_to_canonical[canonical.upper()] = canonical
+        alias_to_canonical[str(i + 1)] = canonical
+        alias_to_canonical[chr(ord('A') + i)] = canonical
+        try:
+            existing_name = (source_names[i] or "").strip().upper()
+        except Exception:
+            existing_name = ""
+        if existing_name:
+            alias_to_canonical[existing_name] = canonical
+    normalized["section_names"] = canonical_names
+    normalized_units = []
+    for unit in normalized.get("units", []):
+        if not isinstance(unit, dict):
+            normalized_units.append(unit)
+            continue
+        updated = dict(unit)
+        section_text = str(updated.get("section", "") or "").strip()
+        if section_text:
+            canonical = alias_to_canonical.get(section_text.upper())
+            if canonical is None:
+                section_id = parse_section_id(section_text)
+                if section_id is not None and 1 <= section_id <= section_count:
+                    canonical = f"S{section_id}"
+            updated["section"] = canonical or section_text
+        else:
+            updated["section"] = ""
+        normalized_units.append(updated)
+    normalized["units"] = normalized_units
+    return normalized
+
 def collect_layout_data(ctx):
     now = datetime.now().isoformat(timespec="seconds")
     data = {
@@ -123,8 +182,7 @@ def populate_layout_from_data(ctx, data):
         if label not in unit_map:
             continue
         u = unit_map[label]
-        u["section_entry"].delete(0, "end")
-        u["section_entry"].insert(0, udata.get("section", ""))
+        _set_widget_value(u["section_entry"], udata.get("section", ""))
 
         grid = udata.get("grid", [])
         for r, row in enumerate(grid):
@@ -136,6 +194,17 @@ def populate_layout_from_data(ctx, data):
                 cell = u["entries"][r][c]
                 cell.delete(0, "end")
                 cell.insert(0, val)
+
+    if ctx.get("_capture_unit_section_assignments"):
+        try:
+            ctx["_capture_unit_section_assignments"]()
+        except Exception:
+            pass
+    if ctx.get("_refresh_unit_section_choices"):
+        try:
+            ctx["_refresh_unit_section_choices"]()
+        except Exception:
+            pass
 
     # ---- load per-cell color selection (layouts only) ----
     if not ctx.get("template_mode", False):
@@ -154,6 +223,8 @@ def do_save(win, ctx):
         return do_save_as(win, ctx)
     try:
         data = collect_layout_data(ctx)
+        if ctx.get("template_mode", False):
+            data = _normalize_template_data(data)
         safe_write_json(ctx["file_path"], data)
         
         # If saving a layout (not template mode) and imposition doesn't match existing template, ask to save as template
@@ -194,6 +265,8 @@ def do_save_as(win, ctx):
 
     try:
         data = collect_layout_data(ctx)
+        if ctx.get("template_mode", False):
+            data = _normalize_template_data(data)
         if not data.get("name"):
             data["name"] = os.path.splitext(os.path.basename(path))[0]
         safe_write_json(path, data)
@@ -284,6 +357,7 @@ def save_template_from_layout(ctx):
         
         # Collect data but strip layout-specific fields
         data = collect_layout_data(ctx)
+        data = _normalize_template_data(data)
         
         # Remove layout-specific fields
         data.pop("issue_date", None)

@@ -127,15 +127,98 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             choices.append(name)
         return choices
 
+    unit_section_assignments = {}
+
+    def _section_display_name(section_id, names_snapshot=None):
+        try:
+            sid = int(section_id)
+        except Exception:
+            return ""
+        if sid < 1 or sid > 4:
+            return ""
+        try:
+            count = max(1, min(4, int(section_count_var.get())))
+        except Exception:
+            count = 1
+        if sid > count:
+            return ""
+        try:
+            if names_snapshot is not None:
+                name = (names_snapshot[sid - 1] or "").strip().upper()
+            else:
+                name = (section_name_vars[sid - 1].get() or "").strip().upper()
+        except Exception:
+            name = ""
+        if not name:
+            name = f"S{sid}" if template_mode else chr(ord("A") + sid - 1)
+        return name
+
+    def _resolve_section_assignment_id(text, names_snapshot=None):
+        raw = (text or "").strip().upper()
+        if not raw:
+            return None
+        parsed = parse_section_id(raw)
+        if parsed is not None:
+            return parsed
+        try:
+            count = max(1, min(4, int(section_count_var.get())))
+        except Exception:
+            count = 1
+        for idx in range(count):
+            display = _section_display_name(idx + 1, names_snapshot=names_snapshot)
+            if raw == display:
+                return idx + 1
+        return None
+
+    def _set_unit_section_value(entry_widget, value):
+        value = "" if value is None else str(value).strip().upper()
+        try:
+            entry_widget.set(value)
+            return
+        except Exception:
+            pass
+        try:
+            entry_widget.delete(0, "end")
+            entry_widget.insert(0, value)
+        except Exception:
+            pass
+
+    def _capture_unit_section_assignments(names_snapshot=None):
+        for u in units:
+            try:
+                cur = (u["section_entry"].get() or "").strip()
+            except Exception:
+                cur = ""
+            unit_section_assignments[u["label"]] = _resolve_section_assignment_id(cur, names_snapshot=names_snapshot)
+
+    def _record_unit_section_assignment(unit_dict):
+        try:
+            raw = (unit_dict["section_entry"].get() or "").strip()
+        except Exception:
+            raw = ""
+        unit_section_assignments[unit_dict["label"]] = _resolve_section_assignment_id(raw)
+
     def _refresh_unit_section_choices():
         choices = _current_section_choices()
+        try:
+            count = max(1, min(4, int(section_count_var.get())))
+        except Exception:
+            count = 1
         for u in units:
             try:
                 section_entry = u["section_entry"]
                 section_entry.configure(values=choices)
-                cur = (section_entry.get() or "").strip().upper()
-                if cur and cur not in choices:
-                    section_entry.set("")
+                assigned_id = unit_section_assignments.get(u["label"])
+                if assigned_id is None:
+                    assigned_id = _resolve_section_assignment_id(section_entry.get())
+                    unit_section_assignments[u["label"]] = assigned_id
+                if assigned_id is not None and 1 <= assigned_id <= count:
+                    _set_unit_section_value(section_entry, _section_display_name(assigned_id))
+                else:
+                    cur = (section_entry.get() or "").strip().upper()
+                    if cur and cur not in choices:
+                        _set_unit_section_value(section_entry, "")
+                        unit_section_assignments[u["label"]] = None
             except Exception:
                 pass
 
@@ -199,6 +282,12 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                     section_name_vars[idx].set("")
                 except Exception:
                     pass
+        for _label, _section_id in list(unit_section_assignments.items()):
+            try:
+                if _section_id is not None and int(_section_id) > count:
+                    unit_section_assignments[_label] = None
+            except Exception:
+                pass
         _refresh_unit_section_choices()
 
 
@@ -322,6 +411,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "imposition_var": imposition_var,
         "section_name_vars": section_name_vars,
         "section_name_entries": section_name_entries,
+        "_refresh_unit_section_choices": _refresh_unit_section_choices,
+        "_capture_unit_section_assignments": _capture_unit_section_assignments,
         "imposition_entry": imposition_entry,
         "color_pages_var": color_pages_var,
         "plates_var": plates_var,
@@ -372,40 +463,22 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     def _make_name_trace(i):
         def _on_name_change(*_):
             try:
+                previous_names = list(section_name_prev)
+                # Capture the stable assignment ids using the names before this edit.
+                _capture_unit_section_assignments(names_snapshot=previous_names)
+
                 new = (section_name_vars[i].get() or "").strip().upper()
-                old = section_name_prev[i]
+                old = previous_names[i]
+
+                # Ignore the transient blank while the user replaces a name.
+                if new == "":
+                    return
+
                 if new == old:
                     section_name_prev[i] = new
+                    _refresh_unit_section_choices()
                     return
-                # only propagate if old was non-empty (avoid overwriting blank unit entries)
-                if old:
-                    old_section_id = parse_section_id(old)
-                    for u in units:
-                        try:
-                            cur = (u["section_entry"].get() or "").strip()
-                            if not cur:
-                                continue
-                            cur_upper = cur.upper()
-                            # Match if equals old name (case-insensitive)
-                            name_matches = (cur_upper == old)
-                            # Or if numeric/S# forms map to same section index
-                            cur_section_id = parse_section_id(cur)
-                            index_matches = (
-                                old_section_id is not None and
-                                cur_section_id is not None and
-                                cur_section_id == old_section_id
-                            )
-                            if name_matches or index_matches:
-                                try:
-                                    u["section_entry"].set(new)
-                                except Exception:
-                                    try:
-                                        u["section_entry"].delete(0, "end")
-                                        u["section_entry"].insert(0, new)
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
+
                 section_name_prev[i] = new
                 _refresh_unit_section_choices()
             except Exception:
@@ -1352,9 +1425,9 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         entries = u["entries"]
         section_entry = u.get("section_entry")
         if section_entry is not None:
-            section_entry.bind("<KeyRelease>", lambda e: update_imposition())
-            section_entry.bind("<<ComboboxSelected>>", lambda e: update_imposition())
-            section_entry.bind("<FocusOut>", lambda e: update_imposition())
+            section_entry.bind("<KeyRelease>", lambda e, _u=u: (_record_unit_section_assignment(_u), update_imposition()))
+            section_entry.bind("<<ComboboxSelected>>", lambda e, _u=u: (_record_unit_section_assignment(_u), update_imposition()))
+            section_entry.bind("<FocusOut>", lambda e, _u=u: (_record_unit_section_assignment(_u), update_imposition()))
         for r in range(len(overlays)):
             for c in range(len(overlays[r])):
                 ov = overlays[r][c]
@@ -1384,6 +1457,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         data = safe_read_json(load_path)
         if data:
             populate_layout_from_data(ctx, data)
+            _capture_unit_section_assignments()
+            _refresh_unit_section_choices()
             apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True)
             if not template_mode:
                 starter_format_var.set(data.get("starter_format") or "Standard")
@@ -1398,6 +1473,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 ctx["layout_name"] = data.get("name") or os.path.splitext(os.path.basename(load_path))[0]
                 win.title(f"{title_base}  —  {os.path.basename(load_path)}")
 
+    _capture_unit_section_assignments()
     # initial refreshes
     update_imposition()
     refresh_color_overlays()
