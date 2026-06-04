@@ -1,3 +1,5 @@
+import os
+import glob
 from datetime import datetime
 from tkinter import filedialog, messagebox
 
@@ -126,6 +128,20 @@ def do_save(win, ctx):
     try:
         data = collect_layout_data(ctx)
         safe_write_json(ctx["file_path"], data)
+        
+        # If saving a layout (not template mode) and imposition doesn't match existing template, ask to save as template
+        if not ctx.get("template_mode", False):
+            if not _template_exists_for_imposition(ctx):
+                template_suggestion = build_filename_suggestion(ctx)
+                if messagebox.askyesno(
+                    "Save as Template",
+                    f"This layout has a new imposition that doesn't match any existing template.\n\n"
+                    f"Would you like to save it as a template?\n\n"
+                    f"Template name: {template_suggestion}",
+                    parent=win
+                ):
+                    save_template_from_layout(ctx)
+        
         return True
     except Exception as e:
         messagebox.showerror("Save Failed", str(e))
@@ -157,7 +173,114 @@ def do_save_as(win, ctx):
         ctx["file_path"] = path
         ctx["layout_name"] = data["name"]
         win.title(f"{ctx['title_base']}  —  {os.path.basename(path)}")
+        
+        # If saving a layout (not template mode) and imposition doesn't match existing template, ask to save as template
+        if not ctx.get("template_mode", False):
+            if not _template_exists_for_imposition(ctx):
+                template_suggestion = build_filename_suggestion(ctx)
+                if messagebox.askyesno(
+                    "Save as Template",
+                    f"This layout has a new imposition that doesn't match any existing template.\n\n"
+                    f"Would you like to save it as a template?\n\n"
+                    f"Template name: {template_suggestion}",
+                    parent=win
+                ):
+                    save_template_from_layout(ctx)
+        
         return True
     except Exception as e:
         messagebox.showerror("Save As Failed", str(e))
         return False
+
+def _template_exists_for_imposition(ctx) -> bool:
+    """Check if a template with the same imposition already exists."""
+    ensure_dir(TEMPLATE_DIR)
+    press = ctx.get("press_name", "")
+    fmt = ctx.get("format_name", "")
+    
+    try:
+        section_count = int(ctx["section_count_var"].get())
+    except Exception:
+        section_count = 1
+    section_count = max(1, min(4, section_count))
+    
+    pages = []
+    for i in range(section_count):
+        try:
+            pages.append(max(1, int(ctx["section_page_vars"][i].get().strip())))
+        except Exception:
+            pages.append(min_pages_for_format(fmt))
+    
+    # List all templates and check for matching imposition
+    template_files = sorted(glob.glob(os.path.join(TEMPLATE_DIR, "*.json")))
+    for tmpl_path in template_files:
+        tmpl_data = safe_read_json(tmpl_path)
+        if not isinstance(tmpl_data, dict):
+            continue
+        
+        # Check press, format, section_count, section_pages
+        if tmpl_data.get("press") != press or tmpl_data.get("format") != fmt:
+            continue
+        if tmpl_data.get("section_count") != section_count:
+            continue
+        if tmpl_data.get("section_pages") != pages:
+            continue
+        
+        # Check units match
+        tmpl_units = tmpl_data.get("units", [])
+        ctx_units = ctx.get("units", [])
+        
+        if len(tmpl_units) != len(ctx_units):
+            continue
+        
+        # Compare unit structure
+        units_match = True
+        for tu, cu in zip(tmpl_units, ctx_units):
+            tu_grid = tu.get("grid", [])
+            cu_grid = [
+                [cell.get().strip() for cell in row]
+                for row in cu.get("entries", [])
+            ]
+            if tu_grid != cu_grid:
+                units_match = False
+                break
+        
+        if units_match:
+            return True
+    
+    return False
+
+def save_template_from_layout(ctx):
+    """Save the current layout as a template (without issue_date, product, color_cells)."""
+    try:
+        ensure_dir(TEMPLATE_DIR)
+        
+        # Collect data but strip layout-specific fields
+        data = collect_layout_data(ctx)
+        
+        # Remove layout-specific fields
+        data.pop("issue_date", None)
+        data.pop("product", None)
+        data.pop("color_cells", None)
+        
+        # Generate template filename
+        template_filename = build_filename_suggestion(ctx)
+        template_path = os.path.join(TEMPLATE_DIR, template_filename)
+        
+        # Make filename unique if it exists
+        if os.path.exists(template_path):
+            base, ext = os.path.splitext(template_filename)
+            counter = 1
+            while os.path.exists(os.path.join(TEMPLATE_DIR, f"{base}_{counter}{ext}")):
+                counter += 1
+            template_filename = f"{base}_{counter}{ext}"
+            template_path = os.path.join(TEMPLATE_DIR, template_filename)
+        
+        # Use template filename as template name
+        data["name"] = os.path.splitext(template_filename)[0]
+        
+        safe_write_json(template_path, data)
+        messagebox.showinfo("Template Saved", f"Template saved as:\n{template_filename}")
+    except Exception as e:
+        messagebox.showerror("Save Template Failed", f"Could not save template:\n{str(e)}")
+

@@ -79,6 +79,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     ttk.Label(header_frame, text="Sections:", font=(None, 12, "bold")).grid(row=1, column=0, sticky="w", pady=6)
     sections_spinbox = ttk.Spinbox(header_frame, from_=1, to=4, textvariable=section_count_var, width=3, justify="center")
     sections_spinbox.grid(row=1, column=1, sticky="w", padx=(8, 32))
+    # Auto-select text on focus for section count spinbox
+    sections_spinbox.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
 
     pages_frame = ttk.Frame(header_frame)
     pages_frame.grid(row=1, column=3, columnspan=2, sticky="w", padx=(8, 24))
@@ -108,6 +110,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         )
         sp.grid(row=0, column=2 + idx * 2, sticky="w")
         section_page_entries.append(sp)
+
+    # Auto-select text on focus for all section page spinboxes
+    for sp in section_page_entries:
+        sp.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
 
     def _update_section_page_states(count):
         for idx, entry in enumerate(section_page_entries):
@@ -476,6 +482,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         ttk.Label(dialog, text="Copies:").grid(row=1, column=0, sticky="w", padx=12, pady=4)
         copies_spin = ttk.Spinbox(dialog, from_=1, to=999, textvariable=copies_var, width=8)
         copies_spin.grid(row=1, column=1, sticky="w", padx=12, pady=4)
+        copies_spin.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
         ttk.Label(dialog, text="Orientation: Landscape", font=(None, 10, "bold")).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 4))
         button_frame = ttk.Frame(dialog)
         button_frame.grid(row=3, column=0, columnspan=2, pady=(8, 12), padx=12, sticky="e")
@@ -911,7 +918,9 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 printer_combo.grid(row=0, column=1, sticky="ew", padx=12, pady=(12, 4))
                 printer_combo.focus_set()
                 ttk.Label(dialog, text="Copies:").grid(row=1, column=0, sticky="w", padx=12, pady=4)
-                ttk.Spinbox(dialog, from_=1, to=999, textvariable=copies_var, width=8).grid(row=1, column=1, sticky="w", padx=12, pady=4)
+                copies_spin_print = ttk.Spinbox(dialog, from_=1, to=999, textvariable=copies_var, width=8)
+                copies_spin_print.grid(row=1, column=1, sticky="w", padx=12, pady=4)
+                copies_spin_print.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
                 ttk.Label(dialog, text="Orientation:").grid(row=2, column=0, sticky="w", padx=12, pady=4)
                 orient_frame = ttk.Frame(dialog)
                 orient_frame.grid(row=2, column=1, sticky="w", padx=12, pady=4)
@@ -921,13 +930,21 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 margins_frame = ttk.Frame(dialog)
                 margins_frame.grid(row=3, column=1, sticky="w", padx=12, pady=4)
                 ttk.Label(margins_frame, text="Left").grid(row=0, column=0, sticky="w")
-                ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=left_margin_var, width=6).grid(row=0, column=1, padx=(6, 12), pady=2)
+                left_spin = ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=left_margin_var, width=6)
+                left_spin.grid(row=0, column=1, padx=(6, 12), pady=2)
+                left_spin.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
                 ttk.Label(margins_frame, text="Top").grid(row=0, column=2, sticky="w")
-                ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=top_margin_var, width=6).grid(row=0, column=3, padx=(6, 0), pady=2)
+                top_spin = ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=top_margin_var, width=6)
+                top_spin.grid(row=0, column=3, padx=(6, 0), pady=2)
+                top_spin.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
                 ttk.Label(margins_frame, text="Right").grid(row=1, column=0, sticky="w")
-                ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=right_margin_var, width=6).grid(row=1, column=1, padx=(6, 12), pady=2)
+                right_spin = ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=right_margin_var, width=6)
+                right_spin.grid(row=1, column=1, padx=(6, 12), pady=2)
+                right_spin.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
                 ttk.Label(margins_frame, text="Bottom").grid(row=1, column=2, sticky="w")
-                ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=bottom_margin_var, width=6).grid(row=1, column=3, padx=(6, 0), pady=2)
+                bottom_spin = ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=bottom_margin_var, width=6)
+                bottom_spin.grid(row=1, column=3, padx=(6, 0), pady=2)
+                bottom_spin.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
                 button_frame = ttk.Frame(dialog)
                 button_frame.grid(row=4, column=0, columnspan=2, pady=(8, 12), padx=12, sticky="e")
                 def _parse_margin(value, default=0.15):

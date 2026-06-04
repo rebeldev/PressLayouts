@@ -63,6 +63,74 @@ def open_json_in_layout(root, json_path, template_mode=False):
         load_as_copy=False,
     )
     return win
+
+def open_new_template(parent):
+    """Open a new blank layout in template mode."""
+    # Create a simple dialog to select Press and Format
+    dialog = tk.Toplevel(parent)
+    dialog.title("New Template")
+    dialog.transient(parent)
+    dialog.grab_set()
+    remember_window_geometry(dialog, "new_template_dialog", default_geometry="400x150", minsize=(400, 150))
+    
+    frame = ttk.Frame(dialog, padding=16)
+    frame.pack(fill="both", expand=True)
+    
+    ttk.Label(frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", pady=8, padx=(0, 8))
+    press_var = tk.StringVar(value="Press 1")
+    press_combo = ttk.Combobox(frame, textvariable=press_var, values=["Press 1", "Press 2"], state="readonly", width=20)
+    press_combo.grid(row=0, column=1, sticky="ew", padx=(0, 0))
+    
+    ttk.Label(frame, text="Format:", font=(None, 11, "bold")).grid(row=1, column=0, sticky="w", pady=8, padx=(0, 8))
+    format_var = tk.StringVar(value="Broadsheet")
+    format_combo = ttk.Combobox(frame, textvariable=format_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=20)
+    format_combo.grid(row=1, column=1, sticky="ew", padx=(0, 0))
+    
+    frame.columnconfigure(1, weight=1)
+    
+    result = {"ok": False}
+    
+    def on_ok():
+        result["ok"] = True
+        dialog.destroy()
+    
+    def on_cancel():
+        dialog.destroy()
+    
+    btn_frame = ttk.Frame(frame)
+    btn_frame.grid(row=2, column=0, columnspan=2, pady=(16, 0), sticky="ew")
+    btn_frame.columnconfigure(0, weight=1)
+    
+    ttk.Button(btn_frame, text="Create", command=on_ok, width=12).pack(side="left", padx=(0, 8))
+    ttk.Button(btn_frame, text="Cancel", command=on_cancel, width=12).pack(side="left")
+    
+    dialog.wait_window(dialog)
+    
+    if not result["ok"]:
+        return
+    
+    press = press_var.get()
+    fmt = format_var.get()
+    base_cfg = CONFIG_MAP.get((press, fmt))
+    if not base_cfg:
+        messagebox.showerror("Not Configured", f"{press} - {fmt} is not configured yet.")
+        return
+    
+    cfg = dict(base_cfg)
+    cfg["section_count"] = 1
+    cfg["section_pages"] = [min_pages_for_format(fmt)]
+    cfg["template_mode"] = True
+    
+    win = tk.Toplevel(parent)
+    win.withdraw()
+    build_press_layout(
+        win,
+        title=f"{press} - {fmt}",
+        config=cfg,
+        load_path=None,
+        load_as_copy=False,
+    )
+
 def build_new_layout_launcher(parent):  
     root = tk.Toplevel(parent)  
     root.title("New Layout")  
@@ -84,7 +152,9 @@ def build_new_layout_launcher(parent):
     ttk.Label(frame, text="Sections:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="w", pady=8, padx=(0, 8))  
     section_count_var = tk.StringVar(value="1")  
     section_count_spinbox = ttk.Spinbox(frame, from_=1, to=4, textvariable=section_count_var, width=3, justify="center")  
-    section_count_spinbox.grid(row=2, column=1, sticky="w", padx=(0, 24))  
+    section_count_spinbox.grid(row=2, column=1, sticky="w", padx=(0, 24))
+    # Auto-select text on focus for section count spinbox
+    section_count_spinbox.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))  
     ttk.Label(frame, text="Pages:", font=(None, 11, "bold")).grid(row=2, column=2, sticky="w", padx=(0, 8))  
     section_page_vars = []  
     section_page_spinboxes = []  
@@ -95,6 +165,9 @@ def build_new_layout_launcher(parent):
         spinbox = ttk.Spinbox(frame, from_=2, to=80, increment=2, textvariable=var, width=3, justify="center")  
         spinbox.grid(row=2, column=4 + idx * 2, sticky="w")  
         section_page_spinboxes.append(spinbox)  
+    # Auto-select text on focus for all section page spinboxes
+    for spinbox in section_page_spinboxes:
+        spinbox.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
     # Templates list  
     ttk.Label(frame, text="Templates:", font=(None, 11, "bold")).grid(row=3, column=0, sticky="nw", pady=(8, 0), padx=(0, 8))  
     templates_frame = ttk.Frame(frame)  
@@ -378,7 +451,7 @@ def build_template_editor_launcher(parent):
         root.destroy()
 
     def new_template():
-        build_new_layout_launcher(root)
+        open_new_template(parent)
         root.destroy()
 
     def delete_selected():
