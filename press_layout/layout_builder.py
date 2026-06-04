@@ -83,7 +83,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     sections_spinbox.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
 
     pages_frame = ttk.Frame(header_frame)
-    pages_frame.grid(row=1, column=3, columnspan=2, sticky="w", padx=(8, 24))
+    # place pages_frame closer to the section count and tighten spacing
+    pages_frame.grid(row=1, column=2, columnspan=3, sticky="w", padx=(4, 8))
     ttk.Label(pages_frame, text="Section pages:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
 
     format_name = config.get("format_name", "")
@@ -91,13 +92,69 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     max_pages = page_increment * 10
 
     initial_pages = config.get("section_pages", [page_increment] * 4)
+    # Section names (editable labels for S1..S4)
+    initial_names = config.get("section_names")
+    # determine initial enabled section count (from config/var)
+    try:
+        init_count = max(1, min(4, int(section_count_var.get())))
+    except Exception:
+        init_count = 1
+
+    if initial_names is None:
+        if template_mode:
+            base_names = [f"S{i+1}" for i in range(4)]
+        else:
+            base_names = ["A", "B", "C", "D"]
+        # only prefill names for enabled sections; disabled sections remain blank
+        initial_names = [base_names[i] if i < init_count else "" for i in range(4)]
+
+    section_name_vars = []
+    section_name_entries = []
+
+    def _current_section_choices():
+        choices = [""]
+        try:
+            count = max(1, min(4, int(section_count_var.get())))
+        except Exception:
+            count = 1
+        for i in range(count):
+            try:
+                name = (section_name_vars[i].get() or "").strip().upper()
+            except Exception:
+                name = ""
+            if not name:
+                name = "S" + str(i + 1) if template_mode else chr(ord("A") + i)
+            choices.append(name)
+        return choices
+
+    def _refresh_unit_section_choices():
+        choices = _current_section_choices()
+        for u in units:
+            try:
+                section_entry = u["section_entry"]
+                section_entry.configure(values=choices)
+                cur = (section_entry.get() or "").strip().upper()
+                if cur and cur not in choices:
+                    section_entry.set("")
+            except Exception:
+                pass
+
+    for idx in range(4):
+        name_value = str(initial_names[idx] if idx < len(initial_names) else "")
+        nvar = tk.StringVar(value=name_value)
+        section_name_vars.append(nvar)
+        entry = ttk.Entry(pages_frame, textvariable=nvar, width=6, justify="center", font=(None, 10))
+        # center the name above the page spinbox column
+        entry.grid(row=0, column=2 + idx * 2, sticky="", padx=(6, 2))
+        section_name_entries.append(entry)
+
     for idx in range(4):
         page_value = str(initial_pages[idx] if idx < len(initial_pages) else page_increment)
         var = tk.StringVar(value=page_value)
         section_page_vars.append(var)
 
         ttk.Label(pages_frame, text=f"S{idx + 1}", font=(None, 10)).grid(
-            row=0, column=1 + idx * 2, sticky="e", padx=(10, 2)
+            row=1, column=1 + idx * 2, sticky="e", padx=(10, 2)
         )
         sp = ttk.Spinbox(
             pages_frame,
@@ -108,7 +165,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             width=4,
             justify="center"
         )
-        sp.grid(row=0, column=2 + idx * 2, sticky="w")
+        sp.grid(row=1, column=2 + idx * 2, sticky="w")
         section_page_entries.append(sp)
 
     # Auto-select text on focus for all section page spinboxes
@@ -119,14 +176,31 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         for idx, entry in enumerate(section_page_entries):
             if idx < count:
                 entry.state(["!disabled"])
+                # enable name entries as well
+                try:
+                    section_name_entries[idx].state(["!disabled"])
+                except Exception:
+                    pass
+                # ensure enabled sections have a sensible default if blank
+                try:
+                    cur = (section_name_vars[idx].get() or "").strip()
+                    if cur == "":
+                        if template_mode:
+                            section_name_vars[idx].set(f"S{idx+1}")
+                        else:
+                            section_name_vars[idx].set(chr(ord('A') + idx))
+                except Exception:
+                    pass
             else:
                 entry.state(["disabled"])
                 section_page_vars[idx].set("")
+                try:
+                    section_name_entries[idx].state(["disabled"])
+                    section_name_vars[idx].set("")
+                except Exception:
+                    pass
+        _refresh_unit_section_choices()
 
-    try:
-        _update_section_page_states(int(section_count_var.get()))
-    except Exception:
-        _update_section_page_states(1)
 
     apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True)
 
@@ -180,6 +254,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             unit_padding=unit_padding,
             cell_font=cell_font,
             cell_width=cell_width,
+            section_choices=_current_section_choices(),
         )
         unit_frame.grid(row=0, column=idx, padx=unit_padx, pady=unit_pady, sticky="n")
         units.append({
@@ -219,6 +294,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             unit_padding=unit_padding,
             cell_font=cell_font,
             cell_width=cell_width,
+            section_choices=_current_section_choices(),
         )
         unit_frame.grid(row=0, column=len(left_labels) + 1 + idx, padx=unit_padx, pady=unit_pady, sticky="n")
         units.append({
@@ -244,6 +320,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "section_page_vars": section_page_vars,
         "_update_section_page_states": _update_section_page_states,
         "imposition_var": imposition_var,
+        "section_name_vars": section_name_vars,
+        "section_name_entries": section_name_entries,
         "imposition_entry": imposition_entry,
         "color_pages_var": color_pages_var,
         "plates_var": plates_var,
@@ -255,6 +333,90 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "default_dir": TEMPLATE_DIR if template_mode else LAYOUTS_DIR,
         "color_cells": set(),  # per-cell storage
     }
+
+    # Propagate section name changes to unit section entries.
+    try:
+        section_name_prev = [v.get().strip().upper() for v in section_name_vars]
+    except Exception:
+        section_name_prev = ["", "", "", ""]
+
+    # Uppercase enforcement for section name entries (via key release, preserving cursor)
+    def _make_section_uppercase_trace(i):
+        def _on_section_input(event=None):
+            try:
+                entry = section_name_entries[i]
+                current = entry.get()
+                upper = current.upper()
+                if current != upper:
+                    try:
+                        cursor_pos = entry.index("insert")
+                    except Exception:
+                        cursor_pos = None
+                    entry.delete(0, "end")
+                    entry.insert(0, upper)
+                    if cursor_pos is not None:
+                        try:
+                            entry.icursor(min(cursor_pos, len(upper)))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        return _on_section_input
+
+    for i in range(len(section_name_entries)):
+        try:
+            section_name_entries[i].bind('<KeyRelease>', _make_section_uppercase_trace(i))
+        except Exception:
+            pass
+
+    def _make_name_trace(i):
+        def _on_name_change(*_):
+            try:
+                new = (section_name_vars[i].get() or "").strip().upper()
+                old = section_name_prev[i]
+                if new == old:
+                    section_name_prev[i] = new
+                    return
+                # only propagate if old was non-empty (avoid overwriting blank unit entries)
+                if old:
+                    old_section_id = parse_section_id(old)
+                    for u in units:
+                        try:
+                            cur = (u["section_entry"].get() or "").strip()
+                            if not cur:
+                                continue
+                            cur_upper = cur.upper()
+                            # Match if equals old name (case-insensitive)
+                            name_matches = (cur_upper == old)
+                            # Or if numeric/S# forms map to same section index
+                            cur_section_id = parse_section_id(cur)
+                            index_matches = (
+                                old_section_id is not None and
+                                cur_section_id is not None and
+                                cur_section_id == old_section_id
+                            )
+                            if name_matches or index_matches:
+                                try:
+                                    u["section_entry"].set(new)
+                                except Exception:
+                                    try:
+                                        u["section_entry"].delete(0, "end")
+                                        u["section_entry"].insert(0, new)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                section_name_prev[i] = new
+                _refresh_unit_section_choices()
+            except Exception:
+                pass
+        return _on_name_change
+
+    for i in range(len(section_name_vars)):
+        try:
+            section_name_vars[i].trace_add("write", _make_name_trace(i))
+        except Exception:
+            pass
 
     # ---- Color Select toggle (layouts only) ----
     color_select_var = tk.BooleanVar(value=False)
@@ -1191,6 +1353,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         section_entry = u.get("section_entry")
         if section_entry is not None:
             section_entry.bind("<KeyRelease>", lambda e: update_imposition())
+            section_entry.bind("<<ComboboxSelected>>", lambda e: update_imposition())
             section_entry.bind("<FocusOut>", lambda e: update_imposition())
         for r in range(len(overlays)):
             for c in range(len(overlays[r])):

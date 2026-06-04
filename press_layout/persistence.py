@@ -18,6 +18,7 @@ def collect_layout_data(ctx):
         "product": ctx["product_entry"].get().strip() if ctx.get("product_entry") else "",
         "section_count": 1,
         "section_pages": [min_pages_for_format(ctx.get("format_name", ""))],
+        "section_names": [],
         "units": []
     }
 
@@ -38,6 +39,14 @@ def collect_layout_data(ctx):
 
         data["section_count"] = section_count
         data["section_pages"] = pages
+        # collect section names if available
+        names = []
+        for i in range(section_count):
+            try:
+                names.append((ctx.get("section_name_vars", [])[i].get() or "").strip())
+            except Exception:
+                names.append("")
+        data["section_names"] = names
 
     for u in ctx["units"]:
         section = u["section_entry"].get().strip()
@@ -89,6 +98,24 @@ def populate_layout_from_data(ctx, data):
 
         if ctx.get("_update_section_page_states"):
             ctx["_update_section_page_states"](section_count)
+
+    # Load section names (if present) and apply to header name fields
+    section_names = data.get("section_names") or []
+    if ctx.get("section_name_vars"):
+        try:
+            for i in range(4):
+                if i < section_count and i < len(section_names) and section_names[i] is not None:
+                    ctx["section_name_vars"][i].set(str(section_names[i]))
+                elif i < section_count:
+                    # defaults: template mode uses S1.., layout uses A..D
+                    if ctx.get("template_mode"):
+                        ctx["section_name_vars"][i].set(f"S{i+1}")
+                    else:
+                        ctx["section_name_vars"][i].set(chr(ord('A') + i))
+                else:
+                    ctx["section_name_vars"][i].set("")
+        except Exception:
+            pass
 
     unit_map = {u["label"]: u for u in ctx["units"]}
     for udata in data.get("units", []):

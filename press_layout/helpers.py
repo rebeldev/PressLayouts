@@ -293,7 +293,24 @@ def build_filename_suggestion(ctx) -> str:
 
     units_by_section = {i: [] for i in range(1, section_count + 1)}
     for u in ctx["units"]:
-        sec_id = parse_section_id(u["section_entry"].get())
+        sec_text = (u["section_entry"].get() or "").strip().upper()
+        sec_id = None
+        # Try mapping via explicit section name variables (if present in ctx)
+        sn_vars = ctx.get("section_name_vars")
+        if sn_vars:
+            try:
+                for i in range(section_count):
+                    name = (sn_vars[i].get() or "").strip().upper()
+                    if name and sec_text == name:
+                        sec_id = i + 1
+                        break
+            except Exception:
+                sec_id = None
+
+        # fallback to numeric/S#/A-D parsing
+        if sec_id is None:
+            sec_id = parse_section_id(sec_text)
+
         if sec_id is None:
             continue
         if 1 <= sec_id <= section_count:
@@ -628,36 +645,21 @@ def create_press_unit(
     cell_font=None,
     cell_width=None,
     swatch_size=(4, 1),
+    section_choices=None,
 ):
     unit_frame = ttk.Frame(parent, style="Unit.TFrame", padding=unit_padding)
 
     section_var = tk.StringVar()
-    section_entry = ttk.Entry(
+    section_entry = ttk.Combobox(
         unit_frame,
         width=8,
         justify="center",
         font=(None, 10),
         textvariable=section_var,
+        values=section_choices or [""],
+        state="readonly",
     )
     section_entry.pack(pady=(0, 6))
-
-    def _force_section_uppercase(*_):
-        value = section_var.get()
-        upper = value.upper()
-        if value == upper:
-            return
-        try:
-            cursor = section_entry.index(tk.INSERT)
-        except Exception:
-            cursor = None
-        section_var.set(upper)
-        if cursor is not None:
-            try:
-                section_entry.icursor(min(cursor, len(upper)))
-            except Exception:
-                pass
-
-    section_var.trace_add("write", _force_section_uppercase)
 
     box_frame = ttk.Frame(unit_frame, style="Box.TFrame")
     box_frame.pack(fill="both", expand=True)
