@@ -1,11 +1,219 @@
 import os  
 import glob  
+import json
+import re
 import tkinter as tk  
 from tkinter import ttk, messagebox  
 from .config import *  
 from .helpers import *  
 from . import helpers as helpers_mod
 from .layout_builder import build_press_layout  
+WINDOW_SIZE_STATE_FILE = os.path.join(os.path.expanduser("~"), ".press_layout_launcher_sizes.json")
+
+
+def _parse_geometry_parts(geometry_text):
+    try:
+        m = re.match(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$", str(geometry_text or "").strip())
+        if not m:
+            return None
+        return int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    except Exception:
+        return None
+
+
+def _load_window_size_state():
+    try:
+        if not os.path.exists(WINDOW_SIZE_STATE_FILE):
+            return {}
+        with open(WINDOW_SIZE_STATE_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_window_size_state(data):
+    try:
+        with open(WINDOW_SIZE_STATE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+    except Exception:
+        pass
+
+
+def _apply_saved_window_size(win, state_key):
+    try:
+        win.update_idletasks()
+        parts = _parse_geometry_parts(win.geometry())
+        if not parts:
+            return
+        _cur_w, _cur_h, cur_x, cur_y = parts
+        saved = _load_window_size_state().get(state_key)
+        if not (isinstance(saved, dict) and saved.get("width") and saved.get("height")):
+            return
+        width = max(100, int(saved.get("width")))
+        height = max(100, int(saved.get("height")))
+        win.geometry(f"{width}x{height}{cur_x:+d}{cur_y:+d}")
+    except Exception:
+        pass
+
+
+def _bind_window_size_memory(win, state_key):
+    _apply_saved_window_size(win, state_key)
+    pending = {"id": None}
+
+    def _persist_size():
+        pending["id"] = None
+        try:
+            width = int(win.winfo_width())
+            height = int(win.winfo_height())
+        except Exception:
+            return
+        if width <= 1 or height <= 1:
+            return
+        data = _load_window_size_state()
+        data[state_key] = {"width": width, "height": height}
+        _save_window_size_state(data)
+
+    def _schedule(event=None):
+        try:
+            if pending["id"] is not None:
+                win.after_cancel(pending["id"])
+        except Exception:
+            pass
+        try:
+            pending["id"] = win.after(150, _persist_size)
+        except Exception:
+            pass
+
+    try:
+        win.bind("<Configure>", _schedule, add="+")
+    except Exception:
+        pass
+
+
+def _fit_image_to_width(image, max_width):
+    try:
+        from PIL import Image
+    except Exception as e:
+        raise RuntimeError(f"Pillow is required for previews: {e}")
+    if image is None:
+        return None
+    try:
+        max_width = max(1, int(max_width))
+    except Exception:
+        return image
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return image
+    if width == max_width:
+        return image
+    scale = max_width / float(width)
+    return image.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
+
+
+def _fit_image_to_box(image, max_width, max_height):
+    try:
+        from PIL import Image
+    except Exception as e:
+        raise RuntimeError(f"Pillow is required for previews: {e}")
+    if image is None:
+        return None
+    try:
+        max_width = max(1, int(max_width))
+        max_height = max(1, int(max_height))
+    except Exception:
+        return image
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return image
+    scale = min(max_width / float(width), max_height / float(height))
+    if scale <= 0:
+        return image
+    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    if new_size == image.size:
+        return image
+    return image.resize(new_size, Image.LANCZOS)
+
+
+def _render_preview_panel_image(preview_label, preview_state):
+    image = preview_state.get("pil_image")
+    if image is None:
+        return
+    try:
+        available_width = max(100, int(preview_label.winfo_width()) - 12)
+    except Exception:
+        available_width = image.size[0]
+    try:
+        available_height = max(100, int(preview_label.winfo_height()) - 12)
+    except Exception:
+        available_height = image.size[1]
+    scaled = _fit_image_to_box(image, available_width, available_height)
+    try:
+        from PIL import ImageTk
+    except Exception as e:
+        raise RuntimeError(f"Pillow is required for previews: {e}")
+    photo = ImageTk.PhotoImage(scaled)
+    preview_label.configure(image=photo, text="")
+    preview_label.image = photo
+    preview_state["photo"] = photo
+
+
+def _apply_saved_preview_pane_height(win, state_key, paned, preview_box, default_height=240, min_height=160):
+    def _apply():
+        try:
+            win.update_idletasks()
+            total_h = max(1, int(paned.winfo_height()))
+            data = _load_window_size_state().get(state_key, {})
+            target = int(data.get("preview_height", default_height))
+            target = max(min_height, min(target, max(min_height, total_h - 120)))
+            sash_y = max(80, total_h - target)
+            paned.sash_place(0, 0, sash_y)
+        except Exception:
+            pass
+    try:
+        win.after_idle(_apply)
+    except Exception:
+        _apply()
+
+
+def _bind_preview_pane_memory(win, state_key, paned, preview_box, default_height=240):
+    _apply_saved_preview_pane_height(win, state_key, paned, preview_box, default_height=default_height)
+    pending = {"id": None}
+
+    def _persist_preview_height():
+        pending["id"] = None
+        try:
+            height = int(preview_box.winfo_height())
+        except Exception:
+            return
+        if height <= 1:
+            return
+        data = _load_window_size_state()
+        entry = data.get(state_key)
+        if not isinstance(entry, dict):
+            entry = {}
+            data[state_key] = entry
+        entry["preview_height"] = height
+        _save_window_size_state(data)
+
+    def _schedule(event=None):
+        try:
+            if pending["id"] is not None:
+                win.after_cancel(pending["id"])
+        except Exception:
+            pass
+        try:
+            pending["id"] = win.after(150, _persist_preview_height)
+        except Exception:
+            pass
+
+    try:
+        preview_box.bind("<Configure>", _schedule, add="+")
+        paned.bind("<ButtonRelease-1>", _schedule, add="+")
+    except Exception:
+        pass
+
+
 def list_matching_templates(press_name, format_name, section_count=None, section_pages=None):  
     """  
     Templates live in TEMPLATE_DIR and are matched by JSON metadata.  
@@ -318,7 +526,7 @@ def _create_image_preview_window(root, image, title, launcher):
     return preview
 
 
-def _clear_preview_panel(preview_label, preview_title_var, preview_state, empty_text="Select an item to preview"):
+def _clear_preview_panel(preview_label, preview_state, empty_text="Select an item to preview"):
     try:
         preview_label.configure(image="", text=empty_text)
     except Exception:
@@ -328,31 +536,18 @@ def _clear_preview_panel(preview_label, preview_title_var, preview_state, empty_
     except Exception:
         pass
     preview_state["photo"] = None
+    preview_state["pil_image"] = None
     preview_state["win"] = None
     preview_state["path"] = None
-    try:
-        preview_title_var.set("Preview")
-    except Exception:
-        pass
 
 
-def _set_preview_panel(preview_label, preview_title_var, preview_state, image, title):
-    try:
-        from PIL import ImageTk
-    except Exception as e:
-        raise RuntimeError(f"Pillow is required for previews: {e}")
+def _set_preview_panel(preview_label, preview_state, image):
     if image is None:
-        _clear_preview_panel(preview_label, preview_title_var, preview_state)
+        _clear_preview_panel(preview_label, preview_state)
         return
-    photo = ImageTk.PhotoImage(image)
-    preview_label.configure(image=photo, text="")
-    preview_label.image = photo
-    preview_state["photo"] = photo
+    preview_state["pil_image"] = image
     preview_state["win"] = None
-    try:
-        preview_title_var.set(title or "Preview")
-    except Exception:
-        pass
+    _render_preview_panel_image(preview_label, preview_state)
 
 
 def open_json_preview(root, json_path, template_mode=False):
@@ -363,7 +558,7 @@ def open_json_preview(root, json_path, template_mode=False):
             data = safe_read_json(json_path) or {}
             press = data.get("press") or ""
             fmt = data.get("format") or ""
-            preview_title = f"Preview - {press} - {fmt}".strip(" -") or "Preview"
+            preview_title = "Preview"
         except Exception:
             preview_title = "Preview"
         return image, preview_title
@@ -375,7 +570,7 @@ def open_json_preview(root, json_path, template_mode=False):
     try:
         _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
         try:
-            preview_title = f"Preview - {temp_win.title()}"
+            preview_title = "Preview"
         except Exception:
             preview_title = "Preview"
         image = _capture_window_image(temp_win)
@@ -467,7 +662,8 @@ def build_new_layout_launcher(parent):
     root.title("New Layout")  
     root.geometry("900x700")  
     root.minsize(820, 620)  
-    remember_window_geometry(root, "new_layout_launcher", default_geometry="900x700", minsize=(820, 620))  
+    remember_window_geometry(root, "new_layout_launcher", default_geometry="900x700", minsize=(820, 620))
+    _bind_window_size_memory(root, "new_layout_launcher")  
     frame = ttk.Frame(root, padding=16)  
     frame.pack(fill="both", expand=True)  
     # Press / Format  
@@ -513,8 +709,7 @@ def build_new_layout_launcher(parent):
     frame.rowconfigure(3, weight=1)  
     frame.columnconfigure(1, weight=1)  
     template_paths = []  
-    preview_title_var = tk.StringVar(value="Preview")
-    preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None}
+    preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
         preview_state["after_id"] = None
@@ -525,7 +720,7 @@ def build_new_layout_launcher(parent):
                 pass
     def close_preview():
         cancel_pending_preview()
-        _clear_preview_panel(preview_label, preview_title_var, preview_state, empty_text="Select a template to preview")
+        _clear_preview_panel(preview_label, preview_state, empty_text="Select a template to preview")
     def _launcher_is_active():
         try:
             focused = root.focus_displayof()
@@ -558,9 +753,9 @@ def build_new_layout_launcher(parent):
             close_preview()
             image, preview_title = open_json_preview(root, _path, template_mode=True)
             if image is None:
-                _clear_preview_panel(preview_label, preview_title_var, preview_state, empty_text="Select a template to preview")
+                _clear_preview_panel(preview_label, preview_state, empty_text="Select a template to preview")
                 return
-            _set_preview_panel(preview_label, preview_title_var, preview_state, image, preview_title)
+            _set_preview_panel(preview_label, preview_state, image)
             preview_state["path"] = _path
         preview_state["after_id"] = root.after_idle(_do_show)
     def _on_launcher_focus_in(event=None):
@@ -696,12 +891,14 @@ def build_new_layout_launcher(parent):
     btn_row.grid(row=4, column=0, columnspan=8, pady=(12, 0), sticky="w")  
     ttk.Button(btn_row, text="New / Open", command=on_new_or_open, width=14).pack(side="left", padx=(0, 8))  
     ttk.Button(btn_row, text="Refresh Templates", command=refresh_templates, width=16).pack(side="left")  
-    preview_box = ttk.LabelFrame(frame, text="Preview", padding=8)
-    preview_box.grid(row=5, column=0, columnspan=8, sticky="ew", pady=(12, 0))
+    preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
     preview_box.columnconfigure(0, weight=1)
-    ttk.Label(preview_box, textvariable=preview_title_var, font=(None, 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
     preview_label = ttk.Label(preview_box, text="Select a template to preview", anchor="center", justify="center")
-    preview_label.grid(row=1, column=0, sticky="ew")
+    preview_label.grid(row=0, column=0, sticky="nsew")
+    preview_box.rowconfigure(0, weight=1)
+    preview_label.bind("<Configure>", lambda e: _render_preview_panel_image(preview_label, preview_state), add="+")
+    paned.add(preview_box, minsize=160)
+    _bind_preview_pane_memory(root, "new_layout_launcher", paned, preview_box, default_height=240)
     root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
     root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
     root.protocol("WM_DELETE_WINDOW", lambda: (close_preview(), root.destroy()))
@@ -712,8 +909,11 @@ def build_template_editor_launcher(parent):
     root.geometry("900x700")
     root.minsize(820, 620)
     remember_window_geometry(root, "template_editor_launcher", default_geometry="900x700", minsize=(820, 620))
-    frame = ttk.Frame(root, padding=16)
-    frame.pack(fill="both", expand=True)
+    _bind_window_size_memory(root, "template_editor_launcher")
+    paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
+    paned.pack(fill="both", expand=True)
+    frame = ttk.Frame(paned, padding=16)
+    paned.add(frame, stretch="always", minsize=220)
     frame.rowconfigure(2, weight=1)
     frame.columnconfigure(0, weight=1)
 
@@ -760,8 +960,7 @@ def build_template_editor_launcher(parent):
     template_rows = []
     row_by_iid = {}
     sort_state = {"col": None, "desc": False}
-    preview_title_var = tk.StringVar(value="Preview")
-    preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None}
+    preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
         preview_state["after_id"] = None
@@ -772,7 +971,7 @@ def build_template_editor_launcher(parent):
                 pass
     def close_preview():
         cancel_pending_preview()
-        _clear_preview_panel(preview_label, preview_title_var, preview_state, empty_text="Select a template to preview")
+        _clear_preview_panel(preview_label, preview_state, empty_text="Select a template to preview")
     def _launcher_is_active():
         try:
             focused = root.focus_displayof()
@@ -801,9 +1000,9 @@ def build_template_editor_launcher(parent):
             close_preview()
             image, preview_title = open_json_preview(root, _path, template_mode=True)
             if image is None:
-                _clear_preview_panel(preview_label, preview_title_var, preview_state, empty_text="Select a template to preview")
+                _clear_preview_panel(preview_label, preview_state, empty_text="Select a template to preview")
                 return
-            _set_preview_panel(preview_label, preview_title_var, preview_state, image, preview_title)
+            _set_preview_panel(preview_label, preview_state, image)
             preview_state["path"] = _path
         preview_state["after_id"] = root.after_idle(_do_show)
     def _on_launcher_focus_in(event=None):
@@ -976,12 +1175,14 @@ def build_template_editor_launcher(parent):
     ttk.Button(left_btns, text="Delete", command=delete_selected, width=10).pack(side="left", padx=(0, 8))
     ttk.Button(right_btns, text="Refresh", command=refresh, width=10).pack(side="right")
     ttk.Button(right_btns, text="Regen Preview", command=regenerate_selected_preview, width=14).pack(side="right", padx=(0, 8))
-    preview_box = ttk.LabelFrame(frame, text="Preview", padding=8)
-    preview_box.grid(row=3, column=0, sticky="ew")
+    preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
     preview_box.columnconfigure(0, weight=1)
-    ttk.Label(preview_box, textvariable=preview_title_var, font=(None, 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
     preview_label = ttk.Label(preview_box, text="Select a template to preview", anchor="center", justify="center")
-    preview_label.grid(row=1, column=0, sticky="ew")
+    preview_label.grid(row=0, column=0, sticky="nsew")
+    preview_box.rowconfigure(0, weight=1)
+    preview_label.bind("<Configure>", lambda e: _render_preview_panel_image(preview_label, preview_state), add="+")
+    paned.add(preview_box, minsize=160)
+    _bind_preview_pane_memory(root, "template_editor_launcher", paned, preview_box, default_height=240)
     refresh()
     root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
     root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
@@ -995,9 +1196,12 @@ def build_main_launcher():
     root.title("Press Layouts")  
     root.geometry("1100x760")  
     root.minsize(980, 680)  
-    remember_window_geometry(root, "main_launcher", default_geometry="1100x760", minsize=(980, 680))  
-    frame = ttk.Frame(root, padding=16)
-    frame.pack(fill="both", expand=True)
+    remember_window_geometry(root, "main_launcher", default_geometry="1100x760", minsize=(980, 680))
+    _bind_window_size_memory(root, "main_launcher")  
+    paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
+    paned.pack(fill="both", expand=True)
+    frame = ttk.Frame(paned, padding=16)
+    paned.add(frame, stretch="always", minsize=220)
     frame.rowconfigure(2, weight=1)
     frame.columnconfigure(0, weight=1)
     ttk.Label(frame, text="Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
@@ -1041,8 +1245,7 @@ def build_main_launcher():
     sort_state = {"col": None, "desc": False}  
     refresh_job = {"id": None}  
     auto_refresh_ms = 5000    
-    preview_title_var = tk.StringVar(value="Preview")
-    preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None}
+    preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
         preview_state["after_id"] = None
@@ -1053,7 +1256,7 @@ def build_main_launcher():
                 pass
     def close_preview():
         cancel_pending_preview()
-        _clear_preview_panel(preview_label, preview_title_var, preview_state, empty_text="Select a layout to preview")
+        _clear_preview_panel(preview_label, preview_state, empty_text="Select a layout to preview")
     def _launcher_is_active():
         try:
             focused = root.focus_displayof()
@@ -1082,9 +1285,9 @@ def build_main_launcher():
             close_preview()
             image, preview_title = open_json_preview(root, _path, template_mode=False)
             if image is None:
-                _clear_preview_panel(preview_label, preview_title_var, preview_state, empty_text="Select a layout to preview")
+                _clear_preview_panel(preview_label, preview_state, empty_text="Select a layout to preview")
                 return
-            _set_preview_panel(preview_label, preview_title_var, preview_state, image, preview_title)
+            _set_preview_panel(preview_label, preview_state, image)
             preview_state["path"] = _path
         preview_state["after_id"] = root.after_idle(_do_show)
     def _on_launcher_focus_in(event=None):
@@ -1387,12 +1590,14 @@ def build_main_launcher():
     ttk.Button(right_btns, text="Cleanup", command=cleanup_old_layouts, width=12).pack(side="right", padx=(0, 8))
     ttk.Button(right_btns, text="Refresh", command=lambda: refresh(preserve_state=True), width=12).pack(side="right")
     ttk.Button(right_btns, text="Regen Preview", command=regenerate_selected_preview, width=14).pack(side="right", padx=(0, 8))
-    preview_box = ttk.LabelFrame(frame, text="Preview", padding=8)
-    preview_box.grid(row=4, column=0, columnspan=2, sticky="ew")
+    preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
     preview_box.columnconfigure(0, weight=1)
-    ttk.Label(preview_box, textvariable=preview_title_var, font=(None, 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
     preview_label = ttk.Label(preview_box, text="Select a layout to preview", anchor="center", justify="center")
-    preview_label.grid(row=1, column=0, sticky="ew")
+    preview_label.grid(row=0, column=0, sticky="nsew")
+    preview_box.rowconfigure(0, weight=1)
+    preview_label.bind("<Configure>", lambda e: _render_preview_panel_image(preview_label, preview_state), add="+")
+    paned.add(preview_box, minsize=160)
+    _bind_preview_pane_memory(root, "main_launcher", paned, preview_box, default_height=240)
     # Print buttons for selected layout
     def _print_selected_starter():
         path = selected_path()
