@@ -899,6 +899,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         issue_font = _load_starter_font(header_sz + 4, bold=True)
         text_font = _load_starter_font(text_sz, bold=False)
         small_font = _load_starter_font(max(18, text_sz - 4), bold=False)
+        sections_print_font = _load_starter_font(max(36, (max(18, text_sz - 4)) * 2), bold=True)
         unit_font = _load_starter_font(unit_sz, bold=True)
         section_font = _load_starter_font(section_sz, bold=True)
         cell_font_render = _load_starter_font(cell_sz, bold=True)
@@ -922,19 +923,21 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         # Use product name as the prominent centered title and place Issue Date on the same row
         label_top = header_top
         _draw_centered_text(draw, (margin_x, label_top, img_w - margin_x, label_top + 60), product_text or title_base or ("Template Layout" if template_mode else "Press Layout"), title_font)
-        draw.text((margin_x, label_top + 66), f"Issue Date: {issue_text}", fill="black", font=issue_font)
-        draw.text((img_w - margin_x - 420, label_top + 66), f"Imposition: {imposition_text}", fill="black", font=text_font)
+        draw.text((margin_x, label_top + 66), f"Issue Date: {issue_text}", fill="black", font=sections_print_font)
+        draw.text((img_w - margin_x - 420 - 300, label_top + 66), f"Imposition: {imposition_text}", fill="black", font=text_font)
         try:
             count = max(1, min(4, int(section_count_var.get())))
         except Exception:
             count = 1
-        parts = []
+        # Build section page counts as: Sections: 12 / 16 / 20
+        values = []
         for idx in range(count):
             value = (section_page_vars[idx].get() or "").strip()
             if value:
-                parts.append(f"S{idx + 1}: {value}")
-        if parts:
-            draw.text((img_w - margin_x - 540, header_top + 124), "Sections: " + "   ".join(parts), fill="black", font=small_font)
+                values.append(value)
+        sections_text = " / ".join(values)
+        if sections_text:
+            draw.text((margin_x, label_top + 118), f"Sections: {sections_text}", fill="black", font=sections_print_font)
         draw.line((margin_x, grid_top - 18, img_w - margin_x, grid_top - 18), fill="#444444", width=3)
         left_order, right_order, unit_map = _visible_print_labels()
         total_units = len(left_order) + len(right_order)
@@ -1142,7 +1145,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 remember_window_geometry(dialog, "layout_print_dialog", default_geometry="620x240", minsize=(560, 220))
                 dialog.grab_set()
                 printer_var = tk.StringVar(value=default_printer)
-                copies_var = tk.IntVar(value=1)
+                copies_var = tk.IntVar(value=5)
                 orientation_var = tk.StringVar(value="Landscape")
                 left_margin_var = tk.StringVar(value="0.15")
                 top_margin_var = tk.StringVar(value="0.15")

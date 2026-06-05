@@ -664,8 +664,10 @@ def build_new_layout_launcher(parent):
     root.minsize(820, 620)  
     remember_window_geometry(root, "new_layout_launcher", default_geometry="900x700", minsize=(820, 620))
     _bind_window_size_memory(root, "new_layout_launcher")  
-    frame = ttk.Frame(root, padding=16)  
-    frame.pack(fill="both", expand=True)  
+    paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
+    paned.pack(fill="both", expand=True)
+    frame = ttk.Frame(paned, padding=16)  
+    paned.add(frame, stretch="always", minsize=220)  
     # Press / Format  
     ttk.Label(frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", pady=8, padx=(0, 8))  
     press_var = tk.StringVar(value="Press 1")  
