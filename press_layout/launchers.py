@@ -291,6 +291,10 @@ def _create_image_preview_window(root, image, title, launcher):
         preview.transient(root)
     except Exception:
         pass
+    try:
+        preview.bind("<Escape>", lambda e: preview.destroy(), add="+")
+    except Exception:
+        pass
     outer = ttk.Frame(preview, padding=8)
     outer.pack(fill="both", expand=True)
     label = ttk.Label(outer)
@@ -472,8 +476,17 @@ def build_new_layout_launcher(parent):
     frame.rowconfigure(3, weight=1)  
     frame.columnconfigure(1, weight=1)  
     template_paths = []  
-    preview_state = {"win": None, "path": None}
+    preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0}
+    def cancel_pending_preview():
+        after_id = preview_state.get("after_id")
+        preview_state["after_id"] = None
+        if after_id is not None:
+            try:
+                root.after_cancel(after_id)
+            except Exception:
+                pass
     def close_preview():
+        cancel_pending_preview()
         win = preview_state.get("win")
         preview_state["win"] = None
         preview_state["path"] = None
@@ -482,16 +495,59 @@ def build_new_layout_launcher(parent):
                 win.destroy()
         except Exception:
             pass
+    def _launcher_is_active():
+        try:
+            focused = root.focus_displayof()
+            if not focused:
+                return False
+            focused_top = focused.winfo_toplevel()
+            if focused_top == root:
+                return True
+            preview_win = preview_state.get("win")
+            return bool(preview_win) and preview_win.winfo_exists() and focused_top == preview_win
+        except Exception:
+            return False
+    def _current_preview_path():
+        try:
+            sel = templates_listbox.curselection()
+            return template_paths[sel[0]] if sel else None
+        except Exception:
+            return None
     def show_preview(path):
+        cancel_pending_preview()
+        preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
+        request_id = preview_state["request_id"]
         if not path:
             close_preview()
             return
-        if preview_state.get("path") == path:
-            return
-        close_preview()
-        win = open_json_preview(root, path, template_mode=True)
-        preview_state["win"] = win
-        preview_state["path"] = path if win is not None else None
+        def _do_show(_path=path, _request_id=request_id):
+            preview_state["after_id"] = None
+            if _request_id != preview_state.get("request_id"):
+                return
+            if _current_preview_path() != _path:
+                return
+            if not _launcher_is_active():
+                return
+            if preview_state.get("path") == _path and preview_state.get("win") is not None:
+                try:
+                    if preview_state["win"].winfo_exists():
+                        return
+                except Exception:
+                    pass
+            close_preview()
+            win = open_json_preview(root, _path, template_mode=True)
+            preview_state["win"] = win
+            preview_state["path"] = _path if win is not None else None
+        preview_state["after_id"] = root.after_idle(_do_show)
+    def _on_launcher_focus_in(event=None):
+        show_preview(_current_preview_path())
+    def _on_launcher_focus_out(event=None):
+        def _close_if_really_inactive():
+            if _launcher_is_active():
+                return
+            preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
+            close_preview()
+        root.after_idle(_close_if_really_inactive)
     def _update_section_page_states(count):  
         for idx, sp in enumerate(section_page_spinboxes):  
             if idx < count:  
@@ -616,6 +672,8 @@ def build_new_layout_launcher(parent):
     btn_row.grid(row=4, column=0, columnspan=8, pady=(12, 0), sticky="w")  
     ttk.Button(btn_row, text="New / Open", command=on_new_or_open, width=14).pack(side="left", padx=(0, 8))  
     ttk.Button(btn_row, text="Refresh Templates", command=refresh_templates, width=16).pack(side="left")  
+    root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
+    root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
     root.protocol("WM_DELETE_WINDOW", lambda: (close_preview(), root.destroy()))
     return root  
 def build_template_editor_launcher(parent):
@@ -672,8 +730,17 @@ def build_template_editor_launcher(parent):
     template_rows = []
     row_by_iid = {}
     sort_state = {"col": None, "desc": False}
-    preview_state = {"win": None, "path": None}
+    preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0}
+    def cancel_pending_preview():
+        after_id = preview_state.get("after_id")
+        preview_state["after_id"] = None
+        if after_id is not None:
+            try:
+                root.after_cancel(after_id)
+            except Exception:
+                pass
     def close_preview():
+        cancel_pending_preview()
         win = preview_state.get("win")
         preview_state["win"] = None
         preview_state["path"] = None
@@ -682,16 +749,55 @@ def build_template_editor_launcher(parent):
                 win.destroy()
         except Exception:
             pass
+    def _launcher_is_active():
+        try:
+            focused = root.focus_displayof()
+            if not focused:
+                return False
+            focused_top = focused.winfo_toplevel()
+            if focused_top == root:
+                return True
+            preview_win = preview_state.get("win")
+            return bool(preview_win) and preview_win.winfo_exists() and focused_top == preview_win
+        except Exception:
+            return False
+    def _current_preview_path():
+        return selected_path()
     def show_preview(path):
+        cancel_pending_preview()
+        preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
+        request_id = preview_state["request_id"]
         if not path:
             close_preview()
             return
-        if preview_state.get("path") == path:
-            return
-        close_preview()
-        win = open_json_preview(root, path, template_mode=True)
-        preview_state["win"] = win
-        preview_state["path"] = path if win is not None else None
+        def _do_show(_path=path, _request_id=request_id):
+            preview_state["after_id"] = None
+            if _request_id != preview_state.get("request_id"):
+                return
+            if _current_preview_path() != _path:
+                return
+            if not _launcher_is_active():
+                return
+            if preview_state.get("path") == _path and preview_state.get("win") is not None:
+                try:
+                    if preview_state["win"].winfo_exists():
+                        return
+                except Exception:
+                    pass
+            close_preview()
+            win = open_json_preview(root, _path, template_mode=True)
+            preview_state["win"] = win
+            preview_state["path"] = _path if win is not None else None
+        preview_state["after_id"] = root.after_idle(_do_show)
+    def _on_launcher_focus_in(event=None):
+        show_preview(_current_preview_path())
+    def _on_launcher_focus_out(event=None):
+        def _close_if_really_inactive():
+            if _launcher_is_active():
+                return
+            preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
+            close_preview()
+        root.after_idle(_close_if_really_inactive)
 
     def sort_rows(rows):
         col = sort_state.get("col")
@@ -786,6 +892,7 @@ def build_template_editor_launcher(parent):
             return
         close_preview()
         open_json_in_layout(parent, path, template_mode=True)
+        close_preview()
         root.destroy()
 
     def new_template():
@@ -853,6 +960,8 @@ def build_template_editor_launcher(parent):
     ttk.Button(right_btns, text="Refresh", command=refresh, width=10).pack(side="right")
     ttk.Button(right_btns, text="Regen Preview", command=regenerate_selected_preview, width=14).pack(side="right", padx=(0, 8))
     refresh()
+    root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
+    root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
     root.protocol("WM_DELETE_WINDOW", lambda: (close_preview(), root.destroy()))
     return root
 
@@ -909,8 +1018,17 @@ def build_main_launcher():
     sort_state = {"col": None, "desc": False}  
     refresh_job = {"id": None}  
     auto_refresh_ms = 5000  
-    preview_state = {"win": None, "path": None}
+    preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0}
+    def cancel_pending_preview():
+        after_id = preview_state.get("after_id")
+        preview_state["after_id"] = None
+        if after_id is not None:
+            try:
+                root.after_cancel(after_id)
+            except Exception:
+                pass
     def close_preview():
+        cancel_pending_preview()
         win = preview_state.get("win")
         preview_state["win"] = None
         preview_state["path"] = None
@@ -919,16 +1037,55 @@ def build_main_launcher():
                 win.destroy()
         except Exception:
             pass
+    def _launcher_is_active():
+        try:
+            focused = root.focus_displayof()
+            if not focused:
+                return False
+            focused_top = focused.winfo_toplevel()
+            if focused_top == root:
+                return True
+            preview_win = preview_state.get("win")
+            return bool(preview_win) and preview_win.winfo_exists() and focused_top == preview_win
+        except Exception:
+            return False
+    def _current_preview_path():
+        return selected_path()
     def show_preview(path):
+        cancel_pending_preview()
+        preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
+        request_id = preview_state["request_id"]
         if not path:
             close_preview()
             return
-        if preview_state.get("path") == path:
-            return
-        close_preview()
-        win = open_json_preview(root, path, template_mode=False)
-        preview_state["win"] = win
-        preview_state["path"] = path if win is not None else None
+        def _do_show(_path=path, _request_id=request_id):
+            preview_state["after_id"] = None
+            if _request_id != preview_state.get("request_id"):
+                return
+            if _current_preview_path() != _path:
+                return
+            if not _launcher_is_active():
+                return
+            if preview_state.get("path") == _path and preview_state.get("win") is not None:
+                try:
+                    if preview_state["win"].winfo_exists():
+                        return
+                except Exception:
+                    pass
+            close_preview()
+            win = open_json_preview(root, _path, template_mode=False)
+            preview_state["win"] = win
+            preview_state["path"] = _path if win is not None else None
+        preview_state["after_id"] = root.after_idle(_do_show)
+    def _on_launcher_focus_in(event=None):
+        show_preview(_current_preview_path())
+    def _on_launcher_focus_out(event=None):
+        def _close_if_really_inactive():
+            if _launcher_is_active():
+                return
+            preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
+            close_preview()
+        root.after_idle(_close_if_really_inactive)
     def sort_rows(rows):  
         col = sort_state.get("col")  
         if not col:  
@@ -1267,7 +1424,10 @@ def build_main_launcher():
                 root.after_cancel(refresh_job["id"])  
         except Exception:  
             pass  
+        close_preview()
         root.destroy()  
+    root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
+    root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
     root.protocol("WM_DELETE_WINDOW", on_close)  
     refresh(preserve_state=False)  
     schedule_refresh()  
