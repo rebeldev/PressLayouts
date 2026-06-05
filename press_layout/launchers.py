@@ -488,6 +488,28 @@ def _capture_window_image(win):
     return image
 
 
+def _build_preview_image_from_layout_window(win, scale=0.75):
+    try:
+        builder = getattr(win, "build_preview_image", None)
+        if callable(builder):
+            image = builder(scale=scale)
+            if image is not None:
+                return image
+    except Exception:
+        pass
+    try:
+        print_builder = getattr(win, "build_print_image", None)
+        if callable(print_builder):
+            image = print_builder()
+            if image is not None:
+                image = image.crop((0, 0, image.width, max(1, int(image.height * 0.5))))
+                return _resize_preview_image(image, scale=scale)
+    except Exception:
+        pass
+    image = _capture_window_image(win)
+    return _resize_preview_image(image, scale=scale)
+
+
 def _create_image_preview_window(root, image, title, launcher):
     try:
         from PIL import ImageTk
@@ -573,9 +595,8 @@ def open_json_preview(root, json_path, template_mode=False):
             preview_title = "Preview"
         except Exception:
             preview_title = "Preview"
-        image = _capture_window_image(temp_win)
+        image = _build_preview_image_from_layout_window(temp_win, scale=0.75)
         try:
-            image = _resize_preview_image(image, scale=0.75)
             out_path = preview_image_path_for_json(json_path)
             ensure_dir(os.path.dirname(out_path))
             image.save(out_path, format="PNG")

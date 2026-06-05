@@ -960,8 +960,26 @@ def _capture_window_image_for_preview(win):
 def save_window_preview_image(win, json_path: str, scale=0.75):
     if not win or not json_path:
         return None
-    image = _capture_window_image_for_preview(win)
-    image = _resize_preview_image_helper(image, scale=scale)
+    image = None
+    try:
+        builder = getattr(win, "build_preview_image", None)
+        if callable(builder):
+            image = builder(scale=scale)
+    except Exception:
+        image = None
+    if image is None:
+        try:
+            print_builder = getattr(win, "build_print_image", None)
+            if callable(print_builder):
+                image = print_builder()
+                if image is not None:
+                    image = image.crop((0, 0, image.width, max(1, int(image.height * 0.5))))
+                    image = _resize_preview_image_helper(image, scale=scale)
+        except Exception:
+            image = None
+    if image is None:
+        image = _capture_window_image_for_preview(win)
+        image = _resize_preview_image_helper(image, scale=scale)
     out_path = preview_image_path_for_json(json_path)
     ensure_dir(os.path.dirname(out_path))
     image.save(out_path, format="PNG")

@@ -65,7 +65,7 @@ def _normalize_template_data(data):
     normalized["units"] = normalized_units
     return normalized
 
-def _save_preview_for_current_window(win, json_path):
+def _save_preview_image_for_window(win, json_path, scale=0.75):
     if not win or not json_path:
         return
     try:
@@ -73,9 +73,24 @@ def _save_preview_for_current_window(win, json_path):
     except Exception:
         pass
     try:
-        save_window_preview_image(win, json_path, scale=0.75)
+        builder = getattr(win, "build_preview_image", None)
+        if callable(builder):
+            image = builder(scale=scale)
+            if image is not None:
+                out_path = preview_image_path_for_json(json_path)
+                ensure_dir(os.path.dirname(out_path))
+                image.save(out_path, format="PNG")
+                return
     except Exception:
         pass
+    try:
+        save_window_preview_image(win, json_path, scale=scale)
+    except Exception:
+        pass
+
+
+def _save_preview_for_current_window(win, json_path):
+    _save_preview_image_for_window(win, json_path, scale=0.75)
 
 
 def _save_preview_for_saved_template(ctx, template_path):
@@ -96,7 +111,7 @@ def _save_preview_for_saved_template(ctx, template_path):
             return
         try:
             temp_win.update_idletasks()
-            save_window_preview_image(temp_win, template_path, scale=0.75)
+            _save_preview_image_for_window(temp_win, template_path, scale=0.75)
         finally:
             try:
                 if temp_win and temp_win.winfo_exists():

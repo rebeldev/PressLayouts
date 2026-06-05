@@ -1102,6 +1102,24 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         draw.text((margin_x + 480, footer_y), f"Plates: {plates_text}", fill="black", font=header_font)
         return img
 
+    def _make_layout_preview_image(scale=0.75):
+        img = _make_layout_print_image()
+        if img is None:
+            return None
+        try:
+            scale = float(scale)
+        except Exception:
+            scale = 0.75
+        scale = max(0.1, min(1.0, scale))
+        preview_img = img.crop((0, 0, img.width, max(1, int(img.height * 0.5))))
+        if scale != 1.0:
+            width, height = preview_img.size
+            preview_img = preview_img.resize(
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                Image.LANCZOS,
+            )
+        return preview_img
+
     # Save buttons
     def print_layout(win, ctx):
         try:
@@ -1245,6 +1263,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     try:
         win.print_layout = lambda: print_layout(win, ctx)
         win.print_starter = lambda: print_starter_sheet()
+        win.build_print_image = _make_layout_print_image
+        win.build_preview_image = _make_layout_preview_image
     except Exception:
         pass
 
