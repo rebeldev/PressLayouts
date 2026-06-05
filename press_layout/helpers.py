@@ -800,6 +800,174 @@ def create_press_unit(
     return unit_frame, section_entry, grid_entries, cell_overlays
 
 
+def preview_image_path_for_json(json_path: str) -> str:
+    base, _ = os.path.splitext(str(json_path or ""))
+    return base + ".preview.png"
+
+
+def remove_preview_image_for_json(json_path: str):
+    path = preview_image_path_for_json(json_path)
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def load_preview_image_for_json(json_path: str):
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    path = preview_image_path_for_json(json_path)
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with Image.open(path) as img:
+            return img.copy()
+    except Exception:
+        return None
+
+
+def _resize_preview_image_helper(image, scale=0.75):
+    try:
+        from PIL import Image
+    except Exception as e:
+        raise RuntimeError(f"Pillow is required for previews: {e}")
+    if image is None:
+        return None
+    try:
+        scale = float(scale)
+    except Exception:
+        scale = 0.75
+    scale = max(0.1, min(1.0, scale))
+    width, height = image.size
+    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    if new_size == image.size:
+        return image
+    return image.resize(new_size, Image.LANCZOS)
+
+
+def _capture_window_image_for_preview(win):
+    try:
+        from PIL import ImageGrab
+    except Exception as e:
+        raise RuntimeError(f"Pillow ImageGrab is required for previews: {e}")
+
+    try:
+        win.update_idletasks()
+        win.lift()
+        try:
+            win.attributes("-topmost", True)
+            win.update()
+            win.attributes("-topmost", False)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    try:
+        left = int(win.winfo_rootx())
+        top = int(win.winfo_rooty())
+        width = max(1, int(win.winfo_width()))
+        height = max(1, int(win.winfo_height()))
+    except Exception:
+        raise RuntimeError("Could not determine preview window bounds.")
+
+    bbox = (left, top, left + width, top + height)
+    image = None
+    try:
+        image = ImageGrab.grab(bbox=bbox, all_screens=True)
+    except Exception:
+        image = None
+
+    if image is None and os.name == 'nt':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            from PIL import Image
+
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+            hwnd = wintypes.HWND(int(win.winfo_id()))
+
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG), ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+            rect_raw = RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect_raw)):
+                raise RuntimeError("GetWindowRect failed")
+            width = max(1, rect_raw.right - rect_raw.left)
+            height = max(1, rect_raw.bottom - rect_raw.top)
+
+            hwnd_dc = user32.GetWindowDC(hwnd)
+            mem_dc = gdi32.CreateCompatibleDC(hwnd_dc)
+            bitmap = gdi32.CreateCompatibleBitmap(hwnd_dc, width, height)
+            old_obj = gdi32.SelectObject(mem_dc, bitmap)
+
+            PW_RENDERFULLCONTENT = 0x00000002
+            result = user32.PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT)
+            if result != 1:
+                result = user32.PrintWindow(hwnd, mem_dc, 0)
+            if result != 1:
+                raise RuntimeError("PrintWindow failed")
+
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", wintypes.DWORD),
+                    ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD),
+                ]
+
+            class BITMAPINFO(ctypes.Structure):
+                _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+
+            bmi = BITMAPINFO()
+            bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth = width
+            bmi.bmiHeader.biHeight = -height
+            bmi.bmiHeader.biPlanes = 1
+            bmi.bmiHeader.biBitCount = 32
+            bmi.bmiHeader.biCompression = 0
+
+            buffer_len = width * height * 4
+            buffer = ctypes.create_string_buffer(buffer_len)
+            rows = gdi32.GetDIBits(mem_dc, bitmap, 0, height, buffer, ctypes.byref(bmi), 0)
+            if rows == 0:
+                raise RuntimeError("GetDIBits failed")
+            image = Image.frombuffer("RGBA", (width, height), buffer, "raw", "BGRA", 0, 1).convert("RGB")
+
+            gdi32.SelectObject(mem_dc, old_obj)
+            gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(hwnd, hwnd_dc)
+        except Exception:
+            image = None
+
+    if image is None:
+        raise RuntimeError("Could not capture layout preview image.")
+    return image
+
+
+def save_window_preview_image(win, json_path: str, scale=0.75):
+    if not win or not json_path:
+        return None
+    image = _capture_window_image_for_preview(win)
+    image = _resize_preview_image_helper(image, scale=scale)
+    out_path = preview_image_path_for_json(json_path)
+    ensure_dir(os.path.dirname(out_path))
+    image.save(out_path, format="PNG")
+    return out_path
+
+
 WINDOW_STATE_DIRNAME = "Press Layout"
 WINDOW_STATE_FILENAME = "window_state.json"
 WINDOW_DEBUG_FILENAME = "window_state_debug.log"

@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox  
 from .config import *  
 from .helpers import *  
+from . import helpers as helpers_mod
 from .layout_builder import build_press_layout  
 def list_matching_templates(press_name, format_name, section_count=None, section_pages=None):  
     """  
@@ -63,6 +64,295 @@ def open_json_in_layout(root, json_path, template_mode=False):
         load_as_copy=False,
     )
     return win
+
+
+def _resize_preview_image(image, scale=0.75):
+    try:
+        from PIL import Image
+    except Exception as e:
+        raise RuntimeError(f"Pillow is required for previews: {e}")
+    if image is None:
+        return None
+    try:
+        scale = float(scale)
+    except Exception:
+        scale = 0.75
+    scale = max(0.1, min(1.0, scale))
+    width, height = image.size
+    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    if new_size == image.size:
+        return image
+    return image.resize(new_size, Image.LANCZOS)
+
+
+def _window_rect(win):
+    try:
+        win.update_idletasks()
+    except Exception:
+        pass
+    try:
+        left = int(win.winfo_rootx())
+        top = int(win.winfo_rooty())
+        width = int(win.winfo_width())
+        height = int(win.winfo_height())
+    except Exception:
+        return None
+    return {
+        "left": left,
+        "top": top,
+        "right": left + max(1, width),
+        "bottom": top + max(1, height),
+    }
+
+
+def _launcher_monitor_rect(launcher):
+    try:
+        rect = _window_rect(launcher)
+    except Exception:
+        rect = None
+    try:
+        monitors = helpers_mod._monitor_rects_win32()
+    except Exception:
+        monitors = []
+    if rect and monitors:
+        try:
+            monitor = helpers_mod._find_best_monitor_for_rect(rect, monitors)
+            if monitor:
+                return monitor
+        except Exception:
+            pass
+    try:
+        sw = int(launcher.winfo_screenwidth())
+        sh = int(launcher.winfo_screenheight())
+    except Exception:
+        sw, sh = 1920, 1080
+    return {"left": 0, "top": 0, "right": sw, "bottom": sh, "primary": True}
+
+
+def _clamp_preview_position(monitor, x, y, width, height, margin=20):
+    left = int(monitor.get("left", 0))
+    top = int(monitor.get("top", 0))
+    right = int(monitor.get("right", left + width))
+    bottom = int(monitor.get("bottom", top + height))
+    min_x = left + margin
+    min_y = top + margin
+    max_x = max(min_x, right - width - margin)
+    max_y = max(min_y, bottom - height - margin)
+    x = max(min_x, min(int(x), max_x))
+    y = max(min_y, min(int(y), max_y))
+    return x, y
+
+
+def _position_window_on_launcher_monitor(win, launcher, x_offset=32, y_offset=32):
+    monitor = _launcher_monitor_rect(launcher)
+    try:
+        root_rect = _window_rect(launcher) or {
+            "left": int(monitor.get("left", 0)),
+            "top": int(monitor.get("top", 0)),
+            "right": int(monitor.get("left", 0)) + 800,
+            "bottom": int(monitor.get("top", 0)) + 600,
+        }
+        win.update_idletasks()
+        width = max(1, int(win.winfo_reqwidth() or win.winfo_width() or 800))
+        height = max(1, int(win.winfo_reqheight() or win.winfo_height() or 600))
+        x = root_rect["left"] + x_offset
+        y = root_rect["top"] + y_offset
+        x, y = _clamp_preview_position(monitor, x, y, width, height)
+        win.geometry(f"{width}x{height}+{x}+{y}")
+    except Exception:
+        pass
+    return monitor
+
+
+def _capture_window_image(win):
+    try:
+        from PIL import ImageGrab
+    except Exception as e:
+        raise RuntimeError(f"Pillow ImageGrab is required for previews: {e}")
+
+    # Prefer a real screenshot of the actual layout window. This matches the
+    # on-screen UI instead of using the print preview rendering path.
+    try:
+        win.update_idletasks()
+        win.lift()
+        try:
+            win.attributes("-topmost", True)
+            win.update()
+            win.attributes("-topmost", False)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    rect = _window_rect(win)
+    if not rect:
+        raise RuntimeError("Could not determine preview window bounds.")
+    bbox = (rect["left"], rect["top"], rect["right"], rect["bottom"])
+
+    # Give Tk/Windows a brief moment so the fully rendered layout is visible
+    # before the screenshot is taken.
+    try:
+        win.after(60)
+        win.update()
+    except Exception:
+        pass
+
+    image = None
+    try:
+        image = ImageGrab.grab(bbox=bbox, all_screens=True)
+    except Exception:
+        image = None
+
+    # Fallback to PrintWindow when available for a more robust capture on Windows.
+    if image is None and os.name == 'nt':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            from PIL import Image
+
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+            hwnd = wintypes.HWND(int(win.winfo_id()))
+
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG), ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+            rect_raw = RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect_raw)):
+                raise RuntimeError("GetWindowRect failed")
+            width = max(1, rect_raw.right - rect_raw.left)
+            height = max(1, rect_raw.bottom - rect_raw.top)
+
+            hwnd_dc = user32.GetWindowDC(hwnd)
+            mem_dc = gdi32.CreateCompatibleDC(hwnd_dc)
+            bitmap = gdi32.CreateCompatibleBitmap(hwnd_dc, width, height)
+            old_obj = gdi32.SelectObject(mem_dc, bitmap)
+
+            PW_RENDERFULLCONTENT = 0x00000002
+            result = user32.PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT)
+            if result != 1:
+                result = user32.PrintWindow(hwnd, mem_dc, 0)
+            if result != 1:
+                raise RuntimeError("PrintWindow failed")
+
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", wintypes.DWORD),
+                    ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD),
+                ]
+
+            class BITMAPINFO(ctypes.Structure):
+                _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+
+            bmi = BITMAPINFO()
+            bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth = width
+            bmi.bmiHeader.biHeight = -height
+            bmi.bmiHeader.biPlanes = 1
+            bmi.bmiHeader.biBitCount = 32
+            bmi.bmiHeader.biCompression = 0
+
+            buffer_len = width * height * 4
+            buffer = ctypes.create_string_buffer(buffer_len)
+            rows = gdi32.GetDIBits(mem_dc, bitmap, 0, height, buffer, ctypes.byref(bmi), 0)
+            if rows == 0:
+                raise RuntimeError("GetDIBits failed")
+            image = Image.frombuffer("RGBA", (width, height), buffer, "raw", "BGRA", 0, 1).convert("RGB")
+
+            gdi32.SelectObject(mem_dc, old_obj)
+            gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(hwnd, hwnd_dc)
+        except Exception:
+            image = None
+
+    if image is None:
+        raise RuntimeError("Could not capture layout preview image.")
+    return image
+
+
+def _create_image_preview_window(root, image, title, launcher):
+    try:
+        from PIL import ImageTk
+    except Exception as e:
+        raise RuntimeError(f"Pillow is required for previews: {e}")
+    preview = tk.Toplevel(root)
+    preview.title(title)
+    try:
+        preview.transient(root)
+    except Exception:
+        pass
+    outer = ttk.Frame(preview, padding=8)
+    outer.pack(fill="both", expand=True)
+    label = ttk.Label(outer)
+    label.pack(fill="both", expand=True)
+    photo = ImageTk.PhotoImage(image)
+    label.configure(image=photo)
+    label.image = photo
+    preview._preview_photo = photo
+    try:
+        width, height = image.size
+        preview.geometry(f"{max(320, width + 24)}x{max(220, height + 24)}")
+        monitor = _launcher_monitor_rect(launcher)
+        launcher_rect = _window_rect(launcher) or monitor
+        # Prefer to open to the right of the launcher, but clamp to the same monitor.
+        x = launcher_rect["right"] + 16
+        y = launcher_rect["top"]
+        x, y = _clamp_preview_position(monitor, x, y, max(320, width + 24), max(220, height + 24))
+        preview.geometry(f"{max(320, width + 24)}x{max(220, height + 24)}+{x}+{y}")
+    except Exception:
+        pass
+    return preview
+
+
+def open_json_preview(root, json_path, template_mode=False):
+    image = load_preview_image_for_json(json_path)
+    preview_title = None
+    if image is not None:
+        try:
+            data = safe_read_json(json_path) or {}
+            press = data.get("press") or ""
+            fmt = data.get("format") or ""
+            preview_title = f"Preview - {press} - {fmt}".strip(" -") or "Preview"
+        except Exception:
+            preview_title = "Preview"
+        return _create_image_preview_window(root, image, preview_title, launcher=root)
+
+    temp_win = open_json_in_layout(root, json_path, template_mode=template_mode)
+    if not temp_win:
+        return None
+    preview_title = None
+    try:
+        _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
+        try:
+            preview_title = f"Preview - {temp_win.title()}"
+        except Exception:
+            preview_title = "Preview"
+        image = _capture_window_image(temp_win)
+        try:
+            image = _resize_preview_image(image, scale=0.75)
+            out_path = preview_image_path_for_json(json_path)
+            ensure_dir(os.path.dirname(out_path))
+            image.save(out_path, format="PNG")
+        except Exception:
+            pass
+    finally:
+        try:
+            if temp_win and temp_win.winfo_exists():
+                temp_win.destroy()
+        except Exception:
+            pass
+    return _create_image_preview_window(root, image, preview_title or "Preview", launcher=root)
+
 
 def open_new_template(parent):
     """Open a new blank layout in template mode."""
@@ -182,6 +472,26 @@ def build_new_layout_launcher(parent):
     frame.rowconfigure(3, weight=1)  
     frame.columnconfigure(1, weight=1)  
     template_paths = []  
+    preview_state = {"win": None, "path": None}
+    def close_preview():
+        win = preview_state.get("win")
+        preview_state["win"] = None
+        preview_state["path"] = None
+        try:
+            if win and win.winfo_exists():
+                win.destroy()
+        except Exception:
+            pass
+    def show_preview(path):
+        if not path:
+            close_preview()
+            return
+        if preview_state.get("path") == path:
+            return
+        close_preview()
+        win = open_json_preview(root, path, template_mode=True)
+        preview_state["win"] = win
+        preview_state["path"] = path if win is not None else None
     def _update_section_page_states(count):  
         for idx, sp in enumerate(section_page_spinboxes):  
             if idx < count:  
@@ -286,6 +596,7 @@ def build_new_layout_launcher(parent):
         cfg["template_mode"] = False  
         sel = templates_listbox.curselection()  
         load_path = template_paths[sel[0]] if sel else None  
+        close_preview()
         win = tk.Toplevel(parent)  
         build_press_layout(  
             win,  
@@ -294,12 +605,18 @@ def build_new_layout_launcher(parent):
             load_path=load_path,  
             load_as_copy=True  # NEW LAYOUT from template => copy  
         )  
+        close_preview()
         root.destroy()  
-    templates_listbox.bind("<Double-Button-1>", lambda e: on_new_or_open())  
+    def _on_template_selection_change(event=None):
+        sel = templates_listbox.curselection()
+        show_preview(template_paths[sel[0]] if sel else None)
+    templates_listbox.bind("<<ListboxSelect>>", _on_template_selection_change)
+    templates_listbox.bind("<Double-Button-1>", lambda e: on_new_or_open())
     btn_row = ttk.Frame(frame)  
     btn_row.grid(row=4, column=0, columnspan=8, pady=(12, 0), sticky="w")  
     ttk.Button(btn_row, text="New / Open", command=on_new_or_open, width=14).pack(side="left", padx=(0, 8))  
     ttk.Button(btn_row, text="Refresh Templates", command=refresh_templates, width=16).pack(side="left")  
+    root.protocol("WM_DELETE_WINDOW", lambda: (close_preview(), root.destroy()))
     return root  
 def build_template_editor_launcher(parent):
     root = tk.Toplevel(parent)
@@ -355,6 +672,26 @@ def build_template_editor_launcher(parent):
     template_rows = []
     row_by_iid = {}
     sort_state = {"col": None, "desc": False}
+    preview_state = {"win": None, "path": None}
+    def close_preview():
+        win = preview_state.get("win")
+        preview_state["win"] = None
+        preview_state["path"] = None
+        try:
+            if win and win.winfo_exists():
+                win.destroy()
+        except Exception:
+            pass
+    def show_preview(path):
+        if not path:
+            close_preview()
+            return
+        if preview_state.get("path") == path:
+            return
+        close_preview()
+        win = open_json_preview(root, path, template_mode=True)
+        preview_state["win"] = win
+        preview_state["path"] = path if win is not None else None
 
     def sort_rows(rows):
         col = sort_state.get("col")
@@ -447,12 +784,37 @@ def build_template_editor_launcher(parent):
         if not path:
             messagebox.showinfo("Select a Template", "Select a template to open.")
             return
+        close_preview()
         open_json_in_layout(parent, path, template_mode=True)
         root.destroy()
 
     def new_template():
+        close_preview()
         open_new_template(parent)
         root.destroy()
+
+    def regenerate_selected_preview():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Template", "Select a template to regenerate its preview.")
+            return
+        close_preview()
+        temp_win = None
+        try:
+            temp_win = open_json_in_layout(root, path, template_mode=True)
+            if not temp_win:
+                return
+            _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
+            save_window_preview_image(temp_win, path, scale=0.75)
+            show_preview(path)
+        except Exception as exc:
+            messagebox.showerror("Regen Preview Failed", str(exc), parent=root)
+        finally:
+            try:
+                if temp_win and temp_win.winfo_exists():
+                    temp_win.destroy()
+            except Exception:
+                pass
 
     def delete_selected():
         path = selected_path()
@@ -467,12 +829,16 @@ def build_template_editor_launcher(parent):
         ):
             return
         try:
+            if preview_state.get("path") == path:
+                close_preview()
+            remove_preview_image_for_json(path)
             os.remove(path)
         except Exception as exc:
             messagebox.showerror("Delete Template", f"Could not delete template:\n{exc}", parent=root)
             return
         refresh()
 
+    tree.bind("<<TreeviewSelect>>", lambda e: show_preview(selected_path()))
     tree.bind("<Double-Button-1>", lambda e: open_selected())
     btns = ttk.Frame(frame)
     btns.grid(row=2, column=0, pady=12, sticky="ew")
@@ -485,7 +851,9 @@ def build_template_editor_launcher(parent):
     ttk.Button(left_btns, text="Open Template", command=open_selected, width=14).pack(side="left", padx=(0, 8))
     ttk.Button(left_btns, text="Delete", command=delete_selected, width=10).pack(side="left", padx=(0, 8))
     ttk.Button(right_btns, text="Refresh", command=refresh, width=10).pack(side="right")
+    ttk.Button(right_btns, text="Regen Preview", command=regenerate_selected_preview, width=14).pack(side="right", padx=(0, 8))
     refresh()
+    root.protocol("WM_DELETE_WINDOW", lambda: (close_preview(), root.destroy()))
     return root
 
 def build_main_launcher():  
@@ -541,6 +909,26 @@ def build_main_launcher():
     sort_state = {"col": None, "desc": False}  
     refresh_job = {"id": None}  
     auto_refresh_ms = 5000  
+    preview_state = {"win": None, "path": None}
+    def close_preview():
+        win = preview_state.get("win")
+        preview_state["win"] = None
+        preview_state["path"] = None
+        try:
+            if win and win.winfo_exists():
+                win.destroy()
+        except Exception:
+            pass
+    def show_preview(path):
+        if not path:
+            close_preview()
+            return
+        if preview_state.get("path") == path:
+            return
+        close_preview()
+        win = open_json_preview(root, path, template_mode=False)
+        preview_state["win"] = win
+        preview_state["path"] = path if win is not None else None
     def sort_rows(rows):  
         col = sort_state.get("col")  
         if not col:  
@@ -664,9 +1052,34 @@ def build_main_launcher():
         if not path:  
             messagebox.showinfo("Select a Layout", "Select a layout to open.")  
             return  
+        close_preview()
         open_json_in_layout(root, path, template_mode=False)  
     def new_layout():  
+        close_preview()
         build_new_layout_launcher(root)  
+    def regenerate_selected_preview():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Layout", "Select a layout to regenerate its preview.")
+            return
+        close_preview()
+        temp_win = None
+        try:
+            temp_win = open_json_in_layout(root, path, template_mode=False)
+            if not temp_win:
+                return
+            _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
+            save_window_preview_image(temp_win, path, scale=0.75)
+            show_preview(path)
+        except Exception as exc:
+            messagebox.showerror("Regen Preview Failed", str(exc))
+        finally:
+            try:
+                if temp_win and temp_win.winfo_exists():
+                    temp_win.destroy()
+            except Exception:
+                pass
+
     def delete_selected():
         path = selected_path()
         if not path:
@@ -676,26 +1089,26 @@ def build_main_launcher():
         if not messagebox.askyesno("Delete Layout", f"Delete the selected layout file:\n\n{name}"):
             return
         try:
+            if preview_state.get("path") == path:
+                close_preview()
+            remove_preview_image_for_json(path)
             os.remove(path)
         except Exception as exc:
             messagebox.showerror("Delete Failed", f"Could not delete {name}:\n{exc}")
             return
         refresh(preserve_state=False)
     def templates():  
+        close_preview()
         build_template_editor_launcher(root)  
     def cleanup_old_layouts():  
         today = datetime.now().date()  
-        stale_rows = []  
-        for row in build_layout_rows():  
-            issue_dt = row.get("issue_dt")  
-            if issue_dt and issue_dt.date() < today:  
-                stale_rows.append(row)  
-        if not stale_rows:  
-            messagebox.showinfo("Cleanup", "No layouts were found with an issue date before today.")  
+        all_rows = build_layout_rows()  
+        if not all_rows:  
+            messagebox.showinfo("Cleanup", "No layouts are currently available.")  
             return  
-        stale_rows.sort(key=lambda r: (r.get("issue_dt") or datetime.min, (r.get("product") or "").lower()))  
+        all_rows.sort(key=lambda r: (r.get("issue_dt") or datetime.max, (r.get("product") or "").lower()))  
         dialog = tk.Toplevel(root)  
-        dialog.title("Cleanup Old Layouts")  
+        dialog.title("Cleanup Layouts")  
         dialog.transient(root)  
         dialog.geometry("920x420")  
         dialog.minsize(820, 360)  
@@ -707,7 +1120,7 @@ def build_main_launcher():
         outer.columnconfigure(0, weight=1)  
         ttk.Label(  
             outer,  
-            text="Layouts with an issue date before today (double-click a row to keep/remove it from deletion):",  
+            text="All layouts are shown below. Layouts with an issue date of today or earlier are pre-selected for deletion (double-click a row to keep/remove it from deletion):",  
             font=(None, 10, "bold")  
         ).grid(row=0, column=0, sticky="w")  
         cleanup_columns = ("delete", "issue", "product", "press", "format", "saved")  
@@ -728,12 +1141,15 @@ def build_main_launcher():
         cleanup_tree.column("press", width=90, anchor="center")  
         cleanup_tree.column("format", width=120, anchor="center")  
         cleanup_tree.column("saved", width=170, anchor="center")  
-        delete_state = {row["path"]: True for row in stale_rows}  
+        delete_state = {  
+            row["path"]: bool(row.get("issue_dt") and row.get("issue_dt").date() <= today)  
+            for row in all_rows  
+        }  
         def checkbox_value(path):  
             return "☑" if delete_state.get(path, False) else "☐"  
         def populate_cleanup_tree():  
             cleanup_tree.delete(*cleanup_tree.get_children())  
-            for row in stale_rows:  
+            for row in all_rows:  
                 path = row["path"]  
                 cleanup_tree.insert("", "end", iid=path, values=(  
                     checkbox_value(path),  
@@ -788,7 +1204,8 @@ def build_main_launcher():
             dialog.destroy()  
         ttk.Button(btns, text="Delete", command=delete_selected_cleanup, width=12).pack(side="left", padx=(0, 8))  
         ttk.Button(btns, text="Cancel", command=dialog.destroy, width=12).pack(side="left")  
-    tree.bind("<Double-Button-1>", lambda e: open_selected())  
+    tree.bind("<<TreeviewSelect>>", lambda e: show_preview(selected_path()))
+    tree.bind("<Double-Button-1>", lambda e: open_selected())
     btns = ttk.Frame(frame)
     btns.grid(row=3, column=0, columnspan=2, pady=12, sticky="ew")
     btns.columnconfigure(0, weight=1)
@@ -802,6 +1219,7 @@ def build_main_launcher():
     ttk.Button(right_btns, text="Delete", command=delete_selected, width=12).pack(side="right", padx=(0, 8))
     ttk.Button(right_btns, text="Cleanup", command=cleanup_old_layouts, width=12).pack(side="right", padx=(0, 8))
     ttk.Button(right_btns, text="Refresh", command=lambda: refresh(preserve_state=True), width=12).pack(side="right")
+    ttk.Button(right_btns, text="Regen Preview", command=regenerate_selected_preview, width=14).pack(side="right", padx=(0, 8))
     # Print buttons for selected layout
     def _print_selected_starter():
         path = selected_path()
@@ -809,6 +1227,7 @@ def build_main_launcher():
             messagebox.showinfo("Select a Layout", "Select a layout to print.")
             return
         try:
+            close_preview()
             win = open_json_in_layout(root, path, template_mode=False)
             if hasattr(win, "print_starter"):
                 win.print_starter()
@@ -827,6 +1246,7 @@ def build_main_launcher():
             messagebox.showinfo("Select a Layout", "Select a layout to print.")
             return
         try:
+            close_preview()
             win = open_json_in_layout(root, path, template_mode=False)
             if hasattr(win, "print_layout"):
                 win.print_layout()

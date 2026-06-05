@@ -65,6 +65,48 @@ def _normalize_template_data(data):
     normalized["units"] = normalized_units
     return normalized
 
+def _save_preview_for_current_window(win, json_path):
+    if not win or not json_path:
+        return
+    try:
+        win.update_idletasks()
+    except Exception:
+        pass
+    try:
+        save_window_preview_image(win, json_path, scale=0.75)
+    except Exception:
+        pass
+
+
+def _save_preview_for_saved_template(ctx, template_path):
+    if not template_path:
+        return
+    try:
+        parent = None
+        try:
+            if ctx.get("issue_entry") is not None:
+                parent = ctx["issue_entry"].winfo_toplevel()
+        except Exception:
+            parent = None
+        if parent is None:
+            return
+        from .launchers import open_json_in_layout
+        temp_win = open_json_in_layout(parent, template_path, template_mode=True)
+        if not temp_win:
+            return
+        try:
+            temp_win.update_idletasks()
+            save_window_preview_image(temp_win, template_path, scale=0.75)
+        finally:
+            try:
+                if temp_win and temp_win.winfo_exists():
+                    temp_win.destroy()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def collect_layout_data(ctx):
     now = datetime.now().isoformat(timespec="seconds")
     data = {
@@ -226,6 +268,7 @@ def do_save(win, ctx):
         if ctx.get("template_mode", False):
             data = _normalize_template_data(data)
         safe_write_json(ctx["file_path"], data)
+        _save_preview_for_current_window(win, ctx["file_path"])
         
         # If saving a layout (not template mode) and imposition doesn't match existing template, ask to save as template
         if not ctx.get("template_mode", False):
@@ -270,6 +313,7 @@ def do_save_as(win, ctx):
         if not data.get("name"):
             data["name"] = os.path.splitext(os.path.basename(path))[0]
         safe_write_json(path, data)
+        _save_preview_for_current_window(win, path)
         ctx["file_path"] = path
         ctx["layout_name"] = data["name"]
         win.title(f"{ctx['title_base']}  —  {os.path.basename(path)}")
