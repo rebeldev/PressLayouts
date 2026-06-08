@@ -699,7 +699,7 @@ def build_new_layout_launcher(parent):
     format_combo = ttk.Combobox(frame, textvariable=format_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=16)  
     format_combo.grid(row=1, column=1, sticky="w", padx=(0, 24))  
     # Sections + Pages  
-    ttk.Label(frame, text="Sections:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="w", pady=8, padx=(0, 8))  
+    ttk.Label(frame, text="Pages:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="w", pady=8, padx=(0, 8))  
     section_count_var = tk.StringVar(value="1")  
     section_count_spinbox = ttk.Spinbox(frame, from_=1, to=4, textvariable=section_count_var, width=3, justify="center")  
     section_count_spinbox.grid(row=2, column=1, sticky="w", padx=(0, 24))
@@ -1212,6 +1212,69 @@ def build_template_editor_launcher(parent):
     root.protocol("WM_DELETE_WINDOW", lambda: (close_preview(), root.destroy()))
     return root
 
+def _layout_color_and_plate_counts_from_data(data):
+    if not isinstance(data, dict):
+        return 0, 0
+
+    color_cells = set()
+    for item in data.get("color_cells", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            unit = str(item.get("unit") or "")
+            r = int(item.get("r"))
+            c = int(item.get("c"))
+        except Exception:
+            continue
+        if unit:
+            color_cells.add((unit, r, c))
+
+    color_pages = len(color_cells)
+    plates = 0
+
+    for unit in data.get("units", []):
+        if not isinstance(unit, dict):
+            continue
+        label = str(unit.get("label") or "")
+        grid = unit.get("grid", []) or []
+        if not isinstance(grid, list) or not grid:
+            continue
+
+        cols_unit = max((len(row) for row in grid if isinstance(row, list)), default=0)
+        if cols_unit <= 0:
+            continue
+
+        mid_unit = cols_unit // 2
+        for side in (0, 1):
+            cols_range = range(0, mid_unit) if side == 0 else range(mid_unit, cols_unit)
+            has_color = False
+            has_pages = False
+
+            for r, row in enumerate(grid):
+                row = row if isinstance(row, list) else []
+                for c in cols_range:
+                    if (label, r, c) in color_cells:
+                        has_color = True
+                        break
+                    value = row[c] if c < len(row) else ""
+                    if str(value or "").strip():
+                        has_pages = True
+                if has_color:
+                    break
+
+            if has_color:
+                plates += 4
+            elif has_pages:
+                plates += 1
+
+    return color_pages, plates
+
+
+def _load_layout_color_and_plate_counts(path):
+    data = safe_read_json(path) or {}
+    return _layout_color_and_plate_counts_from_data(data)
+
+
 def build_main_launcher():  
     ensure_dir(LAYOUTS_DIR)  
     ensure_dir(TEMPLATE_DIR)  
@@ -1248,7 +1311,7 @@ def build_main_launcher():
     issue_date_combo = ttk.Combobox(filter_frame, textvariable=issue_date_var, values=["All"], state="readonly", width=16)
     issue_date_combo.grid(row=0, column=7, sticky="w", padx=(8, 0))
 
-    columns = ("issue", "product", "press", "format", "saved")
+    columns = ("issue", "product", "press", "format", "color_pages", "plates", "saved")
     tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
     tree.grid(row=2, column=0, sticky="nsew", pady=(0, 0))
     vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
@@ -1258,11 +1321,15 @@ def build_main_launcher():
     tree.heading("product", text="Product")  
     tree.heading("press", text="Press")  
     tree.heading("format", text="Format")  
+    tree.heading("color_pages", text="Color Pages")  
+    tree.heading("plates", text="Plates")  
     tree.heading("saved", text="Last Saved")  
     tree.column("issue", width=110, anchor="center")  
-    tree.column("product", width=300, anchor="w")  
+    tree.column("product", width=260, anchor="w")  
     tree.column("press", width=90, anchor="center")  
-    tree.column("format", width=120, anchor="center")  
+    tree.column("format", width=100, anchor="center")  
+    tree.column("color_pages", width=95, anchor="center")  
+    tree.column("plates", width=70, anchor="center")  
     tree.column("saved", width=170, anchor="center")  
     row_by_iid = {}  
     sort_state = {"col": None, "desc": False}  
@@ -1337,6 +1404,10 @@ def build_main_launcher():
                 return (r["press"] or "").lower()  
             if col == "format":  
                 return (r["format"] or "").lower()  
+            if col == "color_pages":
+                return int(r.get("color_pages", 0) or 0)
+            if col == "plates":
+                return int(r.get("plates", 0) or 0)
             return ""  
         return sorted(rows, key=keyfunc, reverse=sort_state["desc"])  
     def load_rows_into_tree(rows, preserve_selection=None, preserve_focus=None, preserve_yview=None):  
@@ -1349,6 +1420,8 @@ def build_main_launcher():
                 r["product"],  
                 r["press"],  
                 r["format"],  
+                r.get("color_pages", 0),
+                r.get("plates", 0),
                 r["saved_disp"],  
             ))  
             row_by_iid[iid] = r  
@@ -1369,7 +1442,14 @@ def build_main_launcher():
         format_filter = (format_var.get() or "All").strip()
         issue_filter = (issue_date_var.get() or "All").strip()
         if search_text:
-            searchable = " ".join([row.get("issue_disp", ""), row.get("product", ""), row.get("press", ""), row.get("format", "")]).lower()
+            searchable = " ".join([
+                row.get("issue_disp", ""),
+                row.get("product", ""),
+                row.get("press", ""),
+                row.get("format", ""),
+                str(row.get("color_pages", "")),
+                str(row.get("plates", "")),
+            ]).lower()
             if search_text not in searchable:
                 return False
         if press_filter != "All" and row.get("press", "") != press_filter:
@@ -1385,7 +1465,14 @@ def build_main_launcher():
         press_filter = (press_var.get() or "All").strip()
         format_filter = (format_var.get() or "All").strip()
         if search_text:
-            searchable = " ".join([row.get("issue_disp", ""), row.get("product", ""), row.get("press", ""), row.get("format", "")]).lower()
+            searchable = " ".join([
+                row.get("issue_disp", ""),
+                row.get("product", ""),
+                row.get("press", ""),
+                row.get("format", ""),
+                str(row.get("color_pages", "")),
+                str(row.get("plates", "")),
+            ]).lower()
             if search_text not in searchable:
                 return False
         if press_filter != "All" and row.get("press", "") != press_filter:
@@ -1399,6 +1486,13 @@ def build_main_launcher():
         focused = tree.focus() if preserve_state else None
         yview = tree.yview() if preserve_state else None
         all_rows = build_layout_rows()
+        for row in all_rows:
+            try:
+                color_pages, plates = _load_layout_color_and_plate_counts(row.get("path"))
+            except Exception:
+                color_pages, plates = 0, 0
+            row["color_pages"] = color_pages
+            row["plates"] = plates
         date_values = [row.get("issue_disp", "") for row in all_rows if _matches_layout_filter_no_issue(row) and row.get("issue_disp")]
         unique_dates = ["All"] + sorted(set(date_values), key=lambda t: datetime.strptime(t, "%m/%d/%Y") if parse_issue_date_flexible(t) else t)
         issue_date_combo.configure(values=unique_dates)
@@ -1432,6 +1526,8 @@ def build_main_launcher():
     tree.heading("product", command=lambda: sort_by("product"))
     tree.heading("press", command=lambda: sort_by("press"))
     tree.heading("format", command=lambda: sort_by("format"))
+    tree.heading("color_pages", command=lambda: sort_by("color_pages"))
+    tree.heading("plates", command=lambda: sort_by("plates"))
     tree.heading("saved", command=lambda: sort_by("saved"))
     search_var.trace_add("write", lambda *_: refresh(preserve_state=False))
     press_var.trace_add("write", lambda *_: refresh(preserve_state=False))

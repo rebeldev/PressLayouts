@@ -937,7 +937,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 values.append(value)
         sections_text = " / ".join(values)
         if sections_text:
-            draw.text((margin_x, label_top + 118), f"Sections: {sections_text}", fill="black", font=sections_print_font)
+            draw.text((margin_x, label_top + 118), f"Pages: {sections_text}", fill="black", font=sections_print_font)
         draw.line((margin_x, grid_top - 18, img_w - margin_x, grid_top - 18), fill="#444444", width=3)
         left_order, right_order, unit_map = _visible_print_labels()
         total_units = len(left_order) + len(right_order)
