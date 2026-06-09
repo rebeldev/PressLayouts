@@ -800,6 +800,50 @@ def create_press_unit(
     return unit_frame, section_entry, grid_entries, cell_overlays
 
 
+_PREVIEW_IMAGE_CACHE = {}
+
+
+def _preview_file_signature(path: str):
+    if not path:
+        return None
+    try:
+        stat = os.stat(path)
+    except Exception:
+        return None
+    return (
+        int(getattr(stat, "st_mtime_ns", int(float(getattr(stat, "st_mtime", 0.0)) * 1000000000))),
+        int(getattr(stat, "st_ctime_ns", int(float(getattr(stat, "st_ctime", 0.0)) * 1000000000))),
+        int(getattr(stat, "st_size", 0)),
+    )
+
+
+def _clear_preview_image_cache_entry(json_path: str):
+    path = preview_image_path_for_json(json_path)
+    if not path:
+        return
+    try:
+        _PREVIEW_IMAGE_CACHE.pop(path, None)
+    except Exception:
+        pass
+
+
+def _store_preview_image_in_cache(json_path: str, image):
+    path = preview_image_path_for_json(json_path)
+    if not path or image is None:
+        return
+    signature = _preview_file_signature(path)
+    if signature is None:
+        return
+    try:
+        cached_image = image.copy()
+    except Exception:
+        cached_image = image
+    _PREVIEW_IMAGE_CACHE[path] = {
+        "signature": signature,
+        "image": cached_image,
+    }
+
+
 def preview_image_path_for_json(json_path: str) -> str:
     base, _ = os.path.splitext(str(json_path or ""))
     return base + ".preview.png"
@@ -807,6 +851,7 @@ def preview_image_path_for_json(json_path: str) -> str:
 
 def remove_preview_image_for_json(json_path: str):
     path = preview_image_path_for_json(json_path)
+    _clear_preview_image_cache_entry(json_path)
     try:
         if path and os.path.exists(path):
             os.remove(path)
@@ -820,12 +865,28 @@ def load_preview_image_for_json(json_path: str):
     except Exception:
         return None
     path = preview_image_path_for_json(json_path)
-    if not path or not os.path.exists(path):
+    if not path:
         return None
+    signature = _preview_file_signature(path)
+    if signature is None:
+        _clear_preview_image_cache_entry(json_path)
+        return None
+    cached = _PREVIEW_IMAGE_CACHE.get(path)
+    if isinstance(cached, dict) and cached.get("signature") == signature and cached.get("image") is not None:
+        try:
+            return cached["image"].copy()
+        except Exception:
+            return cached.get("image")
     try:
         with Image.open(path) as img:
-            return img.copy()
+            loaded = img.copy()
+        _PREVIEW_IMAGE_CACHE[path] = {
+            "signature": signature,
+            "image": loaded.copy(),
+        }
+        return loaded
     except Exception:
+        _PREVIEW_IMAGE_CACHE.pop(path, None)
         return None
 
 
@@ -983,6 +1044,10 @@ def save_window_preview_image(win, json_path: str, scale=0.75):
     out_path = preview_image_path_for_json(json_path)
     ensure_dir(os.path.dirname(out_path))
     image.save(out_path, format="PNG")
+    try:
+        _store_preview_image_in_cache(json_path, image)
+    except Exception:
+        pass
     return out_path
 
 

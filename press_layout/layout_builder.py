@@ -503,6 +503,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     # ---- Color Select toggle (layouts only) ----
     color_select_var = tk.BooleanVar(value=False)
     color_toggle = None
+    all_color_btn = None
+    all_bw_btn = None
     if not template_mode:
         color_toggle = ttk.Checkbutton(
             btn_frame,
@@ -511,7 +513,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             variable=color_select_var,
             takefocus=False
         )
-        color_toggle.pack(side="left", padx=(0, 12))
+        color_toggle.pack(side="left", padx=(0, 8))
 
     starter_format_var = tk.StringVar(value="Standard")
     ctx["starter_format_var"] = starter_format_var
@@ -1258,6 +1260,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             messagebox.showerror("Print Failed", str(e))
 
     if not template_mode:
+        all_color_btn = ttk.Button(btn_frame, text="All Color", command=lambda: select_all_color_pages(), width=10, takefocus=False)
+        all_color_btn.pack(side="left", padx=(0, 8))
+        all_bw_btn = ttk.Button(btn_frame, text="All b/w", command=lambda: clear_all_color_pages(), width=10, takefocus=False)
+        all_bw_btn.pack(side="left", padx=(0, 12))
         ttk.Label(btn_frame, text="Starter:").pack(side="left", padx=(0, 6))
         starter_combo = ttk.Combobox(btn_frame, textvariable=starter_format_var, values=["Standard", "NYT", "USAT"], state="readonly", width=10)
         starter_combo.pack(side="left", padx=(0, 8))
@@ -1384,6 +1390,44 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         else:
             overlay_hide(overlay)
             overlay.delete("all")
+
+    def _iter_color_capable_page_cells(include_blank=False):
+        for u in ctx.get("units", []):
+            if not u.get("color_capable", False):
+                continue
+            entries = u.get("entries", [])
+            for r, row in enumerate(entries):
+                for c, cell in enumerate(row):
+                    try:
+                        value = (cell.get() or "").strip()
+                    except Exception:
+                        value = ""
+                    if include_blank or value != "":
+                        yield u, r, c, value
+
+    def select_all_color_pages():
+        if template_mode:
+            return
+        ctx["color_cells"] = {
+            (u["label"], r, c)
+            for u, r, c, _value in _iter_color_capable_page_cells(include_blank=False)
+        }
+        refresh_color_overlays()
+        try:
+            ctx["dirty"] = True
+        except Exception:
+            pass
+
+    def clear_all_color_pages():
+        if template_mode:
+            return
+        if ctx.get("color_cells"):
+            ctx["color_cells"] = set()
+            refresh_color_overlays()
+            try:
+                ctx["dirty"] = True
+            except Exception:
+                pass
 
     def refresh_color_overlays():
         for u in ctx["units"]:
