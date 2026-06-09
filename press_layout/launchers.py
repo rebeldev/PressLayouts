@@ -214,35 +214,195 @@ def _bind_preview_pane_memory(win, state_key, paned, preview_box, default_height
         pass
 
 
+_TEMPLATE_CACHE = {
+    "signature": None,
+    "rows": [],
+}
+
+def _template_dir_entries():
+    ensure_dir(TEMPLATE_DIR)
+    entries = []
+    try:
+        with os.scandir(TEMPLATE_DIR) as it:
+            for entry in it:
+                try:
+                    if not entry.is_file():
+                        continue
+                except Exception:
+                    continue
+                if not str(entry.name or "").lower().endswith(".json"):
+                    continue
+                try:
+                    stat = entry.stat()
+                except Exception:
+                    stat = None
+                if stat is not None:
+                    mtime_ns = int(getattr(stat, "st_mtime_ns", int(float(getattr(stat, "st_mtime", 0.0)) * 1000000000)))
+                    ctime_ns = int(getattr(stat, "st_ctime_ns", int(float(getattr(stat, "st_ctime", 0.0)) * 1000000000)))
+                    size = int(getattr(stat, "st_size", 0))
+                    saved_dt = datetime.fromtimestamp(float(getattr(stat, "st_mtime", 0.0)))
+                    saved_disp = saved_dt.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    mtime_ns = 0
+                    ctime_ns = 0
+                    size = 0
+                    saved_dt = None
+                    saved_disp = ""
+                entries.append({
+                    "name": entry.name,
+                    "path": entry.path,
+                    "mtime_ns": mtime_ns,
+                    "ctime_ns": ctime_ns,
+                    "size": size,
+                    "saved_dt": saved_dt,
+                    "saved_disp": saved_disp,
+                })
+    except Exception:
+        return []
+    entries.sort(key=lambda item: str(item.get("name") or "").lower())
+    return entries
+
+def _template_cache_signature(entries):
+    return tuple(
+        (
+            str(item.get("name") or "").lower(),
+            int(item.get("mtime_ns", 0) or 0),
+            int(item.get("ctime_ns", 0) or 0),
+            int(item.get("size", 0) or 0),
+        )
+        for item in entries
+    )
+
+def _rebuild_template_cache(entries=None):
+    if entries is None:
+        entries = _template_dir_entries()
+    rows = []
+    for item in entries:
+        path = item.get("path") or ""
+        stem = os.path.splitext(os.path.basename(path))[0]
+        data = safe_read_json(path)
+        valid = isinstance(data, dict)
+        name = stem
+        press = ""
+        fmt = ""
+        section_count = None
+        section_pages = []
+        if valid:
+            name = data.get("name") or stem
+            press = data.get("press") or ""
+            fmt = data.get("format") or ""
+            try:
+                section_count = int(data.get("section_count", 1))
+            except Exception:
+                section_count = 1
+            raw_pages = data.get("section_pages", []) or []
+            section_pages = []
+            for page in raw_pages:
+                try:
+                    section_pages.append(int(page))
+                except Exception:
+                    section_pages.append(page)
+        rows.append({
+            "path": path,
+            "name": name,
+            "press": press,
+            "format": fmt,
+            "section_count": section_count,
+            "section_pages": section_pages,
+            "saved_dt": item.get("saved_dt"),
+            "saved_disp": item.get("saved_disp", ""),
+            "valid": valid,
+        })
+    _TEMPLATE_CACHE["signature"] = _template_cache_signature(entries)
+    _TEMPLATE_CACHE["rows"] = rows
+    return rows
+
+def get_cached_templates(force=False):
+    entries = _template_dir_entries()
+    signature = _template_cache_signature(entries)
+    changed = force or (signature != _TEMPLATE_CACHE.get("signature"))
+    if changed:
+        rows = _rebuild_template_cache(entries)
+    else:
+        rows = list(_TEMPLATE_CACHE.get("rows", []))
+    return list(rows), changed
+
+def _bind_template_cache_watcher(win, on_change, interval_ms=1500):
+    state = {"after_id": None}
+    def _tick():
+        state["after_id"] = None
+        try:
+            if not win.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            _rows, changed = get_cached_templates(force=False)
+            if changed:
+                on_change()
+        except Exception:
+            pass
+        try:
+            state["after_id"] = win.after(interval_ms, _tick)
+        except Exception:
+            state["after_id"] = None
+    try:
+        state["after_id"] = win.after(interval_ms, _tick)
+    except Exception:
+        state["after_id"] = None
+    return state
+
+def _cancel_template_cache_watcher(win, watcher_state):
+    after_id = None
+    if isinstance(watcher_state, dict):
+        after_id = watcher_state.get("after_id")
+    if after_id is None:
+        return
+    try:
+        win.after_cancel(after_id)
+    except Exception:
+        pass
+    try:
+        watcher_state["after_id"] = None
+    except Exception:
+        pass
+
 def list_matching_templates(press_name, format_name, section_count=None, section_pages=None):  
     """  
-    Templates live in TEMPLATE_DIR and are matched by JSON metadata.  
+    Templates live in TEMPLATE_DIR and are matched by cached JSON metadata.  
     In the New Layout launcher, we additionally filter by section_count & section_pages.  
+    The cache is automatically rebuilt when any template file is added, removed, renamed,
+    or changes size/timestamps in the shared template directory.  
     """  
-    ensure_dir(TEMPLATE_DIR)  
-    paths = sorted(glob.glob(os.path.join(TEMPLATE_DIR, "*.json")))  
-    results = []  
-    for p in paths:  
-        data = safe_read_json(p)  
-        stem = os.path.splitext(os.path.basename(p))[0]  
-        if not (data and isinstance(data, dict)):  
-            # fallback display if corrupt  
-            results.append((stem, p))  
-            continue  
-        if data.get("press") != press_name or data.get("format") != format_name:  
-            continue  
-        if section_count is not None:  
-            file_section_count = data.get("section_count")  
-            file_section_pages = data.get("section_pages", [])  
-            if file_section_count != section_count:  
-                continue  
-            if len(file_section_pages) < section_count:  
-                continue  
-            if any(file_section_pages[i] != section_pages[i] for i in range(section_count)):  
-                continue  
-        disp = data.get("name") or stem  
-        results.append((disp, p))  
-    return results  
+    rows, _changed = get_cached_templates(force=False)
+    results = []
+    for row in rows:
+        if not row.get("valid", False):
+            results.append((row.get("name") or os.path.splitext(os.path.basename(row.get("path") or ""))[0], row.get("path")))
+            continue
+        if row.get("press") != press_name or row.get("format") != format_name:
+            continue
+        if section_count is not None:
+            file_section_count = row.get("section_count")
+            file_section_pages = row.get("section_pages", [])
+            if file_section_count != section_count:
+                continue
+            if len(file_section_pages) < section_count:
+                continue
+            mismatch = False
+            for i in range(section_count):
+                try:
+                    page_value = int(file_section_pages[i])
+                except Exception:
+                    page_value = file_section_pages[i]
+                if page_value != section_pages[i]:
+                    mismatch = True
+                    break
+            if mismatch:
+                continue
+        results.append((row.get("name") or os.path.splitext(os.path.basename(row.get("path") or ""))[0], row.get("path")))
+    return results
+
 def open_json_in_layout(root, json_path, template_mode=False):  
     data = safe_read_json(json_path)  
     if not data:  
@@ -699,12 +859,21 @@ def build_new_layout_launcher(parent):
     format_combo = ttk.Combobox(frame, textvariable=format_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=16)  
     format_combo.grid(row=1, column=1, sticky="w", padx=(0, 24))  
     # Sections + Pages  
-    ttk.Label(frame, text="Pages:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="w", pady=8, padx=(0, 8))  
+    ttk.Label(frame, text="Sections:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="w", pady=8, padx=(0, 8))  
     section_count_var = tk.StringVar(value="1")  
-    section_count_spinbox = ttk.Spinbox(frame, from_=1, to=4, textvariable=section_count_var, width=3, justify="center")  
-    section_count_spinbox.grid(row=2, column=1, sticky="w", padx=(0, 24))
-    # Auto-select text on focus for section count spinbox
-    section_count_spinbox.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))  
+    section_count_frame = ttk.Frame(frame)
+    section_count_frame.grid(row=2, column=1, sticky="w", padx=(0, 24))
+    section_count_radios = []
+    for idx in range(4):
+        radio = ttk.Radiobutton(
+            section_count_frame,
+            text=str(idx + 1),
+            value=str(idx + 1),
+            variable=section_count_var,
+            width=3,
+        )
+        radio.grid(row=0, column=idx, sticky="w", padx=(0 if idx == 0 else 6, 0))
+        section_count_radios.append(radio)
     ttk.Label(frame, text="Pages:", font=(None, 11, "bold")).grid(row=2, column=2, sticky="w", padx=(0, 8))  
     section_page_vars = []  
     section_page_spinboxes = []  
@@ -861,7 +1030,6 @@ def build_new_layout_launcher(parent):
             sp.configure(from_=inc, to=max_pages, increment=inc)  
         apply_min_pages_to_sections(fill_only_blanks=False)  
         refresh_templates()  
-    section_count_spinbox.configure(command=_on_section_count_changed)  
     section_count_var.trace_add("write", lambda *_: _on_section_count_changed())  
     format_combo.bind("<<ComboboxSelected>>", _on_format_changed)  
     press_combo.bind("<<ComboboxSelected>>", lambda e: refresh_templates())  
@@ -870,6 +1038,7 @@ def build_new_layout_launcher(parent):
     _update_section_page_states(int(section_count_var.get()))  
     _on_format_changed()  
     refresh_templates()  
+    template_cache_watcher = _bind_template_cache_watcher(root, lambda: refresh_templates())
     def on_new_or_open():  
         press = press_var.get()  
         fmt = format_var.get()  
@@ -1080,28 +1249,15 @@ def build_template_editor_launcher(parent):
 
     def refresh():
         template_rows.clear()
-        for disp, path in list_json_files(TEMPLATE_DIR):
-            data = safe_read_json(path)
-            name = os.path.splitext(os.path.basename(path))[0]
-            press = ""
-            fmt = ""
-            if isinstance(data, dict):
-                name = data.get("name") or name
-                press = data.get("press") or ""
-                fmt = data.get("format") or ""
-            try:
-                saved_dt = datetime.fromtimestamp(os.path.getmtime(path))
-                saved_disp = saved_dt.strftime("%Y-%m-%d %H:%M:%S")
-            except Exception:
-                saved_dt = None
-                saved_disp = ""
+        cached_rows, _changed = get_cached_templates(force=False)
+        for cached in cached_rows:
             row = {
-                "path": path,
-                "name": name,
-                "press": press,
-                "format": fmt,
-                "saved_dt": saved_dt,
-                "saved_disp": saved_disp,
+                "path": cached.get("path"),
+                "name": cached.get("name") or os.path.splitext(os.path.basename(cached.get("path") or ""))[0],
+                "press": cached.get("press") or "",
+                "format": cached.get("format") or "",
+                "saved_dt": cached.get("saved_dt"),
+                "saved_disp": cached.get("saved_disp") or "",
             }
             if _matches_template_filter(row):
                 template_rows.append(row)
@@ -1680,6 +1836,7 @@ def build_main_launcher():
             errors = []  
             for path in to_delete:  
                 try:  
+                    remove_preview_image_for_json(path)
                     os.remove(path)  
                 except Exception as exc:  
                     errors.append(f"{os.path.basename(path)}: {exc}")  

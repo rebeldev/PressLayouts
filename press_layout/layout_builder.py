@@ -1,6 +1,6 @@
 import os
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import Image, ttk, messagebox
 
 from .config import LAYOUTS_DIR, TEMPLATE_DIR
 from .helpers import *
@@ -77,10 +77,19 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     section_page_entries = []
 
     ttk.Label(header_frame, text="Sections:", font=(None, 12, "bold")).grid(row=1, column=0, sticky="w", pady=6)
-    sections_spinbox = ttk.Spinbox(header_frame, from_=1, to=4, textvariable=section_count_var, width=3, justify="center")
-    sections_spinbox.grid(row=1, column=1, sticky="w", padx=(8, 32))
-    # Auto-select text on focus for section count spinbox
-    sections_spinbox.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
+    sections_frame = ttk.Frame(header_frame)
+    sections_frame.grid(row=1, column=1, sticky="w", padx=(8, 32))
+    section_count_radios = []
+    for idx in range(4):
+        radio = ttk.Radiobutton(
+            sections_frame,
+            text=str(idx + 1),
+            value=str(idx + 1),
+            variable=section_count_var,
+            width=3,
+        )
+        radio.grid(row=0, column=idx, sticky="w", padx=(0 if idx == 0 else 6, 0))
+        section_count_radios.append(radio)
 
     pages_frame = ttk.Frame(header_frame)
     # place pages_frame closer to the section count and tighten spacing
@@ -1328,7 +1337,6 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         finally:
             _busy["busy"] = False
 
-    sections_spinbox.configure(command=_on_section_count_changed)
     section_count_var.trace_add("write", lambda *_: _on_section_count_changed())
 
     for var in section_page_vars:
@@ -1525,7 +1533,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         grid_rows=grid_rows,
         grid_cols=grid_cols,
         press_name=config.get("press_name", ""),
-        extra_widgets=[sections_spinbox] + section_page_entries
+        extra_widgets=section_count_radios + section_page_entries
     )
     set_custom_tab_order(focus_list)
     enable_arrow_navigation(focus_list, units, config.get("press_name", ""))
@@ -1546,7 +1554,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 sv.trace_add("write", _mark_dirty_var)
             except Exception:
                 pass
-        sections_spinbox.configure(command=_mark_dirty_var)
+        try:
+            section_count_var.trace_add("write", _mark_dirty_var)
+        except Exception:
+            pass
         if color_toggle is not None:
             try:
                 color_select_var.trace_add("write", _mark_dirty_var)
