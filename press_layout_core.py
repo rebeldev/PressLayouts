@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 # ===== BEGIN: config.py =====
-MAIN_DIR = r"L:\\"
+MAIN_DIR = os.path.dirname(os.path.abspath(__file__))
 LAYOUTS_DIR = os.path.join(MAIN_DIR, "Layouts")
 TEMPLATE_DIR = os.path.join(MAIN_DIR, "Templates")
 REGULAR_DIR = os.path.join(MAIN_DIR, "Regular")
