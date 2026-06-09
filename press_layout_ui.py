@@ -437,7 +437,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "file_path": None,
         "layout_name": None,
         "template_mode": template_mode,
-        "default_dir": TEMPLATE_DIR if template_mode else LAYOUTS_DIR,
+        "default_dir": config.get("default_dir", TEMPLATE_DIR if template_mode else LAYOUTS_DIR),
+        "prompt_save_template": bool(config.get("prompt_save_template", not template_mode)),
         "color_cells": set(),  # per-cell storage
     }
 
@@ -1546,23 +1547,34 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 starter_format_var.set(data.get("starter_format") or "Standard")
 
             if load_as_copy:
-                if config.get("copy_blank_issue_product", False) and not template_mode:
-                    try:
-                        issue_entry.state(["!disabled"])
-                    except Exception:
-                        pass
-                    try:
-                        issue_entry.delete(0, "end")
-                    except Exception:
-                        pass
-                    try:
-                        product_entry.state(["!disabled"])
-                    except Exception:
-                        pass
-                    try:
-                        product_entry.delete(0, "end")
-                    except Exception:
-                        pass
+                if not template_mode:
+                    if config.get("copy_blank_issue_product", False):
+                        try:
+                            issue_entry.state(["!disabled"])
+                        except Exception:
+                            pass
+                        try:
+                            issue_entry.delete(0, "end")
+                        except Exception:
+                            pass
+                        try:
+                            product_entry.state(["!disabled"])
+                        except Exception:
+                            pass
+                        try:
+                            product_entry.delete(0, "end")
+                        except Exception:
+                            pass
+                    elif config.get("copy_issue_date_tomorrow", False):
+                        try:
+                            issue_entry.state(["!disabled"])
+                        except Exception:
+                            pass
+                        try:
+                            issue_entry.delete(0, "end")
+                            issue_entry.insert(0, tomorrow_issue_date_mmddyyyy())
+                        except Exception:
+                            pass
                 ctx["file_path"] = None
                 ctx["layout_name"] = None
                 source_name = data.get("name") or os.path.splitext(os.path.basename(load_path))[0]
@@ -1893,6 +1905,7 @@ def _bind_preview_pane_memory(win, state_key, paned, preview_box, default_height
 
 
 _TEMPLATE_CACHE = {"signature": None, "rows": []}
+_REGULAR_CACHE = {"signature": None, "rows": []}
 _LAYOUT_CACHE = {"signature": None, "rows": []}
 
 
@@ -2066,6 +2079,59 @@ def _format_section_pages_for_display(data):
 
 
 
+
+
+def _rebuild_regular_cache(entries=None):
+    if entries is None:
+        entries = _json_dir_entries(REGULAR_DIR)
+    rows = []
+    for item in entries:
+        path = item.get("path") or ""
+        data = safe_read_json(path) or {}
+        press = data.get("press", "") or ""
+        fmt = data.get("format", "") or ""
+        issue = data.get("issue_date", "") or ""
+        product = data.get("product", "") or ""
+        saved_at = data.get("saved_at", "") or ""
+        issue_dt = parse_issue_date_flexible(issue)
+        saved_dt = parse_saved_at(saved_at) or item.get("fs_saved_dt")
+        try:
+            color_pages, plates = _layout_color_and_plate_counts_from_data(data)
+        except Exception:
+            color_pages, plates = 0, 0
+        section_pages_values = _coerce_section_pages_for_display(data)
+        rows.append({
+            "path": path,
+            "name": data.get("name") or os.path.splitext(os.path.basename(path))[0],
+            "issue_dt": issue_dt,
+            "issue_disp": fmt_issue_for_display(issue),
+            "product": product,
+            "press": press,
+            "format": fmt,
+            "pages_disp": _format_section_pages_for_display(data),
+            "section_pages_sort": tuple(section_pages_values + [0] * (4 - len(section_pages_values))),
+            "saved_dt": saved_dt,
+            "saved_disp": fmt_dt_for_display(saved_dt),
+            "color_pages": color_pages,
+            "plates": plates,
+        })
+    _REGULAR_CACHE["signature"] = _dir_signature(entries)
+    _REGULAR_CACHE["rows"] = rows
+    return _clone_rows(rows)
+
+
+def get_cached_regular_rows(force=False):
+    entries = _json_dir_entries(REGULAR_DIR)
+    signature = _dir_signature(entries)
+    changed = force or signature != _REGULAR_CACHE.get("signature")
+    rows = _rebuild_regular_cache(entries) if changed else _clone_rows(_REGULAR_CACHE.get("rows", []))
+    return rows, changed
+
+
+def list_matching_regular_layouts(press_name, format_name):
+    rows, _changed = get_cached_regular_rows(force=False)
+    return [row for row in rows if row.get("press") == press_name and row.get("format") == format_name]
+
 def _rebuild_layout_cache(entries=None):
     if entries is None:
         entries = _json_dir_entries(LAYOUTS_DIR)
@@ -2152,10 +2218,19 @@ def _cancel_cache_watcher(win, watcher_state):
         pass
 
 
-def open_json_in_layout(root, json_path, template_mode=False, load_as_copy=False, copy_blank_issue_product=False):
+def open_json_in_layout(
+    root,
+    json_path,
+    template_mode=False,
+    load_as_copy=False,
+    copy_blank_issue_product=False,
+    default_dir=None,
+    prompt_save_template=None,
+    copy_issue_date_tomorrow=False,
+):
     data = safe_read_json(json_path)
     if not data:
-        messagebox.showerror("Open Failed", f"Could not read:\n{json_path}")
+        messagebox.showerror("Open Failed", f"Could not read: {json_path}")
         return
     press = data.get("press")
     fmt = data.get("format")
@@ -2171,6 +2246,11 @@ def open_json_in_layout(root, json_path, template_mode=False, load_as_copy=False
     cfg["section_pages"] = data.get("section_pages", [min_pages_for_format(fmt)])
     cfg["template_mode"] = bool(template_mode)
     cfg["copy_blank_issue_product"] = bool(copy_blank_issue_product)
+    cfg["copy_issue_date_tomorrow"] = bool(copy_issue_date_tomorrow)
+    if default_dir:
+        cfg["default_dir"] = default_dir
+    if prompt_save_template is not None:
+        cfg["prompt_save_template"] = bool(prompt_save_template)
     title = f"{press} - {fmt}"
     win = tk.Toplevel(root)
     win.withdraw()
@@ -2588,70 +2668,165 @@ def open_new_template(parent):
         load_as_copy=False,
     )
 
-def build_new_layout_launcher(parent):  
-    root = tk.Toplevel(parent)  
-    root.title("New Layout")  
-    root.geometry("900x700")  
-    root.minsize(820, 620)  
-    remember_window_geometry(root, "new_layout_launcher", default_geometry="900x700", minsize=(820, 620))
-    _bind_window_size_memory(root, "new_layout_launcher")  
+
+def open_new_regular(parent):
+    """Open a new blank regular publication layout."""
+    dialog = tk.Toplevel(parent)
+    dialog.title("New Regular")
+    dialog.transient(parent)
+    dialog.grab_set()
+    remember_window_geometry(dialog, "new_regular_dialog", default_geometry="400x150", minsize=(400, 150))
+
+    frame = ttk.Frame(dialog, padding=16)
+    frame.pack(fill="both", expand=True)
+
+    ttk.Label(frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", pady=8, padx=(0, 8))
+    press_var = tk.StringVar(value="Press 1")
+    ttk.Combobox(frame, textvariable=press_var, values=["Press 1", "Press 2"], state="readonly", width=20).grid(row=0, column=1, sticky="ew")
+
+    ttk.Label(frame, text="Format:", font=(None, 11, "bold")).grid(row=1, column=0, sticky="w", pady=8, padx=(0, 8))
+    format_var = tk.StringVar(value="Broadsheet")
+    ttk.Combobox(frame, textvariable=format_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=20).grid(row=1, column=1, sticky="ew")
+    frame.columnconfigure(1, weight=1)
+    result = {"ok": False}
+
+    def on_ok():
+        result["ok"] = True
+        dialog.destroy()
+
+    ttk.Button(frame, text="Create", command=on_ok, width=12).grid(row=2, column=0, pady=(16, 0), sticky="w")
+    ttk.Button(frame, text="Cancel", command=dialog.destroy, width=12).grid(row=2, column=1, pady=(16, 0), sticky="w")
+
+    dialog.wait_window(dialog)
+    if not result["ok"]:
+        return
+
+    press = press_var.get()
+    fmt = format_var.get()
+    base_cfg = CONFIG_MAP.get((press, fmt))
+    if not base_cfg:
+        messagebox.showerror("Not Configured", f"{press} - {fmt} is not configured yet.")
+        return
+    cfg = dict(base_cfg)
+    cfg["section_count"] = 1
+    cfg["section_pages"] = [min_pages_for_format(fmt)]
+    cfg["template_mode"] = False
+    cfg["default_dir"] = REGULAR_DIR
+    cfg["prompt_save_template"] = False
+
+    win = tk.Toplevel(parent)
+    win.withdraw()
+    build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=None, load_as_copy=False)
+
+def build_new_layout_launcher(parent):
+    root = tk.Toplevel(parent)
+    root.title("New Layout")
+    root.geometry("980x720")
+    root.minsize(900, 640)
+    remember_window_geometry(root, "new_layout_launcher", default_geometry="980x720", minsize=(900, 640))
+    _bind_window_size_memory(root, "new_layout_launcher")
+
     paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
     paned.pack(fill="both", expand=True)
-    frame = ttk.Frame(paned, padding=16)  
-    paned.add(frame, stretch="always", minsize=220)  
-    # Press / Format  
-    ttk.Label(frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", pady=8, padx=(0, 8))  
-    press_var = tk.StringVar(value="Press 1")  
-    press_combo = ttk.Combobox(frame, textvariable=press_var, values=["Press 1", "Press 2"], state="readonly", width=16)  
-    press_combo.grid(row=0, column=1, sticky="w", padx=(0, 24))  
-    ttk.Label(frame, text="Format:", font=(None, 11, "bold")).grid(row=1, column=0, sticky="w", pady=8, padx=(0, 8))  
-    format_var = tk.StringVar(value="Broadsheet")  
-    format_combo = ttk.Combobox(frame, textvariable=format_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=16)  
-    format_combo.grid(row=1, column=1, sticky="w", padx=(0, 24))  
-    # Sections + Pages  
-    ttk.Label(frame, text="Sections:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="w", pady=8, padx=(0, 8))  
-    section_count_var = tk.StringVar(value="1")  
-    section_count_frame = ttk.Frame(frame)
-    section_count_frame.grid(row=2, column=1, sticky="w", padx=(0, 24))
-    section_count_radios = []
-    for idx in range(4):
-        radio = ttk.Radiobutton(
-            section_count_frame,
-            text=str(idx + 1),
-            value=str(idx + 1),
-            variable=section_count_var,
-            width=3,
-        )
-        radio.grid(row=0, column=idx, sticky="w", padx=(0 if idx == 0 else 6, 0))
-        section_count_radios.append(radio)
-    ttk.Label(frame, text="Pages:", font=(None, 11, "bold")).grid(row=2, column=2, sticky="w", padx=(0, 8))  
-    section_page_vars = []  
-    section_page_spinboxes = []  
-    for idx in range(4):  
-        var = tk.StringVar(value=str(min_pages_for_format(format_var.get())))  
-        section_page_vars.append(var)  
-        ttk.Label(frame, text=f"S{idx+1}:", font=(None, 10)).grid(row=2, column=3 + idx * 2, sticky="e", padx=(12, 4))  
-        spinbox = ttk.Spinbox(frame, from_=2, to=80, increment=2, textvariable=var, width=3, justify="center")  
-        spinbox.grid(row=2, column=4 + idx * 2, sticky="w")  
-        section_page_spinboxes.append(spinbox)  
-    # Auto-select text on focus for all section page spinboxes
-    for spinbox in section_page_spinboxes:
-        spinbox.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
-    # Templates list  
-    ttk.Label(frame, text="Templates:", font=(None, 11, "bold")).grid(row=3, column=0, sticky="nw", pady=(8, 0), padx=(0, 8))  
-    templates_frame = ttk.Frame(frame)  
-    templates_frame.grid(row=3, column=1, columnspan=7, sticky="nsew", pady=(8, 0))  
-    templates_listbox = tk.Listbox(templates_frame, height=8, width=72, exportselection=False)  
-    templates_listbox.grid(row=0, column=0, sticky="nsew")  
-    templates_scroll = ttk.Scrollbar(templates_frame, orient="vertical", command=templates_listbox.yview)  
-    templates_scroll.grid(row=0, column=1, sticky="ns")  
-    templates_listbox.configure(yscrollcommand=templates_scroll.set)  
-    templates_frame.rowconfigure(0, weight=1)  
-    templates_frame.columnconfigure(0, weight=1)  
-    frame.rowconfigure(3, weight=1)  
-    frame.columnconfigure(1, weight=1)  
-    template_paths = []  
+    frame = ttk.Frame(paned, padding=16)
+    paned.add(frame, stretch="always", minsize=220)
+    frame.columnconfigure(1, weight=1)
+    frame.rowconfigure(4, weight=1)
+
+    mode_state = {"regular": False}
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
+    template_paths = []
+    regular_rows = {}
+
+    mode_bar = ttk.Frame(frame)
+    mode_bar.grid(row=0, column=0, columnspan=12, sticky="ew", pady=(0, 8))
+    mode_bar.columnconfigure(1, weight=1)
+    mode_button = ttk.Button(mode_bar, text="From Regular", width=16)
+    mode_button.grid(row=0, column=0, sticky="w")
+    mode_note_var = tk.StringVar(value="Guided mode: choose press / format / sections and optionally start from a template.")
+    ttk.Label(mode_bar, textvariable=mode_note_var).grid(row=0, column=1, sticky="w", padx=(12, 0))
+
+    ttk.Label(frame, text="Press:", font=(None, 11, "bold")).grid(row=1, column=0, sticky="w", pady=8, padx=(0, 8))
+    press_var = tk.StringVar(value="Press 1")
+    press_combo = ttk.Combobox(frame, textvariable=press_var, values=["Press 1", "Press 2"], state="readonly", width=16)
+    press_combo.grid(row=1, column=1, sticky="w", padx=(0, 24))
+
+    ttk.Label(frame, text="Format:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="w", pady=8, padx=(0, 8))
+    format_var = tk.StringVar(value="Broadsheet")
+    format_combo = ttk.Combobox(frame, textvariable=format_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=16)
+    format_combo.grid(row=2, column=1, sticky="w", padx=(0, 24))
+
+    section_frame = ttk.Frame(frame)
+    section_frame.grid(row=3, column=0, columnspan=12, sticky="ew")
+    ttk.Label(section_frame, text="Sections:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", pady=8, padx=(0, 8))
+    section_count_var = tk.StringVar(value="1")
+    section_count_frame = ttk.Frame(section_frame)
+    section_count_frame.grid(row=0, column=1, sticky="w", padx=(0, 24))
+    for idx in range(4):
+        ttk.Radiobutton(section_count_frame, text=str(idx + 1), value=str(idx + 1), variable=section_count_var, width=3).grid(row=0, column=idx, sticky="w", padx=(0 if idx == 0 else 6, 0))
+    ttk.Label(section_frame, text="Pages:", font=(None, 11, "bold")).grid(row=0, column=2, sticky="w", padx=(0, 8))
+    section_page_vars = []
+    section_page_spinboxes = []
+    for idx in range(4):
+        var = tk.StringVar(value=str(min_pages_for_format(format_var.get())))
+        section_page_vars.append(var)
+        ttk.Label(section_frame, text=f"S{idx+1}:", font=(None, 10)).grid(row=0, column=3 + idx * 2, sticky="e", padx=(12, 4))
+        spinbox = ttk.Spinbox(section_frame, from_=2, to=80, increment=2, textvariable=var, width=3, justify="center")
+        spinbox.grid(row=0, column=4 + idx * 2, sticky="w")
+        spinbox.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
+        section_page_spinboxes.append(spinbox)
+
+    template_container = ttk.Frame(frame)
+    template_container.grid(row=4, column=0, columnspan=12, sticky="nsew", pady=(8, 0))
+    template_container.columnconfigure(1, weight=1)
+    template_container.rowconfigure(0, weight=1)
+    ttk.Label(template_container, text="Templates:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="nw", padx=(0, 8))
+    templates_frame = ttk.Frame(template_container)
+    templates_frame.grid(row=0, column=1, sticky="nsew")
+    templates_frame.rowconfigure(0, weight=1)
+    templates_frame.columnconfigure(0, weight=1)
+    templates_listbox = tk.Listbox(templates_frame, height=10, width=72, exportselection=False)
+    templates_listbox.grid(row=0, column=0, sticky="nsew")
+    templates_scroll = ttk.Scrollbar(templates_frame, orient="vertical", command=templates_listbox.yview)
+    templates_scroll.grid(row=0, column=1, sticky="ns")
+    templates_listbox.configure(yscrollcommand=templates_scroll.set)
+
+    regular_container = ttk.Frame(frame)
+    regular_container.columnconfigure(1, weight=1)
+    regular_container.rowconfigure(0, weight=1)
+    ttk.Label(regular_container, text="Regular Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="nw", padx=(0, 8))
+    regular_frame = ttk.Frame(regular_container)
+    regular_frame.grid(row=0, column=1, sticky="nsew")
+    regular_frame.rowconfigure(0, weight=1)
+    regular_frame.columnconfigure(0, weight=1)
+    regular_columns = ("product", "press", "format", "pages", "color_pages", "plates", "saved")
+    regular_tree = ttk.Treeview(regular_frame, columns=regular_columns, show="headings", selectmode="browse")
+    regular_tree.grid(row=0, column=0, sticky="nsew")
+    regular_scroll = ttk.Scrollbar(regular_frame, orient="vertical", command=regular_tree.yview)
+    regular_scroll.grid(row=0, column=1, sticky="ns")
+    regular_tree.configure(yscrollcommand=regular_scroll.set)
+    for key, title, width, anchor in [("product", "Product", 260, "w"), ("press", "Press", 90, "center"), ("format", "Format", 100, "center"), ("pages", "Pages", 120, "center"), ("color_pages", "Color Pages", 95, "center"), ("plates", "Plates", 70, "center"), ("saved", "Last Saved", 170, "center")]:
+        regular_tree.heading(key, text=title)
+        regular_tree.column(key, width=width, anchor=anchor)
+
+    btn_row = ttk.Frame(frame)
+    btn_row.grid(row=5, column=0, columnspan=12, pady=(12, 0), sticky="w")
+    action_button = ttk.Button(btn_row, text="New / Open", width=14)
+    action_button.pack(side="left", padx=(0, 8))
+    refresh_button = ttk.Button(btn_row, text="Refresh Templates", width=16)
+    refresh_button.pack(side="left")
+
+    preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
+    preview_box.columnconfigure(0, weight=1)
+    preview_label = ttk.Label(preview_box, text="Select a template to preview", anchor="center", justify="center")
+    preview_label.grid(row=0, column=0, sticky="nsew")
+    preview_box.rowconfigure(0, weight=1)
+    preview_label.bind("<Configure>", lambda e: _render_preview_panel_image(preview_label, preview_state), add="+")
+    paned.add(preview_box, minsize=160)
+    _bind_preview_pane_memory(root, "new_layout_launcher", paned, preview_box, default_height=240)
+
+    def current_empty_text():
+        return "Select a regular layout to preview" if mode_state["regular"] else "Select a template to preview"
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
         preview_state["after_id"] = None
@@ -2662,14 +2837,19 @@ def build_new_layout_launcher(parent):
                 pass
     def close_preview():
         cancel_pending_preview()
-        _clear_preview_panel(preview_label, preview_state, empty_text="Select a template to preview")
+        _clear_preview_panel(preview_label, preview_state, empty_text=current_empty_text())
     def _launcher_is_active():
         try:
             focused = root.focus_displayof()
             return bool(focused) and focused.winfo_toplevel() == root
         except Exception:
             return False
-    def _current_preview_path():
+    def selected_regular_path():
+        sel = regular_tree.selection()
+        return sel[0] if sel else None
+    def current_preview_path():
+        if mode_state["regular"]:
+            return selected_regular_path()
         try:
             sel = templates_listbox.curselection()
             return template_paths[sel[0]] if sel else None
@@ -2686,165 +2866,193 @@ def build_new_layout_launcher(parent):
             preview_state["after_id"] = None
             if _request_id != preview_state.get("request_id"):
                 return
-            if _current_preview_path() != _path:
+            if current_preview_path() != _path:
                 return
             if not _launcher_is_active():
                 return
             if preview_state.get("path") == _path and preview_state.get("photo") is not None:
                 return
             close_preview()
-            image, preview_title = open_json_preview(root, _path, template_mode=True)
+            image, _preview_title = open_json_preview(root, _path, template_mode=(not mode_state["regular"]))
             if image is None:
-                _clear_preview_panel(preview_label, preview_state, empty_text="Select a template to preview")
+                _clear_preview_panel(preview_label, preview_state, empty_text=current_empty_text())
                 return
             _set_preview_panel(preview_label, preview_state, image)
             preview_state["path"] = _path
         preview_state["after_id"] = root.after_idle(_do_show)
-    def _on_launcher_focus_in(event=None):
-        show_preview(_current_preview_path())
-    def _on_launcher_focus_out(event=None):
-        def _close_if_really_inactive():
-            if _launcher_is_active():
-                return
-            preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
+
+    def _update_section_page_states(count):
+        for idx, sp in enumerate(section_page_spinboxes):
+            if idx < count:
+                sp.state(["!disabled"])
+            else:
+                sp.state(["disabled"])
+                section_page_vars[idx].set("")
+    def apply_min_pages_to_sections(fill_only_blanks=True):
+        fmt = format_var.get()
+        minimum = min_pages_for_format(fmt)
+        try:
+            count = int(section_count_var.get())
+        except Exception:
+            count = 1
+        count = max(1, min(4, count))
+        for i in range(4):
+            if i < count:
+                cur = section_page_vars[i].get().strip()
+                if fill_only_blanks:
+                    if cur == "" or not is_valid_page_count(cur, minimum):
+                        section_page_vars[i].set(str(minimum))
+                else:
+                    section_page_vars[i].set(str(minimum))
+            else:
+                section_page_vars[i].set("")
+    _busy = {"busy": False}
+    def _on_section_count_changed(event=None):
+        if _busy["busy"]:
+            return
+        _busy["busy"] = True
+        try:
+            try:
+                count = int(section_count_var.get())
+            except Exception:
+                count = 1
+            count = max(1, min(4, count))
+            section_count_var.set(str(count))
+            _update_section_page_states(count)
+            apply_min_pages_to_sections(fill_only_blanks=True)
+            refresh_templates()
+        finally:
+            _busy["busy"] = False
+    def refresh_templates(*_):
+        if mode_state["regular"]:
+            return
+        press = press_var.get()
+        fmt = format_var.get()
+        try:
+            count = int(section_count_var.get())
+        except Exception:
+            count = 1
+        count = max(1, min(4, count))
+        pages = []
+        for i in range(count):
+            try:
+                pages.append(max(1, int(section_page_vars[i].get().strip())))
+            except Exception:
+                pages.append(min_pages_for_format(fmt))
+        matches = list_matching_templates(press, fmt, section_count=count, section_pages=pages)
+        templates_listbox.delete(0, "end")
+        template_paths.clear()
+        for disp, path in matches:
+            templates_listbox.insert("end", disp)
+            template_paths.append(path)
+        templates_listbox.selection_clear(0, "end")
+        close_preview()
+    def refresh_regulars(*_):
+        if not mode_state["regular"]:
+            return
+        selected = selected_regular_path()
+        rows = list_matching_regular_layouts(press_var.get(), format_var.get())
+        rows.sort(key=lambda r: ((r.get("product") or "").lower(), tuple(r.get("section_pages_sort", (0,0,0,0))), r.get("saved_dt") or datetime.min))
+        regular_tree.delete(*regular_tree.get_children())
+        regular_rows.clear()
+        for row in rows:
+            iid = row.get("path")
+            regular_rows[iid] = row
+            regular_tree.insert("", "end", iid=iid, values=(row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
+        if selected and selected in regular_rows:
+            regular_tree.selection_set(selected)
+            regular_tree.focus(selected)
+        else:
             close_preview()
-        root.after_idle(_close_if_really_inactive)
-    def _update_section_page_states(count):  
-        for idx, sp in enumerate(section_page_spinboxes):  
-            if idx < count:  
-                sp.state(["!disabled"])  
-            else:  
-                sp.state(["disabled"])  
-                section_page_vars[idx].set("")  
-    def apply_min_pages_to_sections(fill_only_blanks=True):  
-        fmt = format_var.get()  
-        minimum = min_pages_for_format(fmt)  
-        try:  
-            count = int(section_count_var.get())  
-        except Exception:  
-            count = 1  
-        count = max(1, min(4, count))  
-        for i in range(4):  
-            if i < count:  
-                cur = section_page_vars[i].get().strip()  
-                if fill_only_blanks:  
-                    if cur == "" or not is_valid_page_count(cur, minimum):  
-                        section_page_vars[i].set(str(minimum))  
-                else:  
-                    section_page_vars[i].set(str(minimum))  
-            else:  
-                section_page_vars[i].set("")  
-    _busy = {"busy": False}  
-    def _on_section_count_changed(event=None):  
-        if _busy["busy"]:  
-            return  
-        _busy["busy"] = True  
-        try:  
-            try:  
-                count = int(section_count_var.get())  
-            except Exception:  
-                count = 1  
-            count = max(1, min(4, count))  
-            section_count_var.set(str(count))  
-            _update_section_page_states(count)  
-            apply_min_pages_to_sections(fill_only_blanks=True)  
-            refresh_templates()  
-        finally:  
-            _busy["busy"] = False  
-    def refresh_templates(*_):  
-        press = press_var.get()  
-        fmt = format_var.get()  
-        try:  
-            count = int(section_count_var.get())  
-        except Exception:  
-            count = 1  
-        count = max(1, min(4, count))  
-        pages = []  
-        for i in range(count):  
-            try:  
-                pages.append(max(1, int(section_page_vars[i].get().strip())))  
-            except Exception:  
-                pages.append(min_pages_for_format(fmt))  
-        matches = list_matching_templates(press, fmt, section_count=count, section_pages=pages)  
-        templates_listbox.delete(0, "end")  
-        template_paths.clear()  
-        for disp, path in matches:  
-            templates_listbox.insert("end", disp)  
-            template_paths.append(path)  
-        templates_listbox.selection_clear(0, "end")  
-    def _on_format_changed(event=None):  
-        fmt = format_var.get()  
-        inc = min_pages_for_format(fmt)  
-        max_pages = inc * 10  
-        for sp in section_page_spinboxes:  
-            sp.configure(from_=inc, to=max_pages, increment=inc)  
-        apply_min_pages_to_sections(fill_only_blanks=False)  
-        refresh_templates()  
-    section_count_var.trace_add("write", lambda *_: _on_section_count_changed())  
-    format_combo.bind("<<ComboboxSelected>>", _on_format_changed)  
-    press_combo.bind("<<ComboboxSelected>>", lambda e: refresh_templates())  
-    for var in section_page_vars:  
-        var.trace_add("write", lambda *_: refresh_templates())  
-    _update_section_page_states(int(section_count_var.get()))  
-    _on_format_changed()  
-    refresh_templates()  
-    template_cache_watcher = _bind_cache_watcher(root, get_cached_templates, lambda: refresh_templates())
-    def on_new_or_open():  
-        press = press_var.get()  
-        fmt = format_var.get()  
-        base_cfg = CONFIG_MAP.get((press, fmt))  
-        if not base_cfg:  
-            messagebox.showwarning("Not Configured", f"{press} - {fmt} is not configured yet.")  
-            return  
-        try:  
-            count = int(section_count_var.get())  
-        except Exception:  
-            count = 1  
-        count = max(1, min(4, count))  
-        pages = []  
-        for i in range(count):  
-            try:  
-                pages.append(max(1, int(section_page_vars[i].get().strip())))  
-            except Exception:  
-                pages.append(min_pages_for_format(fmt))  
-        cfg = dict(base_cfg)  
-        cfg["section_count"] = count  
-        cfg["section_pages"] = pages  
-        cfg["template_mode"] = False  
-        sel = templates_listbox.curselection()  
-        load_path = template_paths[sel[0]] if sel else None  
+    def _on_format_changed(event=None):
+        fmt = format_var.get()
+        inc = min_pages_for_format(fmt)
+        max_pages = inc * 10
+        for sp in section_page_spinboxes:
+            sp.configure(from_=inc, to=max_pages, increment=inc)
+        apply_min_pages_to_sections(fill_only_blanks=False)
+        refresh_templates()
+        refresh_regulars()
+    def update_mode_widgets():
+        if mode_state["regular"]:
+            section_frame.grid_remove()
+            template_container.grid_remove()
+            regular_container.grid(row=4, column=0, columnspan=12, sticky="nsew", pady=(8, 0))
+            action_button.configure(text="Clone Regular")
+            refresh_button.configure(text="Refresh Regulars", command=refresh_regulars)
+            mode_button.configure(text="Standard Mode")
+            mode_note_var.set("Regular mode: choose press / format and clone a saved regular layout into a new layout dated tomorrow.")
+        else:
+            regular_container.grid_remove()
+            section_frame.grid()
+            template_container.grid()
+            action_button.configure(text="New / Open")
+            refresh_button.configure(text="Refresh Templates", command=refresh_templates)
+            mode_button.configure(text="From Regular")
+            mode_note_var.set("Guided mode: choose press / format / sections and optionally start from a template.")
         close_preview()
-        win = tk.Toplevel(parent)  
-        build_press_layout(  
-            win,  
-            title=f"{press} - {fmt}",  
-            config=cfg,  
-            load_path=load_path,  
-            load_as_copy=True  # NEW LAYOUT from template => copy  
-        )  
-        close_preview()
-        root.destroy()  
-    def _on_template_selection_change(event=None):
+        refresh_regulars()
+        refresh_templates()
+    def toggle_mode():
+        mode_state["regular"] = not mode_state["regular"]
+        update_mode_widgets()
+    def on_new_or_open():
+        press = press_var.get()
+        fmt = format_var.get()
+        if mode_state["regular"]:
+            path = selected_regular_path()
+            if not path:
+                messagebox.showinfo("Select a Regular Layout", "Select a regular layout to clone into a new layout.")
+                return
+            close_preview()
+            open_json_in_layout(parent, path, template_mode=False, load_as_copy=True, copy_issue_date_tomorrow=True)
+            root.destroy()
+            return
+        base_cfg = CONFIG_MAP.get((press, fmt))
+        if not base_cfg:
+            messagebox.showwarning("Not Configured", f"{press} - {fmt} is not configured yet.")
+            return
+        try:
+            count = int(section_count_var.get())
+        except Exception:
+            count = 1
+        count = max(1, min(4, count))
+        pages = []
+        for i in range(count):
+            try:
+                pages.append(max(1, int(section_page_vars[i].get().strip())))
+            except Exception:
+                pages.append(min_pages_for_format(fmt))
+        cfg = dict(base_cfg)
+        cfg["section_count"] = count
+        cfg["section_pages"] = pages
+        cfg["template_mode"] = False
         sel = templates_listbox.curselection()
-        show_preview(template_paths[sel[0]] if sel else None)
-    templates_listbox.bind("<<ListboxSelect>>", _on_template_selection_change)
+        load_path = template_paths[sel[0]] if sel else None
+        close_preview()
+        win = tk.Toplevel(parent)
+        build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=load_path, load_as_copy=True)
+        root.destroy()
+    section_count_var.trace_add("write", lambda *_: _on_section_count_changed())
+    format_combo.bind("<<ComboboxSelected>>", _on_format_changed)
+    press_combo.bind("<<ComboboxSelected>>", lambda e: (refresh_templates(), refresh_regulars()))
+    for var in section_page_vars:
+        var.trace_add("write", lambda *_: refresh_templates())
+    templates_listbox.bind("<<ListboxSelect>>", lambda e: show_preview(current_preview_path()))
     templates_listbox.bind("<Double-Button-1>", lambda e: on_new_or_open())
-    btn_row = ttk.Frame(frame)  
-    btn_row.grid(row=4, column=0, columnspan=8, pady=(12, 0), sticky="w")  
-    ttk.Button(btn_row, text="New / Open", command=on_new_or_open, width=14).pack(side="left", padx=(0, 8))  
-    ttk.Button(btn_row, text="Refresh Templates", command=refresh_templates, width=16).pack(side="left")  
-    preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
-    preview_box.columnconfigure(0, weight=1)
-    preview_label = ttk.Label(preview_box, text="Select a template to preview", anchor="center", justify="center")
-    preview_label.grid(row=0, column=0, sticky="nsew")
-    preview_box.rowconfigure(0, weight=1)
-    preview_label.bind("<Configure>", lambda e: _render_preview_panel_image(preview_label, preview_state), add="+")
-    paned.add(preview_box, minsize=160)
-    _bind_preview_pane_memory(root, "new_layout_launcher", paned, preview_box, default_height=240)
-    root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
-    root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
-    root.protocol("WM_DELETE_WINDOW", lambda: (close_preview(), root.destroy()))
-    return root  
+    regular_tree.bind("<<TreeviewSelect>>", lambda e: show_preview(current_preview_path()))
+    regular_tree.bind("<Double-Button-1>", lambda e: on_new_or_open())
+    action_button.configure(command=on_new_or_open)
+    mode_button.configure(command=toggle_mode)
+    _update_section_page_states(int(section_count_var.get()))
+    _on_format_changed()
+    template_cache_watcher = _bind_cache_watcher(root, get_cached_templates, lambda: refresh_templates())
+    regular_cache_watcher = _bind_cache_watcher(root, get_cached_regular_rows, lambda: refresh_regulars())
+    update_mode_widgets()
+    root.bind("<FocusIn>", lambda e: show_preview(current_preview_path()), add="+")
+    root.bind("<FocusOut>", lambda e: close_preview(), add="+")
+    root.protocol("WM_DELETE_WINDOW", lambda: (_cancel_cache_watcher(root, template_cache_watcher), _cancel_cache_watcher(root, regular_cache_watcher), close_preview(), root.destroy()))
+    return root
 def build_template_editor_launcher(parent):
     root = tk.Toplevel(parent)
     root.title("Template Editor")
@@ -3182,9 +3390,213 @@ def _load_layout_color_and_plate_counts(path):
     return _layout_color_and_plate_counts_from_data(data)
 
 
+
+def build_regular_editor_launcher(parent):
+    root = tk.Toplevel(parent)
+    root.title("Regular Editor")
+    root.geometry("980x720")
+    root.minsize(900, 640)
+    remember_window_geometry(root, "regular_editor_launcher", default_geometry="980x720", minsize=(900, 640))
+    _bind_window_size_memory(root, "regular_editor_launcher")
+
+    paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
+    paned.pack(fill="both", expand=True)
+    frame = ttk.Frame(paned, padding=16)
+    paned.add(frame, stretch="always", minsize=220)
+    frame.rowconfigure(1, weight=1)
+    frame.columnconfigure(0, weight=1)
+
+    filter_frame = ttk.Frame(frame)
+    filter_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    filter_frame.columnconfigure(1, weight=1)
+    ttk.Label(filter_frame, text="Filter:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    search_var = tk.StringVar(value="")
+    ttk.Entry(filter_frame, textvariable=search_var).grid(row=0, column=1, sticky="ew", padx=(8, 12))
+    ttk.Label(filter_frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=2, sticky="w")
+    press_var = tk.StringVar(value="All")
+    ttk.Combobox(filter_frame, textvariable=press_var, values=["All", "Press 1", "Press 2"], state="readonly", width=12).grid(row=0, column=3, sticky="w", padx=(8, 12))
+    ttk.Label(filter_frame, text="Format:", font=(None, 11, "bold")).grid(row=0, column=4, sticky="w")
+    format_var = tk.StringVar(value="All")
+    ttk.Combobox(filter_frame, textvariable=format_var, values=["All", "Broadsheet", "Tab", "8 up"], state="readonly", width=12).grid(row=0, column=5, sticky="w")
+
+    list_frame = ttk.Frame(frame)
+    list_frame.grid(row=1, column=0, sticky="nsew")
+    list_frame.rowconfigure(0, weight=1)
+    list_frame.columnconfigure(0, weight=1)
+    columns = ("product", "press", "format", "pages", "color_pages", "plates", "saved")
+    tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="browse")
+    tree.grid(row=0, column=0, sticky="nsew")
+    vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+    vsb.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=vsb.set)
+    for key, title, width, anchor in [("product", "Product", 260, "w"), ("press", "Press", 90, "center"), ("format", "Format", 100, "center"), ("pages", "Pages", 120, "center"), ("color_pages", "Color Pages", 95, "center"), ("plates", "Plates", 70, "center"), ("saved", "Last Saved", 170, "center")]:
+        tree.heading(key, text=title)
+        tree.column(key, width=width, anchor=anchor)
+
+    sort_state = {"col": None, "desc": False}
+    preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
+    def cancel_pending_preview():
+        after_id = preview_state.get("after_id")
+        preview_state["after_id"] = None
+        if after_id is not None:
+            try:
+                root.after_cancel(after_id)
+            except Exception:
+                pass
+    def close_preview():
+        cancel_pending_preview()
+        _clear_preview_panel(preview_label, preview_state, empty_text="Select a regular layout to preview")
+    def selected_path():
+        sel = tree.selection()
+        return sel[0] if sel else None
+    def show_preview(path):
+        cancel_pending_preview()
+        preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
+        request_id = preview_state["request_id"]
+        if not path:
+            close_preview()
+            return
+        def _do_show(_path=path, _request_id=request_id):
+            preview_state["after_id"] = None
+            if _request_id != preview_state.get("request_id") or selected_path() != _path:
+                return
+            image, _pt = open_json_preview(root, _path, template_mode=False)
+            if image is None:
+                close_preview()
+                return
+            _set_preview_panel(preview_label, preview_state, image)
+            preview_state["path"] = _path
+        preview_state["after_id"] = root.after_idle(_do_show)
+    def sort_rows(rows):
+        col = sort_state.get("col")
+        if not col:
+            return rows
+        def keyfunc(r):
+            if col == "product":
+                return (r.get("product") or "").lower()
+            if col == "press":
+                return (r.get("press") or "").lower()
+            if col == "format":
+                return (r.get("format") or "").lower()
+            if col == "pages":
+                return tuple(r.get("section_pages_sort", (0,0,0,0)))
+            if col == "color_pages":
+                return int(r.get("color_pages", 0) or 0)
+            if col == "plates":
+                return int(r.get("plates", 0) or 0)
+            if col == "saved":
+                return r.get("saved_dt") or datetime.min
+            return ""
+        return sorted(rows, key=keyfunc, reverse=sort_state["desc"])
+    def matches(row):
+        search_text = (search_var.get() or "").strip().lower()
+        if search_text:
+            hay = " ".join([row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), str(row.get("color_pages", "")), str(row.get("plates", ""))]).lower()
+            if search_text not in hay:
+                return False
+        if (press_var.get() or "All") != "All" and row.get("press") != press_var.get():
+            return False
+        if (format_var.get() or "All") != "All" and row.get("format") != format_var.get():
+            return False
+        return True
+    def refresh():
+        rows, _changed = get_cached_regular_rows(force=False)
+        rows = sort_rows([row for row in rows if matches(row)])
+        tree.delete(*tree.get_children())
+        for row in rows:
+            tree.insert("", "end", iid=row["path"], values=(row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
+    def sort_by(col):
+        if sort_state["col"] == col:
+            sort_state["desc"] = not sort_state["desc"]
+        else:
+            sort_state["col"] = col
+            sort_state["desc"] = False
+        refresh()
+    for col in columns:
+        tree.heading(col, command=lambda _c=col: sort_by(_c))
+    search_var.trace_add("write", lambda *_: refresh())
+    press_var.trace_add("write", lambda *_: refresh())
+    format_var.trace_add("write", lambda *_: refresh())
+    def open_selected():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Regular Layout", "Select a regular layout to open.")
+            return
+        close_preview()
+        open_json_in_layout(parent, path, template_mode=False, default_dir=REGULAR_DIR, prompt_save_template=False)
+        root.destroy()
+    def new_regular():
+        close_preview()
+        open_new_regular(parent)
+        root.destroy()
+    def regenerate_selected_preview():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Regular Layout", "Select a regular layout to regenerate its preview.")
+            return
+        temp_win = None
+        try:
+            temp_win = open_json_in_layout(root, path, template_mode=False, default_dir=REGULAR_DIR, prompt_save_template=False)
+            if temp_win:
+                _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
+                save_window_preview_image(temp_win, path, scale=0.75)
+                show_preview(path)
+        except Exception as exc:
+            messagebox.showerror("Regen Preview Failed", str(exc), parent=root)
+        finally:
+            try:
+                if temp_win and temp_win.winfo_exists():
+                    temp_win.destroy()
+            except Exception:
+                pass
+    def delete_selected():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Regular Layout", "Select a regular layout to delete.")
+            return
+        name = os.path.basename(path)
+        if not messagebox.askyesno("Delete Regular Layout", f"Delete regular layout file? {name}", parent=root):
+            return
+        try:
+            if preview_state.get("path") == path:
+                close_preview()
+            remove_preview_image_for_json(path)
+            os.remove(path)
+        except Exception as exc:
+            messagebox.showerror("Delete Regular Layout", f"Could not delete regular layout: {exc}", parent=root)
+            return
+        refresh()
+    tree.bind("<<TreeviewSelect>>", lambda e: show_preview(selected_path()))
+    tree.bind("<Double-Button-1>", lambda e: open_selected())
+    btns = ttk.Frame(frame)
+    btns.grid(row=2, column=0, pady=12, sticky="ew")
+    btns.columnconfigure(0, weight=1)
+    left = ttk.Frame(btns)
+    left.grid(row=0, column=0, sticky="w")
+    right = ttk.Frame(btns)
+    right.grid(row=0, column=1, sticky="e")
+    ttk.Button(left, text="New Regular", command=new_regular, width=14).pack(side="left", padx=(0, 8))
+    ttk.Button(left, text="Open Regular", command=open_selected, width=14).pack(side="left", padx=(0, 8))
+    ttk.Button(left, text="Delete", command=delete_selected, width=10).pack(side="left", padx=(0, 8))
+    ttk.Button(right, text="Refresh", command=refresh, width=10).pack(side="right")
+    ttk.Button(right, text="Regen Preview", command=regenerate_selected_preview, width=14).pack(side="right", padx=(0, 8))
+    preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
+    preview_box.columnconfigure(0, weight=1)
+    preview_label = ttk.Label(preview_box, text="Select a regular layout to preview", anchor="center", justify="center")
+    preview_label.grid(row=0, column=0, sticky="nsew")
+    preview_box.rowconfigure(0, weight=1)
+    preview_label.bind("<Configure>", lambda e: _render_preview_panel_image(preview_label, preview_state), add="+")
+    paned.add(preview_box, minsize=160)
+    _bind_preview_pane_memory(root, "regular_editor_launcher", paned, preview_box, default_height=240)
+    refresh()
+    regular_cache_watcher = _bind_cache_watcher(root, get_cached_regular_rows, lambda: refresh())
+    root.protocol("WM_DELETE_WINDOW", lambda: (_cancel_cache_watcher(root, regular_cache_watcher), close_preview(), root.destroy()))
+    return root
+
 def build_main_launcher():  
     ensure_dir(LAYOUTS_DIR)  
     ensure_dir(TEMPLATE_DIR)  
+    ensure_dir(REGULAR_DIR)  
     root = tk.Tk()  
     root.title("Press Layouts")  
     root.geometry("1100x760")  
@@ -3513,6 +3925,9 @@ def build_main_launcher():
     def templates():  
         close_preview()
         build_template_editor_launcher(root)  
+    def regulars():
+        close_preview()
+        build_regular_editor_launcher(root)
     def cleanup_old_layouts():  
         today = datetime.now().date()  
         all_rows, _changed = get_cached_layout_rows(force=False)  
@@ -3630,10 +4045,10 @@ def build_main_launcher():
     ttk.Button(left_btns, text="New", command=new_layout, width=12).pack(side="left", padx=(0, 8))
     ttk.Button(left_btns, text="Open", command=open_selected, width=12).pack(side="left", padx=(0, 8))
     ttk.Button(left_btns, text="Clone", command=clone_selected, width=12).pack(side="left", padx=(0, 8))
+    ttk.Button(right_btns, text="Regulars", command=regulars, width=12).pack(side="right", padx=(0, 8))
     ttk.Button(right_btns, text="Templates", command=templates, width=12).pack(side="right", padx=(0, 8))
     ttk.Button(right_btns, text="Delete", command=delete_selected, width=12).pack(side="right", padx=(0, 8))
     ttk.Button(right_btns, text="Cleanup", command=cleanup_old_layouts, width=12).pack(side="right", padx=(0, 8))
-    ttk.Button(right_btns, text="Refresh", command=lambda: refresh(preserve_state=True), width=12).pack(side="right")
     ttk.Button(right_btns, text="Regen Preview", command=regenerate_selected_preview, width=14).pack(side="right", padx=(0, 8))
     preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
     preview_box.columnconfigure(0, weight=1)

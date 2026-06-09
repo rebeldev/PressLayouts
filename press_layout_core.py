@@ -12,6 +12,7 @@ from tkinter import ttk, filedialog, messagebox
 MAIN_DIR = r"L:\\"
 LAYOUTS_DIR = os.path.join(MAIN_DIR, "Layouts")
 TEMPLATE_DIR = os.path.join(MAIN_DIR, "Templates")
+REGULAR_DIR = os.path.join(MAIN_DIR, "Regular")
 FORMAT_MIN_PAGES = {
     "Broadsheet": 2,
     "Tab": 4,
@@ -274,6 +275,11 @@ def normalize_issue_date_mmddyyyy(text: str) -> str:
     if not dt:
         return text
     return dt.strftime("%m/%d/%Y")
+
+def tomorrow_issue_date_mmddyyyy() -> str:
+    """Return tomorrow's date in mm/dd/YYYY format."""
+    from datetime import timedelta
+    return (datetime.now() + timedelta(days=1)).strftime("%m/%d/%Y")
 def parse_saved_at(text: str):
     """Parse ISO saved_at into datetime."""
     if not text:
@@ -1835,7 +1841,7 @@ def do_save(win, ctx):
         _save_preview_for_current_window(win, ctx["file_path"])
         
         # If saving a layout (not template mode) and imposition doesn't match existing template, ask to save as template
-        if not ctx.get("template_mode", False):
+        if (not ctx.get("template_mode", False)) and ctx.get("prompt_save_template", True):
             if not _template_exists_for_imposition(ctx):
                 template_suggestion = build_filename_suggestion(ctx)
                 if messagebox.askyesno(
@@ -1883,7 +1889,7 @@ def do_save_as(win, ctx):
         win.title(f"{ctx['title_base']}  —  {os.path.basename(path)}")
         
         # If saving a layout (not template mode) and imposition doesn't match existing template, ask to save as template
-        if not ctx.get("template_mode", False):
+        if (not ctx.get("template_mode", False)) and ctx.get("prompt_save_template", True):
             if not _template_exists_for_imposition(ctx):
                 template_suggestion = build_filename_suggestion(ctx)
                 if messagebox.askyesno(
