@@ -1,13 +1,4 @@
-"""Press Layout Core (final consolidated version).
-
-This module physically consolidates:
-- config.py
-- helpers.py
-- persistence.py
-
-It contains configuration, shared helpers, preview/window-state utilities,
-and JSON save/load persistence logic.
-"""
+"""Press Layout Core (final consolidated version)."""
 
 import os
 import json

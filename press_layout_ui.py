@@ -1,13 +1,4 @@
-"""Press Layout UI (final consolidated version).
-
-This module physically consolidates:
-- layout_builder.py
-- launchers.py
-
-It imports the consolidated core module and exposes the full UI surface:
-main launcher, template editor, new layout launcher, preview support, and the
-layout editor window itself.
-"""
+"""Press Layout UI (final consolidated version)."""
 
 import os
 import glob
@@ -16,6 +7,7 @@ import re
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox
+from PIL import Image
 
 import press_layout_core as helpers_mod
 from press_layout_core import *
