@@ -1546,10 +1546,27 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 starter_format_var.set(data.get("starter_format") or "Standard")
 
             if load_as_copy:
+                if config.get("copy_blank_issue_product", False) and not template_mode:
+                    try:
+                        issue_entry.state(["!disabled"])
+                    except Exception:
+                        pass
+                    try:
+                        issue_entry.delete(0, "end")
+                    except Exception:
+                        pass
+                    try:
+                        product_entry.state(["!disabled"])
+                    except Exception:
+                        pass
+                    try:
+                        product_entry.delete(0, "end")
+                    except Exception:
+                        pass
                 ctx["file_path"] = None
                 ctx["layout_name"] = None
-                tmpl = os.path.splitext(os.path.basename(load_path))[0]
-                win.title(f"{title_base}  —  (from template: {tmpl})")
+                source_name = data.get("name") or os.path.splitext(os.path.basename(load_path))[0]
+                win.title(f"{title_base}  —  Clone of {source_name}")
             else:
                 ctx["file_path"] = load_path
                 ctx["layout_name"] = data.get("name") or os.path.splitext(os.path.basename(load_path))[0]
@@ -2109,25 +2126,26 @@ def _cancel_cache_watcher(win, watcher_state):
         pass
 
 
-def open_json_in_layout(root, json_path, template_mode=False):  
-    data = safe_read_json(json_path)  
-    if not data:  
-        messagebox.showerror("Open Failed", f"Could not read:\n{json_path}")  
-        return  
-    press = data.get("press")  
-    fmt = data.get("format")  
-    if not press or not fmt:  
-        messagebox.showerror("Open Failed", "JSON missing 'press' or 'format'.")  
-        return  
-    base_cfg = CONFIG_MAP.get((press, fmt))  
-    if not base_cfg:  
-        messagebox.showerror("Open Failed", f"No config found for {press} - {fmt}")  
-        return  
-    cfg = dict(base_cfg)  
-    cfg["section_count"] = data.get("section_count", 1)  
-    cfg["section_pages"] = data.get("section_pages", [min_pages_for_format(fmt)])  
-    cfg["template_mode"] = bool(template_mode)  
-    title = f"{press} - {fmt}"  
+def open_json_in_layout(root, json_path, template_mode=False, load_as_copy=False, copy_blank_issue_product=False):
+    data = safe_read_json(json_path)
+    if not data:
+        messagebox.showerror("Open Failed", f"Could not read:\n{json_path}")
+        return
+    press = data.get("press")
+    fmt = data.get("format")
+    if not press or not fmt:
+        messagebox.showerror("Open Failed", "JSON missing 'press' or 'format'.")
+        return
+    base_cfg = CONFIG_MAP.get((press, fmt))
+    if not base_cfg:
+        messagebox.showerror("Open Failed", f"No config found for {press} - {fmt}")
+        return
+    cfg = dict(base_cfg)
+    cfg["section_count"] = data.get("section_count", 1)
+    cfg["section_pages"] = data.get("section_pages", [min_pages_for_format(fmt)])
+    cfg["template_mode"] = bool(template_mode)
+    cfg["copy_blank_issue_product"] = bool(copy_blank_issue_product)
+    title = f"{press} - {fmt}"
     win = tk.Toplevel(root)
     win.withdraw()
     build_press_layout(
@@ -2135,7 +2153,7 @@ def open_json_in_layout(root, json_path, template_mode=False):
         title=title,
         config=cfg,
         load_path=json_path,
-        load_as_copy=False,
+        load_as_copy=bool(load_as_copy),
     )
     return win
 
@@ -3392,16 +3410,32 @@ def build_main_launcher():
     def selected_path():  
         sel = tree.selection()  
         return sel[0] if sel else None  
-    def open_selected():  
-        path = selected_path()  
-        if not path:  
-            messagebox.showinfo("Select a Layout", "Select a layout to open.")  
-            return  
+    def open_selected():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Layout", "Select a layout to open.")
+            return
         close_preview()
-        open_json_in_layout(root, path, template_mode=False)  
-    def new_layout():  
+        open_json_in_layout(root, path, template_mode=False)
+
+    def clone_selected():
+        path = selected_path()
+        if not path:
+            messagebox.showinfo("Select a Layout", "Select a layout to clone.")
+            return
         close_preview()
-        build_new_layout_launcher(root)  
+        open_json_in_layout(
+            root,
+            path,
+            template_mode=False,
+            load_as_copy=True,
+            copy_blank_issue_product=True,
+        )
+
+    def new_layout():
+        close_preview()
+        build_new_layout_launcher(root)
+
     def regenerate_selected_preview():
         path = selected_path()
         if not path:
@@ -3561,6 +3595,7 @@ def build_main_launcher():
     right_btns.grid(row=0, column=1, sticky="e")
     ttk.Button(left_btns, text="New", command=new_layout, width=12).pack(side="left", padx=(0, 8))
     ttk.Button(left_btns, text="Open", command=open_selected, width=12).pack(side="left", padx=(0, 8))
+    ttk.Button(left_btns, text="Clone", command=clone_selected, width=12).pack(side="left", padx=(0, 8))
     ttk.Button(right_btns, text="Templates", command=templates, width=12).pack(side="right", padx=(0, 8))
     ttk.Button(right_btns, text="Delete", command=delete_selected, width=12).pack(side="right", padx=(0, 8))
     ttk.Button(right_btns, text="Cleanup", command=cleanup_old_layouts, width=12).pack(side="right", padx=(0, 8))
