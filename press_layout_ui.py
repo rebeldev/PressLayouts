@@ -2043,6 +2043,29 @@ def list_matching_templates(press_name, format_name, section_count=None, section
     return results    
 
 
+def _coerce_section_pages_for_display(data):
+    try:
+        section_count = max(1, min(4, int((data or {}).get("section_count", 1))))
+    except Exception:
+        section_count = 1
+    raw_pages = (data or {}).get("section_pages", []) or []
+    pages = []
+    for idx in range(min(4, max(section_count, len(raw_pages)))):
+        try:
+            value = int(raw_pages[idx])
+        except Exception:
+            value = 0
+        if value > 0:
+            pages.append(value)
+    return pages
+
+
+def _format_section_pages_for_display(data):
+    pages = _coerce_section_pages_for_display(data)
+    return " / ".join(str(value) for value in pages)
+
+
+
 def _rebuild_layout_cache(entries=None):
     if entries is None:
         entries = _json_dir_entries(LAYOUTS_DIR)
@@ -2061,6 +2084,7 @@ def _rebuild_layout_cache(entries=None):
             color_pages, plates = _layout_color_and_plate_counts_from_data(data)
         except Exception:
             color_pages, plates = 0, 0
+        section_pages_values = _coerce_section_pages_for_display(data)
         rows.append({
             "path": path,
             "issue_dt": issue_dt,
@@ -2068,6 +2092,8 @@ def _rebuild_layout_cache(entries=None):
             "product": product,
             "press": press,
             "format": fmt,
+            "pages_disp": _format_section_pages_for_display(data),
+            "section_pages_sort": tuple(section_pages_values + [0] * (4 - len(section_pages_values))),
             "saved_dt": saved_dt,
             "saved_disp": fmt_dt_for_display(saved_dt),
             "color_pages": color_pages,
@@ -3192,7 +3218,7 @@ def build_main_launcher():
     issue_date_combo = ttk.Combobox(filter_frame, textvariable=issue_date_var, values=["All"], state="readonly", width=16)
     issue_date_combo.grid(row=0, column=7, sticky="w", padx=(8, 0))
 
-    columns = ("issue", "product", "press", "format", "color_pages", "plates", "saved")
+    columns = ("issue", "product", "press", "format", "pages", "color_pages", "plates", "saved")
     tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
     tree.grid(row=2, column=0, sticky="nsew", pady=(0, 0))
     vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
@@ -3202,6 +3228,7 @@ def build_main_launcher():
     tree.heading("product", text="Product")  
     tree.heading("press", text="Press")  
     tree.heading("format", text="Format")  
+    tree.heading("pages", text="Pages")  
     tree.heading("color_pages", text="Color Pages")  
     tree.heading("plates", text="Plates")  
     tree.heading("saved", text="Last Saved")  
@@ -3209,6 +3236,7 @@ def build_main_launcher():
     tree.column("product", width=260, anchor="w")  
     tree.column("press", width=90, anchor="center")  
     tree.column("format", width=100, anchor="center")  
+    tree.column("pages", width=120, anchor="center")  
     tree.column("color_pages", width=95, anchor="center")  
     tree.column("plates", width=70, anchor="center")  
     tree.column("saved", width=170, anchor="center")  
@@ -3285,6 +3313,8 @@ def build_main_launcher():
                 return (r["press"] or "").lower()  
             if col == "format":  
                 return (r["format"] or "").lower()  
+            if col == "pages":
+                return tuple(r.get("section_pages_sort", (0, 0, 0, 0)))
             if col == "color_pages":
                 return int(r.get("color_pages", 0) or 0)
             if col == "plates":
@@ -3301,6 +3331,7 @@ def build_main_launcher():
                 r["product"],  
                 r["press"],  
                 r["format"],  
+                r.get("pages_disp", ""),
                 r.get("color_pages", 0),
                 r.get("plates", 0),
                 r["saved_disp"],  
@@ -3328,6 +3359,7 @@ def build_main_launcher():
                 row.get("product", ""),
                 row.get("press", ""),
                 row.get("format", ""),
+                row.get("pages_disp", ""),
                 str(row.get("color_pages", "")),
                 str(row.get("plates", "")),
             ]).lower()
@@ -3351,6 +3383,7 @@ def build_main_launcher():
                 row.get("product", ""),
                 row.get("press", ""),
                 row.get("format", ""),
+                row.get("pages_disp", ""),
                 str(row.get("color_pages", "")),
                 str(row.get("plates", "")),
             ]).lower()
@@ -3400,6 +3433,7 @@ def build_main_launcher():
     tree.heading("product", command=lambda: sort_by("product"))
     tree.heading("press", command=lambda: sort_by("press"))
     tree.heading("format", command=lambda: sort_by("format"))
+    tree.heading("pages", command=lambda: sort_by("pages"))
     tree.heading("color_pages", command=lambda: sort_by("color_pages"))
     tree.heading("plates", command=lambda: sort_by("plates"))
     tree.heading("saved", command=lambda: sort_by("saved"))
