@@ -3,6 +3,7 @@
 import os
 import glob
 import json
+import calendar
 import re
 from datetime import datetime
 import tkinter as tk
@@ -13,6 +14,138 @@ import press_layout_core as helpers_mod
 from press_layout_core import *
 
 # ===== BEGIN: layout_builder.py =====
+def _shift_calendar_month(year, month, delta):
+    month_index = (int(year) * 12 + (int(month) - 1)) + int(delta)
+    new_year, zero_based_month = divmod(month_index, 12)
+    return new_year, zero_based_month + 1
+
+
+def ask_issue_date_with_calendar(parent, initial_text="", anchor_widget=None, title="Select Issue Date"):
+    """Open a simple mouse-friendly calendar date picker and return mm/dd/YYYY or None."""
+    try:
+        initial_dt = parse_issue_date_flexible(initial_text)
+    except Exception:
+        initial_dt = None
+    if initial_dt is None:
+        initial_dt = datetime.now()
+
+    state = {
+        "display_year": int(initial_dt.year),
+        "display_month": int(initial_dt.month),
+        "selected": initial_dt.strftime("%m/%d/%Y"),
+    }
+    result = {"value": None}
+
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.resizable(False, False)
+
+    outer = ttk.Frame(dialog, padding=10)
+    outer.grid(row=0, column=0, sticky="nsew")
+    outer.columnconfigure(0, weight=1)
+
+    header = ttk.Frame(outer)
+    header.grid(row=0, column=0, sticky="ew")
+    header.columnconfigure(1, weight=1)
+
+    month_title_var = tk.StringVar(value="")
+    days_frame = ttk.Frame(outer)
+    days_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 6))
+
+    def close_dialog(value=None):
+        result["value"] = value
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+
+    def select_date(day_value):
+        close_dialog(f'{state["display_month"]:02d}/{int(day_value):02d}/{state["display_year"]:04d}')
+
+    def render_month():
+        for child in days_frame.winfo_children():
+            try:
+                child.destroy()
+            except Exception:
+                pass
+
+        month_title_var.set(f'{calendar.month_name[state["display_month"]]} {state["display_year"]}')
+        weekday_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        for col, weekday_name in enumerate(weekday_names):
+            ttk.Label(days_frame, text=weekday_name, anchor="center", font=(None, 10, "bold"), width=4).grid(row=0, column=col, padx=1, pady=(0, 4))
+
+        selected_dt = None
+        try:
+            selected_dt = parse_issue_date_flexible(state.get("selected"))
+        except Exception:
+            selected_dt = None
+
+        cal = calendar.Calendar(firstweekday=6)
+        month_rows = cal.monthdayscalendar(state["display_year"], state["display_month"])
+        while len(month_rows) < 6:
+            month_rows.append([0] * 7)
+
+        for row_index, row_values in enumerate(month_rows, start=1):
+            for col_index, day_value in enumerate(row_values):
+                if day_value <= 0:
+                    ttk.Label(days_frame, text="", width=4).grid(row=row_index, column=col_index, padx=1, pady=1)
+                    continue
+
+                is_selected = bool(
+                    selected_dt
+                    and int(selected_dt.year) == int(state["display_year"])
+                    and int(selected_dt.month) == int(state["display_month"])
+                    and int(selected_dt.day) == int(day_value)
+                )
+                button = tk.Button(
+                    days_frame,
+                    text=str(day_value),
+                    width=4,
+                    relief=("sunken" if is_selected else "raised"),
+                    bd=2 if is_selected else 1,
+                    command=lambda d=day_value: select_date(d),
+                )
+                button.grid(row=row_index, column=col_index, padx=1, pady=1, sticky="nsew")
+
+    def move_month(delta):
+        state["display_year"], state["display_month"] = _shift_calendar_month(state["display_year"], state["display_month"], delta)
+        render_month()
+
+    ttk.Button(header, text="◀", width=4, command=lambda: move_month(-1)).grid(row=0, column=0, sticky="w")
+    ttk.Label(header, textvariable=month_title_var, anchor="center", font=(None, 11, "bold")).grid(row=0, column=1, sticky="ew", padx=6)
+    ttk.Button(header, text="▶", width=4, command=lambda: move_month(1)).grid(row=0, column=2, sticky="e")
+
+    action_frame = ttk.Frame(outer)
+    action_frame.grid(row=3, column=0, sticky="e", pady=(6, 0))
+    ttk.Button(action_frame, text="Today", width=10, command=lambda: close_dialog(datetime.now().strftime("%m/%d/%Y"))).pack(side="left", padx=(0, 8))
+    ttk.Button(action_frame, text="Cancel", width=10, command=lambda: close_dialog(None)).pack(side="left")
+
+    dialog.bind("<Escape>", lambda e: close_dialog(None), add="+")
+    dialog.protocol("WM_DELETE_WINDOW", lambda: close_dialog(None))
+
+    render_month()
+
+    try:
+        dialog.update_idletasks()
+        if anchor_widget is not None:
+            x = int(anchor_widget.winfo_rootx())
+            y = int(anchor_widget.winfo_rooty()) + int(anchor_widget.winfo_height()) + 4
+            dialog.geometry(f'+{x}+{y}')
+    except Exception:
+        pass
+
+    try:
+        dialog.grab_set()
+    except Exception:
+        pass
+    parent.wait_window(dialog)
+    return result.get("value")
+
+
 def build_press_layout(win, title="Press Layout", config=None, load_path=None, load_as_copy=False):
     config = config or {}
 
@@ -1324,9 +1457,57 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 issue_entry.insert(0, normalized)
         update_imposition()
 
+    def _set_issue_date_value(value, mark_dirty=True):
+        if template_mode:
+            return
+        normalized = (value or "").strip()
+        if normalized:
+            try:
+                parsed = parse_issue_date_flexible(normalized)
+            except Exception:
+                parsed = None
+            if parsed is not None:
+                normalized = parsed.strftime("%m/%d/%Y")
+        previous = issue_entry.get().strip()
+        if normalized == previous:
+            update_imposition()
+            return
+        try:
+            issue_entry.state(["!disabled"])
+        except Exception:
+            pass
+        issue_entry.delete(0, "end")
+        issue_entry.insert(0, normalized)
+        if mark_dirty:
+            try:
+                ctx["dirty"] = True
+            except Exception:
+                pass
+        update_imposition()
+
+    def _open_issue_date_picker(event=None):
+        if template_mode:
+            return
+        selected_value = ask_issue_date_with_calendar(
+            win,
+            initial_text=issue_entry.get().strip(),
+            anchor_widget=issue_entry,
+            title="Select Issue Date",
+        )
+        if selected_value:
+            _set_issue_date_value(selected_value, mark_dirty=True)
+        try:
+            issue_entry.focus_set()
+            issue_entry.selection_range(0, "end")
+            issue_entry.icursor("end")
+        except Exception:
+            pass
+        return "break"
+
     issue_entry.bind("<FocusOut>", on_issue_date_focus_out)
     issue_entry.bind("<Return>", lambda e: (on_issue_date_focus_out(), "break"))
     issue_entry.bind("<KeyRelease>", lambda e: update_imposition())
+    issue_entry.bind("<Button-1>", _open_issue_date_picker)
 
     product_entry.bind("<KeyRelease>", lambda e: update_imposition())
     product_entry.bind("<FocusOut>", lambda e: update_imposition())
@@ -1618,7 +1799,24 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     set_custom_tab_order(focus_list)
     enable_arrow_navigation(focus_list, units, config.get("press_name", ""))
 
-    win.after(50, issue_entry.focus_set)
+    def _focus_issue_entry_for_quick_replace():
+        try:
+            issue_entry.focus_set()
+        except Exception:
+            return
+        try:
+            issue_entry.selection_range(0, "end")
+        except Exception:
+            pass
+        try:
+            issue_entry.icursor("end")
+        except Exception:
+            pass
+
+    if load_as_copy and (not template_mode) and config.get("copy_issue_date_tomorrow", False):
+        win.after(50, _focus_issue_entry_for_quick_replace)
+    else:
+        win.after(50, issue_entry.focus_set)
     if not has_saved_window_state:
         apply_window_sizing(win, config)
     remember_window_geometry(

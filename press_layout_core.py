@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 # ===== BEGIN: config.py =====
-MAIN_DIR = r"L:\\"
+MAIN_DIR = os.path.dirname(os.path.abspath(__file__))
 LAYOUTS_DIR = os.path.join(MAIN_DIR, "Layouts")
 TEMPLATE_DIR = os.path.join(MAIN_DIR, "Templates")
 REGULAR_DIR = os.path.join(MAIN_DIR, "Regular")
@@ -1906,64 +1906,79 @@ def do_save_as(win, ctx):
         messagebox.showerror("Save As Failed", str(e))
         return False
 
+def _normalize_imposition_name(value: str) -> str:
+    """Normalize template/imposition names for reliable comparisons."""
+    stem = os.path.splitext(str(value or "").strip())[0]
+    stem = re.sub(r"\s+", " ", stem).strip().lower()
+    return stem
+
+
+def _imposition_name_matches(existing_name: str, target_name: str) -> bool:
+    """Treat exact names and save_template_from_layout uniqueness suffixes as a match."""
+    existing = _normalize_imposition_name(existing_name)
+    target = _normalize_imposition_name(target_name)
+    if not existing or not target:
+        return False
+    if existing == target:
+        return True
+    return bool(re.fullmatch(rf"{re.escape(target)}_\d+", existing))
+
+
 def _template_exists_for_imposition(ctx) -> bool:
-    """Check if a template with the same imposition already exists."""
+    """Check if a template with the same imposition already exists.
+
+    The prompt shown to the user is about imposition matching, so the primary
+    comparison should be the generated imposition/template name. As a fallback,
+    we also do a structural match against the template JSON in case a template
+    was renamed manually.
+    """
     ensure_dir(TEMPLATE_DIR)
     press = ctx.get("press_name", "")
     fmt = ctx.get("format_name", "")
-    
-    try:
-        section_count = int(ctx["section_count_var"].get())
-    except Exception:
-        section_count = 1
-    section_count = max(1, min(4, section_count))
-    
-    pages = []
-    for i in range(section_count):
-        try:
-            pages.append(max(1, int(ctx["section_page_vars"][i].get().strip())))
-        except Exception:
-            pages.append(min_pages_for_format(fmt))
-    
-    # List all templates and check for matching imposition
+
+    current_data = _normalize_template_data(collect_layout_data(ctx))
+    current_data.pop("issue_date", None)
+    current_data.pop("product", None)
+    current_data.pop("color_cells", None)
+
+    target_imposition_name = build_imposition_text(ctx)
+    current_section_count = current_data.get("section_count")
+    current_section_pages = current_data.get("section_pages")
+    current_units_by_label = {
+        str(unit.get("label") or ""): unit.get("grid", [])
+        for unit in (current_data.get("units", []) or [])
+        if isinstance(unit, dict)
+    }
+
     template_files = sorted(glob.glob(os.path.join(TEMPLATE_DIR, "*.json")))
     for tmpl_path in template_files:
         tmpl_data = safe_read_json(tmpl_path)
         if not isinstance(tmpl_data, dict):
             continue
-        
-        # Check press, format, section_count, section_pages
+
         if tmpl_data.get("press") != press or tmpl_data.get("format") != fmt:
             continue
-        if tmpl_data.get("section_count") != section_count:
-            continue
-        if tmpl_data.get("section_pages") != pages:
-            continue
-        
-        # Check units match
-        tmpl_units = tmpl_data.get("units", [])
-        ctx_units = ctx.get("units", [])
-        
-        if len(tmpl_units) != len(ctx_units):
-            continue
-        
-        # Compare unit structure
-        units_match = True
-        for tu, cu in zip(tmpl_units, ctx_units):
-            tu_grid = tu.get("grid", [])
-            cu_grid = [
-                [cell.get().strip() for cell in row]
-                for row in cu.get("entries", [])
-            ]
-            if tu_grid != cu_grid:
-                units_match = False
-                break
-        
-        if units_match:
-            return True
-    
-    return False
 
+        template_stem = os.path.splitext(os.path.basename(tmpl_path))[0]
+        template_name = tmpl_data.get("name") or template_stem
+        if _imposition_name_matches(template_name, target_imposition_name) or _imposition_name_matches(template_stem, target_imposition_name):
+            return True
+
+        normalized_template = _normalize_template_data(tmpl_data)
+        if normalized_template.get("section_count") != current_section_count:
+            continue
+        if normalized_template.get("section_pages") != current_section_pages:
+            continue
+
+        template_units_by_label = {
+            str(unit.get("label") or ""): unit.get("grid", [])
+            for unit in (normalized_template.get("units", []) or [])
+            if isinstance(unit, dict)
+        }
+        if template_units_by_label == current_units_by_label:
+            return True
+
+    return False
 def save_template_from_layout(ctx):
     """Save the current layout as a template (without issue_date, product, color_cells)."""
     try:
