@@ -474,23 +474,16 @@ def build_focus_order(issue_entry, product_entry, units, grid_rows, grid_cols, p
     for lab in unit_order:
         focus_widgets.append(unit_map[lab]["section_entry"])
 
-    # top row forward
-    if grid_rows >= 1:
-        r = 0
+    # Grid cells tab left-to-right for every row so Tab always advances visually to the right.
+    for r in range(max(0, grid_rows)):
         for lab in unit_order:
             row_entries = unit_map[lab]["entries"][r]
             for c in range(min(grid_cols, len(row_entries))):
                 focus_widgets.append(row_entries[c])
 
-    # bottom row reverse, columns reversed
-    for r in range(1, grid_rows):
-        for lab in reversed(unit_order):
-            row_entries = unit_map[lab]["entries"][r]
-            last_col = min(grid_cols, len(row_entries)) - 1
-            for c in range(last_col, -1, -1):
-                focus_widgets.append(row_entries[c])
-
     return focus_widgets
+
+
 def set_custom_tab_order(widgets):
     widgets = [w for w in widgets if w is not None]
     seen = set()
@@ -504,21 +497,60 @@ def set_custom_tab_order(widgets):
         return
 
     n = len(ordered)
+    next_map = {ordered[i]: ordered[(i + 1) % n] for i in range(n)}
+    prev_map = {ordered[i]: ordered[(i - 1) % n] for i in range(n)}
+    grid_widgets = [w for w in ordered if getattr(w, "_press_grid_cell", False)]
 
     def _goto(target):
         target.focus_set()
+        try:
+            target.selection_range(0, "end")
+        except Exception:
+            pass
         return "break"
 
-    for i, w in enumerate(ordered):
-        nxt = ordered[(i + 1) % n]
-        prv = ordered[(i - 1) % n]
+    def _ordered_grid_widgets():
+        widgets_in_order = []
+        for widget in grid_widgets:
+            try:
+                if not widget.winfo_exists() or not widget.winfo_viewable():
+                    continue
+                widgets_in_order.append(widget)
+            except Exception:
+                continue
+        widgets_in_order.sort(key=lambda widget: (int(widget.winfo_rooty()), int(widget.winfo_rootx()), str(widget)))
+        return widgets_in_order
+
+    def _grid_tab_target(current_widget, reverse=False):
+        widgets_in_order = _ordered_grid_widgets()
+        if len(widgets_in_order) < 2:
+            return None
+        try:
+            idx = widgets_in_order.index(current_widget)
+        except ValueError:
+            return None
+        if reverse:
+            return widgets_in_order[(idx - 1) % len(widgets_in_order)]
+        return widgets_in_order[(idx + 1) % len(widgets_in_order)]
+
+    def _on_tab(event, default_target, reverse=False):
+        widget = event.widget
+        if getattr(widget, "_press_grid_cell", False):
+            target = _grid_tab_target(widget, reverse=reverse)
+            if target is not None:
+                return _goto(target)
+        return _goto(default_target)
+
+    for w in ordered:
+        nxt = next_map[w]
+        prv = prev_map[w]
         try:
             w.configure(takefocus=True)
         except Exception:
             pass
-        w.bind("<Tab>", lambda e, _n=nxt: _goto(_n))
-        w.bind("<Shift-Tab>", lambda e, _p=prv: _goto(_p))
-        w.bind("<ISO_Left_Tab>", lambda e, _p=prv: _goto(_p))
+        w.bind("<Tab>", lambda e, _n=nxt: _on_tab(e, _n, reverse=False))
+        w.bind("<Shift-Tab>", lambda e, _p=prv: _on_tab(e, _p, reverse=True))
+        w.bind("<ISO_Left_Tab>", lambda e, _p=prv: _on_tab(e, _p, reverse=True))
 def get_unit_order(units, press_name):
     unit_map = {u["label"]: u for u in units}
     press_num = "1" if "1" in press_name else "2"
@@ -831,6 +863,7 @@ def create_press_unit(
             cell_container.grid(row=map_row(r), column=map_col(c), sticky="nsew", padx=cell_pad, pady=cell_pad)
 
             cell_entry = ttk.Entry(cell_container, justify="center", font=cell_font, width=cell_width)
+            cell_entry._press_grid_cell = True
             cell_entry.pack(fill="both", expand=True)
 
             overlay = tk.Canvas(cell_container, highlightthickness=0, bg="#ffffff", takefocus=False)

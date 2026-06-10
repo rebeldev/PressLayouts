@@ -13,6 +13,16 @@ from PIL import Image
 import press_layout_core as helpers_mod
 from press_layout_core import *
 
+SORT_ASCENDING_INDICATOR = " ▲"
+SORT_DESCENDING_INDICATOR = " ▼"
+
+
+def _treeview_sort_heading_text(base_title, sort_state, col):
+    active_col = sort_state.get("col")
+    if active_col != col:
+        return base_title
+    return f'{base_title}{SORT_DESCENDING_INDICATOR if sort_state.get("desc") else SORT_ASCENDING_INDICATOR}'
+
 # ===== BEGIN: layout_builder.py =====
 def _shift_calendar_month(year, month, delta):
     month_index = (int(year) * 12 + (int(month) - 1)) + int(delta)
@@ -1721,6 +1731,23 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         data = safe_read_json(load_path)
         if data:
             populate_layout_from_data(ctx, data)
+            if load_as_copy and not template_mode:
+                try:
+                    load_path_abs = os.path.abspath(load_path)
+                    template_dir_abs = os.path.abspath(TEMPLATE_DIR)
+                    is_template_copy = os.path.commonpath([load_path_abs, template_dir_abs]) == template_dir_abs
+                except Exception:
+                    is_template_copy = False
+                if is_template_copy:
+                    try:
+                        section_count_for_names = max(1, min(4, int(section_count_var.get())))
+                    except Exception:
+                        section_count_for_names = 1
+                    for i in range(4):
+                        if i < section_count_for_names:
+                            section_name_vars[i].set(chr(ord("A") + i))
+                        else:
+                            section_name_vars[i].set("")
             _capture_unit_section_assignments()
             _refresh_unit_section_choices()
             apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True)
@@ -2298,11 +2325,9 @@ def _rebuild_regular_cache(entries=None):
         except Exception:
             color_pages, plates = 0, 0
         section_pages_values = _coerce_section_pages_for_display(data)
-        file_stem = os.path.splitext(os.path.basename(path))[0]
         rows.append({
             "path": path,
-            "filename": file_stem,
-            "name": data.get("name") or file_stem,
+            "name": data.get("name") or os.path.splitext(os.path.basename(path))[0],
             "issue_dt": issue_dt,
             "issue_disp": fmt_issue_for_display(issue),
             "product": product,
@@ -2416,30 +2441,6 @@ def _cancel_cache_watcher(win, watcher_state):
         watcher_state["after_id"] = None
     except Exception:
         pass
-
-
-def _wire_treeview_sorting(tree, heading_titles, sort_state, refresh_callback):
-    """Attach clickable sort handlers and ▲/▼ indicators to a Treeview."""
-    def _update_headings():
-        active_col = sort_state.get("col")
-        descending = bool(sort_state.get("desc"))
-        for col, title in heading_titles:
-            suffix = ""
-            if col == active_col:
-                suffix = " ▼" if descending else " ▲"
-            tree.heading(col, text=f"{title}{suffix}", command=lambda _c=col: _on_heading_click(_c))
-
-    def _on_heading_click(col):
-        if sort_state.get("col") == col:
-            sort_state["desc"] = not bool(sort_state.get("desc"))
-        else:
-            sort_state["col"] = col
-            sort_state["desc"] = False
-        _update_headings()
-        refresh_callback()
-
-    _update_headings()
-    return _update_headings
 
 
 def open_json_in_layout(
@@ -2961,6 +2962,7 @@ def build_new_layout_launcher(parent):
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     template_paths = []
     regular_rows = {}
+    launcher_regular_sort_state = {"col": None, "desc": False}
 
     mode_bar = ttk.Frame(frame)
     mode_bar.grid(row=0, column=0, columnspan=12, sticky="ew", pady=(0, 8))
@@ -3023,17 +3025,24 @@ def build_new_layout_launcher(parent):
     regular_frame.grid(row=0, column=1, sticky="nsew")
     regular_frame.rowconfigure(0, weight=1)
     regular_frame.columnconfigure(0, weight=1)
-    regular_columns = ("filename", "product", "press", "format", "pages", "color_pages", "plates", "saved")
-    regular_heading_specs = [("filename", "Filename", 240, "w"), ("product", "Product", 220, "w"), ("press", "Press", 90, "center"), ("format", "Format", 100, "center"), ("pages", "Pages", 120, "center"), ("color_pages", "Color Pages", 95, "center"), ("plates", "Plates", 70, "center"), ("saved", "Last Saved", 170, "center")]
+    regular_columns = ("product", "press", "format", "pages", "color_pages", "plates", "saved")
     regular_tree = ttk.Treeview(regular_frame, columns=regular_columns, show="headings", selectmode="browse")
     regular_tree.grid(row=0, column=0, sticky="nsew")
     regular_scroll = ttk.Scrollbar(regular_frame, orient="vertical", command=regular_tree.yview)
     regular_scroll.grid(row=0, column=1, sticky="ns")
     regular_tree.configure(yscrollcommand=regular_scroll.set)
-    for key, title, width, anchor in regular_heading_specs:
+    launcher_regular_heading_titles = {
+        "product": "Product",
+        "press": "Press",
+        "format": "Format",
+        "pages": "Pages",
+        "color_pages": "Color Pages",
+        "plates": "Plates",
+        "saved": "Last Saved",
+    }
+    for key, title, width, anchor in [("product", launcher_regular_heading_titles["product"], 260, "w"), ("press", launcher_regular_heading_titles["press"], 90, "center"), ("format", launcher_regular_heading_titles["format"], 100, "center"), ("pages", launcher_regular_heading_titles["pages"], 120, "center"), ("color_pages", launcher_regular_heading_titles["color_pages"], 95, "center"), ("plates", launcher_regular_heading_titles["plates"], 70, "center"), ("saved", launcher_regular_heading_titles["saved"], 170, "center")]:
         regular_tree.heading(key, text=title)
         regular_tree.column(key, width=width, anchor=anchor)
-    regular_sort_state = {"col": "filename", "desc": False}
 
     btn_row = ttk.Frame(frame)
     btn_row.grid(row=5, column=0, columnspan=12, pady=(12, 0), sticky="w")
@@ -3173,15 +3182,18 @@ def build_new_layout_launcher(parent):
             template_paths.append(path)
         templates_listbox.selection_clear(0, "end")
         close_preview()
-    def _sort_regular_rows(rows):
-        col = regular_sort_state.get("col")
+    def sort_launcher_regular_rows(rows):
+        col = launcher_regular_sort_state.get("col")
         if not col:
             return rows
+
         def keyfunc(r):
-            if col == "filename":
-                return (r.get("filename") or "").lower()
             if col == "product":
-                return (r.get("product") or "").lower()
+                return (
+                    (r.get("product") or "").lower(),
+                    tuple(r.get("section_pages_sort", (0, 0, 0, 0))),
+                    r.get("saved_dt") or datetime.min,
+                )
             if col == "press":
                 return (r.get("press") or "").lower()
             if col == "format":
@@ -3195,24 +3207,44 @@ def build_new_layout_launcher(parent):
             if col == "saved":
                 return r.get("saved_dt") or datetime.min
             return ""
-        return sorted(rows, key=keyfunc, reverse=bool(regular_sort_state.get("desc")))
+
+        return sorted(rows, key=keyfunc, reverse=launcher_regular_sort_state["desc"])
+
+    def update_launcher_regular_sort_headings():
+        for col in regular_columns:
+            regular_tree.heading(
+                col,
+                text=_treeview_sort_heading_text(launcher_regular_heading_titles[col], launcher_regular_sort_state, col),
+                command=lambda _c=col: sort_launcher_regular_by(_c),
+            )
+
+    def sort_launcher_regular_by(col):
+        if launcher_regular_sort_state["col"] == col:
+            launcher_regular_sort_state["desc"] = not launcher_regular_sort_state["desc"]
+        else:
+            launcher_regular_sort_state["col"] = col
+            launcher_regular_sort_state["desc"] = False
+        refresh_regulars()
+
     def refresh_regulars(*_):
         if not mode_state["regular"]:
             return
         selected = selected_regular_path()
         rows = list_matching_regular_layouts(press_var.get(), format_var.get())
-        rows = _sort_regular_rows(rows)
+        rows = sort_launcher_regular_rows(rows)
         regular_tree.delete(*regular_tree.get_children())
         regular_rows.clear()
         for row in rows:
             iid = row.get("path")
             regular_rows[iid] = row
-            regular_tree.insert("", "end", iid=iid, values=(row.get("filename", ""), row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
+            regular_tree.insert("", "end", iid=iid, values=(row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
+        update_launcher_regular_sort_headings()
         if selected and selected in regular_rows:
             regular_tree.selection_set(selected)
             regular_tree.focus(selected)
         else:
             close_preview()
+    update_launcher_regular_sort_headings()
     def _on_format_changed(event=None):
         fmt = format_var.get()
         inc = min_pages_for_format(fmt)
@@ -3242,13 +3274,6 @@ def build_new_layout_launcher(parent):
         close_preview()
         refresh_regulars()
         refresh_templates()
-    regular_update_sort_headings = _wire_treeview_sorting(
-        regular_tree,
-        [(key, title) for key, title, _width, _anchor in regular_heading_specs],
-        regular_sort_state,
-        refresh_regulars,
-    )
-
     def toggle_mode():
         mode_state["regular"] = not mode_state["regular"]
         update_mode_widgets()
@@ -3354,14 +3379,22 @@ def build_template_editor_launcher(parent):
     vsb.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=vsb.set)
 
-    template_heading_specs = [("name", "Template Name", 280, "w"), ("press", "Press", 90, "center"), ("format", "Format", 120, "center"), ("saved", "Last Saved", 170, "center")]
-    for key, title, width, anchor in template_heading_specs:
+    template_heading_titles = {
+        "name": "Template Name",
+        "press": "Press",
+        "format": "Format",
+        "saved": "Last Saved",
+    }
+    for key, title in template_heading_titles.items():
         tree.heading(key, text=title)
-        tree.column(key, width=width, anchor=anchor)
+    tree.column("name", width=280, anchor="w")
+    tree.column("press", width=90, anchor="center")
+    tree.column("format", width=120, anchor="center")
+    tree.column("saved", width=170, anchor="center")
 
     template_rows = []
     row_by_iid = {}
-    sort_state = {"col": "name", "desc": False}
+    sort_state = {"col": None, "desc": False}
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
@@ -3457,6 +3490,12 @@ def build_template_editor_launcher(parent):
             return False
         return True
 
+    def update_sort_headings():
+        tree.heading("name", text=_treeview_sort_heading_text(template_heading_titles["name"], sort_state, "name"), command=lambda: sort_by("name"))
+        tree.heading("press", text=_treeview_sort_heading_text(template_heading_titles["press"], sort_state, "press"), command=lambda: sort_by("press"))
+        tree.heading("format", text=_treeview_sort_heading_text(template_heading_titles["format"], sort_state, "format"), command=lambda: sort_by("format"))
+        tree.heading("saved", text=_treeview_sort_heading_text(template_heading_titles["saved"], sort_state, "saved"), command=lambda: sort_by("saved"))
+
     def refresh():
         template_rows.clear()
         cached_rows, _changed = get_cached_templates(force=False)
@@ -3472,13 +3511,17 @@ def build_template_editor_launcher(parent):
             if _matches_template_filter(row):
                 template_rows.append(row)
         load_rows(sort_rows(list(template_rows)))
+        update_sort_headings()
 
-    update_template_sort_headings = _wire_treeview_sorting(
-        tree,
-        [(key, title) for key, title, _width, _anchor in template_heading_specs],
-        sort_state,
-        refresh,
-    )
+    def sort_by(col):
+        if sort_state["col"] == col:
+            sort_state["desc"] = not sort_state["desc"]
+        else:
+            sort_state["col"] = col
+            sort_state["desc"] = False
+        refresh()
+
+    update_sort_headings()
 
     def selected_path():
         sel = tree.selection()
@@ -3669,18 +3712,26 @@ def build_regular_editor_launcher(parent):
     list_frame.grid(row=1, column=0, sticky="nsew")
     list_frame.rowconfigure(0, weight=1)
     list_frame.columnconfigure(0, weight=1)
-    columns = ("filename", "product", "press", "format", "pages", "color_pages", "plates", "saved")
-    regular_heading_specs = [("filename", "Filename", 240, "w"), ("product", "Product", 220, "w"), ("press", "Press", 90, "center"), ("format", "Format", 100, "center"), ("pages", "Pages", 120, "center"), ("color_pages", "Color Pages", 95, "center"), ("plates", "Plates", 70, "center"), ("saved", "Last Saved", 170, "center")]
+    columns = ("product", "press", "format", "pages", "color_pages", "plates", "saved")
     tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="browse")
     tree.grid(row=0, column=0, sticky="nsew")
     vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
     vsb.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=vsb.set)
-    for key, title, width, anchor in regular_heading_specs:
+    regular_heading_titles = {
+        "product": "Product",
+        "press": "Press",
+        "format": "Format",
+        "pages": "Pages",
+        "color_pages": "Color Pages",
+        "plates": "Plates",
+        "saved": "Last Saved",
+    }
+    for key, title, width, anchor in [("product", regular_heading_titles["product"], 260, "w"), ("press", regular_heading_titles["press"], 90, "center"), ("format", regular_heading_titles["format"], 100, "center"), ("pages", regular_heading_titles["pages"], 120, "center"), ("color_pages", regular_heading_titles["color_pages"], 95, "center"), ("plates", regular_heading_titles["plates"], 70, "center"), ("saved", regular_heading_titles["saved"], 170, "center")]:
         tree.heading(key, text=title)
         tree.column(key, width=width, anchor=anchor)
 
-    sort_state = {"col": "filename", "desc": False}
+    sort_state = {"col": None, "desc": False}
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
@@ -3719,8 +3770,6 @@ def build_regular_editor_launcher(parent):
         if not col:
             return rows
         def keyfunc(r):
-            if col == "filename":
-                return (r.get("filename") or "").lower()
             if col == "product":
                 return (r.get("product") or "").lower()
             if col == "press":
@@ -3740,7 +3789,7 @@ def build_regular_editor_launcher(parent):
     def matches(row):
         search_text = (search_var.get() or "").strip().lower()
         if search_text:
-            hay = " ".join([row.get("filename", ""), row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), str(row.get("color_pages", "")), str(row.get("plates", ""))]).lower()
+            hay = " ".join([row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), str(row.get("color_pages", "")), str(row.get("plates", ""))]).lower()
             if search_text not in hay:
                 return False
         if (press_var.get() or "All") != "All" and row.get("press") != press_var.get():
@@ -3748,18 +3797,25 @@ def build_regular_editor_launcher(parent):
         if (format_var.get() or "All") != "All" and row.get("format") != format_var.get():
             return False
         return True
+    def update_sort_headings():
+        for col in columns:
+            tree.heading(col, text=_treeview_sort_heading_text(regular_heading_titles[col], sort_state, col), command=lambda _c=col: sort_by(_c))
+
     def refresh():
         rows, _changed = get_cached_regular_rows(force=False)
         rows = sort_rows([row for row in rows if matches(row)])
         tree.delete(*tree.get_children())
         for row in rows:
-            tree.insert("", "end", iid=row["path"], values=(row.get("filename", ""), row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
-    update_regular_sort_headings = _wire_treeview_sorting(
-        tree,
-        [(key, title) for key, title, _width, _anchor in regular_heading_specs],
-        sort_state,
-        refresh,
-    )
+            tree.insert("", "end", iid=row["path"], values=(row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
+        update_sort_headings()
+    def sort_by(col):
+        if sort_state["col"] == col:
+            sort_state["desc"] = not sort_state["desc"]
+        else:
+            sort_state["col"] = col
+            sort_state["desc"] = False
+        refresh()
+    update_sort_headings()
     search_var.trace_add("write", lambda *_: refresh())
     press_var.trace_add("write", lambda *_: refresh())
     format_var.trace_add("write", lambda *_: refresh())
@@ -3882,12 +3938,28 @@ def build_main_launcher():
     vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
     vsb.grid(row=2, column=1, sticky="ns", pady=(0, 0))
     tree.configure(yscrollcommand=vsb.set)  
-    layout_heading_specs = [("issue", "Issue Date", 110, "center"), ("product", "Product", 260, "w"), ("press", "Press", 90, "center"), ("format", "Format", 100, "center"), ("pages", "Pages", 120, "center"), ("color_pages", "Color Pages", 95, "center"), ("plates", "Plates", 70, "center"), ("saved", "Last Saved", 170, "center")]
-    for key, title, width, anchor in layout_heading_specs:
+    recent_heading_titles = {
+        "issue": "Issue Date",
+        "product": "Product",
+        "press": "Press",
+        "format": "Format",
+        "pages": "Pages",
+        "color_pages": "Color Pages",
+        "plates": "Plates",
+        "saved": "Last Saved",
+    }
+    for key, title in recent_heading_titles.items():
         tree.heading(key, text=title)
-        tree.column(key, width=width, anchor=anchor)
+    tree.column("issue", width=110, anchor="center")  
+    tree.column("product", width=260, anchor="w")  
+    tree.column("press", width=90, anchor="center")  
+    tree.column("format", width=100, anchor="center")  
+    tree.column("pages", width=120, anchor="center")  
+    tree.column("color_pages", width=95, anchor="center")  
+    tree.column("plates", width=70, anchor="center")  
+    tree.column("saved", width=170, anchor="center")  
     row_by_iid = {}  
-    sort_state = {"col": "issue", "desc": False}  
+    sort_state = {"col": None, "desc": False}  
     refresh_job = {"id": None}  
     auto_refresh_ms = 5000    
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
@@ -4041,6 +4113,10 @@ def build_main_launcher():
             return False
         return True
 
+    def update_sort_headings():
+        for col in columns:
+            tree.heading(col, text=_treeview_sort_heading_text(recent_heading_titles[col], sort_state, col), command=lambda _c=col: sort_by(_c))
+
     def refresh(preserve_state=True):
         selected = tree.selection() if preserve_state else ()
         focused = tree.focus() if preserve_state else None
@@ -4054,6 +4130,7 @@ def build_main_launcher():
         rows = [row for row in all_rows if _matches_layout_filter(row)]
         rows = sort_rows(rows)
         load_rows_into_tree(rows, preserve_selection=selected, preserve_focus=focused, preserve_yview=yview)
+        update_sort_headings()
     def schedule_refresh():  
         try:  
             if refresh_job["id"] is not None:  
@@ -4068,12 +4145,14 @@ def build_main_launcher():
         finally:  
             if root.winfo_exists():  
                 schedule_refresh()  
-    update_layout_sort_headings = _wire_treeview_sorting(
-        tree,
-        [(key, title) for key, title, _width, _anchor in layout_heading_specs],
-        sort_state,
-        lambda: refresh(preserve_state=True),
-    )
+    def sort_by(col):
+        if sort_state["col"] == col:
+            sort_state["desc"] = not sort_state["desc"]
+        else:
+            sort_state["col"] = col
+            sort_state["desc"] = False
+        refresh(preserve_state=True)
+    update_sort_headings()
     search_var.trace_add("write", lambda *_: refresh(preserve_state=False))
     press_var.trace_add("write", lambda *_: refresh(preserve_state=False))
     format_var.trace_add("write", lambda *_: refresh(preserve_state=False))
@@ -4182,39 +4261,27 @@ def build_main_launcher():
         cleanup_vsb = ttk.Scrollbar(outer, orient="vertical", command=cleanup_tree.yview)  
         cleanup_vsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))  
         cleanup_tree.configure(yscrollcommand=cleanup_vsb.set)  
-        cleanup_heading_specs = [("delete", "Delete", 70, "center"), ("issue", "Issue Date", 110, "center"), ("product", "Product", 280, "w"), ("press", "Press", 90, "center"), ("format", "Format", 120, "center"), ("saved", "Last Saved", 170, "center")]
-        for key, title, width, anchor in cleanup_heading_specs:
-            cleanup_tree.heading(key, text=title)
-            cleanup_tree.column(key, width=width, anchor=anchor)
-        cleanup_sort_state = {"col": "issue", "desc": False}
+        cleanup_tree.heading("delete", text="Delete")  
+        cleanup_tree.heading("issue", text="Issue Date")  
+        cleanup_tree.heading("product", text="Product")  
+        cleanup_tree.heading("press", text="Press")  
+        cleanup_tree.heading("format", text="Format")  
+        cleanup_tree.heading("saved", text="Last Saved")  
+        cleanup_tree.column("delete", width=70, anchor="center")  
+        cleanup_tree.column("issue", width=110, anchor="center")  
+        cleanup_tree.column("product", width=280, anchor="w")  
+        cleanup_tree.column("press", width=90, anchor="center")  
+        cleanup_tree.column("format", width=120, anchor="center")  
+        cleanup_tree.column("saved", width=170, anchor="center")  
         delete_state = {  
             row["path"]: bool(row.get("issue_dt") and row.get("issue_dt").date() <= today)  
             for row in all_rows  
         }  
         def checkbox_value(path):  
             return "☑" if delete_state.get(path, False) else "☐"  
-        def sort_cleanup_rows(rows):
-            col = cleanup_sort_state.get("col")
-            if not col:
-                return list(rows)
-            def keyfunc(row):
-                if col == "delete":
-                    return checkbox_value(row.get("path"))
-                if col == "issue":
-                    return row.get("issue_dt") or datetime.min
-                if col == "product":
-                    return (row.get("product") or "").lower()
-                if col == "press":
-                    return (row.get("press") or "").lower()
-                if col == "format":
-                    return (row.get("format") or "").lower()
-                if col == "saved":
-                    return row.get("saved_dt") or datetime.min
-                return ""
-            return sorted(rows, key=keyfunc, reverse=bool(cleanup_sort_state.get("desc")))
         def populate_cleanup_tree():  
             cleanup_tree.delete(*cleanup_tree.get_children())  
-            for row in sort_cleanup_rows(all_rows):  
+            for row in all_rows:  
                 path = row["path"]  
                 cleanup_tree.insert("", "end", iid=path, values=(  
                     checkbox_value(path),  
@@ -4239,12 +4306,6 @@ def build_main_launcher():
             return "break"  
         cleanup_tree.bind("<Double-Button-1>", toggle_from_event)  
         cleanup_tree.bind("<space>", toggle_from_event)  
-        update_cleanup_sort_headings = _wire_treeview_sorting(
-            cleanup_tree,
-            [(key, title) for key, title, _width, _anchor in cleanup_heading_specs],
-            cleanup_sort_state,
-            populate_cleanup_tree,
-        )
         populate_cleanup_tree()  
         btns = ttk.Frame(outer)  
         btns.grid(row=2, column=0, pady=(12, 0), sticky="e")  
