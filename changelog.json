@@ -1,0 +1,55 @@
+{
+  "current_version": "1.0.2",
+  "versions": [
+    {
+      "version": "1.0.2",
+      "released": "2026-06-11",
+      "summary": "Changes New Layout window to a treeview with filters",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "The New Layout window now uses a treeview to display available layouts, allowing for better organization and easier navigation.",
+            "Added filter options to the New Layout window, enabling users to quickly find specific templates and layouts.",
+            "Layout editor now calculates the page counts for the sections automatically."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.1",
+      "released": "2026-06-11",
+      "summary": "Adds launcher version loading from changelog.json and a clickable changelog history view.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "The main launcher now pulls its version number from changelog.json.",
+            "Clicking the version label opens the changelog history dialog."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated changelog storage to keep multiple versions in one file.",
+            "Added a compact changelog view with collapsible version sections."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "released": "2026-06-11",
+      "summary": "Initial release of the Press Layout launcher.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Initial consolidated launcher UI for Press Layouts.",
+            "Layout browsing, filtering, and preview support."
+          ]
+        }
+      ]
+    }
+  ]
+}

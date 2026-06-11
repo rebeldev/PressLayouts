@@ -383,8 +383,66 @@ def unit_min_page_number(unit_dict):
             if mins is None or v < mins:
                 mins = v
     return mins
+
+
+def unit_page_entry_count(unit_dict) -> int:
+    total = 0
+    for row in unit_dict.get("entries", []):
+        for cell in row:
+            value = cell.get() if hasattr(cell, "get") else cell
+            if safe_int(value) is not None:
+                total += 1
+    return total
+
+
+def resolve_unit_section_id_for_ctx(unit_dict, ctx, section_count=None):
+    if section_count is None:
+        try:
+            section_count = int(ctx.get("section_count_var").get())
+        except Exception:
+            section_count = 1
+    section_count = max(1, min(4, int(section_count)))
+
+    section_entry = unit_dict.get("section_entry")
+    sec_text = (section_entry.get() or "").strip().upper() if section_entry is not None else ""
+    sec_id = None
+
+    sn_vars = ctx.get("section_name_vars")
+    if sn_vars:
+        try:
+            for i in range(section_count):
+                name = (sn_vars[i].get() or "").strip().upper()
+                if name and sec_text == name:
+                    sec_id = i + 1
+                    break
+        except Exception:
+            sec_id = None
+
+    if sec_id is None:
+        sec_id = parse_section_id(sec_text)
+
+    if sec_id is None or not (1 <= sec_id <= section_count):
+        return None
+    return sec_id
+
+
+def compute_section_page_counts_from_ctx(ctx, section_count=None):
+    if section_count is None:
+        try:
+            section_count = int(ctx.get("section_count_var").get())
+        except Exception:
+            section_count = 1
+    section_count = max(1, min(4, int(section_count)))
+    counts = [0] * section_count
+
+    for unit_dict in ctx.get("units", []):
+        sec_id = resolve_unit_section_id_for_ctx(unit_dict, ctx, section_count=section_count)
+        if sec_id is None:
+            continue
+        counts[sec_id - 1] += unit_page_entry_count(unit_dict)
+    return counts
+
 def build_filename_suggestion(ctx) -> str:
-    # Template-style suggestion
     press_name = ctx.get("press_name", "")
     press_num = "1" if "1" in press_name else "2"
     prefix = f"P{press_num}"
@@ -395,41 +453,17 @@ def build_filename_suggestion(ctx) -> str:
         section_count = 1
     section_count = max(1, min(4, section_count))
 
-    pages = []
-    for i in range(section_count):
-        try:
-            pages.append(max(1, int(ctx["section_page_vars"][i].get().strip())))
-        except Exception:
-            pages.append(1)
-
+    pages = compute_section_page_counts_from_ctx(ctx, section_count=section_count)
     units_by_section = {i: [] for i in range(1, section_count + 1)}
     for u in ctx["units"]:
-        sec_text = (u["section_entry"].get() or "").strip().upper()
-        sec_id = None
-        # Try mapping via explicit section name variables (if present in ctx)
-        sn_vars = ctx.get("section_name_vars")
-        if sn_vars:
-            try:
-                for i in range(section_count):
-                    name = (sn_vars[i].get() or "").strip().upper()
-                    if name and sec_text == name:
-                        sec_id = i + 1
-                        break
-            except Exception:
-                sec_id = None
-
-        # fallback to numeric/S#/A-D parsing
-        if sec_id is None:
-            sec_id = parse_section_id(sec_text)
-
+        sec_id = resolve_unit_section_id_for_ctx(u, ctx, section_count=section_count)
         if sec_id is None:
             continue
-        if 1 <= sec_id <= section_count:
-            units_by_section[sec_id].append(u)
+        units_by_section[sec_id].append(u)
 
     segments = []
     for sec_idx in range(1, section_count + 1):
-        sec_pages = pages[sec_idx - 1]
+        sec_pages = pages[sec_idx - 1] if sec_idx - 1 < len(pages) else 0
         sec_units = units_by_section.get(sec_idx, [])
 
         def sort_key(u):
@@ -437,7 +471,6 @@ def build_filename_suggestion(ctx) -> str:
             return (m is None, m if m is not None else 10**9)
 
         sec_units_sorted = sorted(sec_units, key=sort_key)
-
         units_part = "".join(
             f"{abbrev_unit_label(u['label'])}{unit_dinky_suffix(u)}"
             for u in sec_units_sorted
@@ -1710,6 +1743,43 @@ def _save_preview_for_saved_template(ctx, template_path):
         pass
 
 
+def _unit_has_assigned_pages(unit_ctx) -> bool:
+    for row in unit_ctx.get("entries", []):
+        for cell in row:
+            try:
+                if (cell.get() or "").strip():
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _validate_used_units_have_sections(ctx, parent=None) -> bool:
+    offending_labels = []
+    for unit_ctx in ctx.get("units", []):
+        try:
+            section_value = (unit_ctx["section_entry"].get() or "").strip()
+        except Exception:
+            section_value = ""
+        if section_value:
+            continue
+        if _unit_has_assigned_pages(unit_ctx):
+            offending_labels.append(str(unit_ctx.get("label") or "Unit"))
+
+    if not offending_labels:
+        return True
+
+    labels_text = ", ".join(offending_labels)
+    messagebox.showerror(
+        "Missing Section Assignment",
+        "All units with pages assigned must be assigned a section before saving.\n\n"
+        f"Units missing a section: {labels_text}",
+        parent=parent,
+    )
+    return False
+
+
+
 def collect_layout_data(ctx):
     now = datetime.now().isoformat(timespec="seconds")
     data = {
@@ -1721,7 +1791,7 @@ def collect_layout_data(ctx):
         "issue_date": ctx["issue_entry"].get().strip() if ctx.get("issue_entry") else "",
         "product": ctx["product_entry"].get().strip() if ctx.get("product_entry") else "",
         "section_count": 1,
-        "section_pages": [min_pages_for_format(ctx.get("format_name", ""))],
+        "section_pages": [0],
         "section_names": [],
         "units": []
     }
@@ -1732,18 +1802,8 @@ def collect_layout_data(ctx):
         except Exception:
             section_count = 1
         section_count = max(1, min(4, section_count))
-
-        pages = []
-        for i in range(section_count):
-            text = ctx["section_page_vars"][i].get().strip()
-            try:
-                pages.append(max(1, int(text)))
-            except Exception:
-                pages.append(min_pages_for_format(ctx.get("format_name", "")))
-
         data["section_count"] = section_count
-        data["section_pages"] = pages
-        # collect section names if available
+        data["section_pages"] = compute_section_page_counts_from_ctx(ctx, section_count=section_count)
         names = []
         for i in range(section_count):
             try:
@@ -1759,14 +1819,11 @@ def collect_layout_data(ctx):
             grid.append([cell.get().strip() for cell in row])
         data["units"].append({"label": u["label"], "section": section, "grid": grid})
 
-    # ---- per-cell color selection (layouts only) ----
     if not ctx.get("template_mode", False):
-        # store list of dicts for JSON stability
         data["color_cells"] = [
             {"unit": unit, "r": int(r), "c": int(c)}
             for (unit, r, c) in sorted(ctx.get("color_cells", set()))
         ]
-
     return data
 def populate_layout_from_data(ctx, data):
     if ctx.get("issue_entry"):
@@ -1850,6 +1907,11 @@ def populate_layout_from_data(ctx, data):
             ctx["_refresh_unit_section_choices"]()
         except Exception:
             pass
+    if ctx.get("_refresh_section_page_counts"):
+        try:
+            ctx["_refresh_section_page_counts"]()
+        except Exception:
+            pass
 
     # ---- load per-cell color selection (layouts only) ----
     if not ctx.get("template_mode", False):
@@ -1866,6 +1928,8 @@ def populate_layout_from_data(ctx, data):
 def do_save(win, ctx):
     if not ctx.get("file_path"):
         return do_save_as(win, ctx)
+    if not _validate_used_units_have_sections(ctx, parent=win):
+        return False
     try:
         data = collect_layout_data(ctx)
         if ctx.get("template_mode", False):
@@ -1891,6 +1955,8 @@ def do_save(win, ctx):
         messagebox.showerror("Save Failed", str(e))
         return False
 def do_save_as(win, ctx):
+    if not _validate_used_units_have_sections(ctx, parent=win):
+        return False
     default_dir = ctx.get("default_dir", LAYOUTS_DIR)
     ensure_dir(default_dir)
 

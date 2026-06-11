@@ -227,6 +227,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     section_page_entries = []
 
     ttk.Label(header_frame, text="Sections:", font=(None, 12, "bold")).grid(row=1, column=0, sticky="w", pady=6)
+    ttk.Label(header_frame, text="Names:", font=(None, 12, "bold")).grid(row=2, column=0, sticky="w", pady=6)
+    ttk.Label(header_frame, text="Pages:", font=(None, 12, "bold")).grid(row=3, column=0, sticky="w", pady=6)
     sections_frame = ttk.Frame(header_frame)
     sections_frame.grid(row=1, column=1, sticky="w", padx=(8, 32))
     section_count_radios = []
@@ -241,16 +243,14 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         radio.grid(row=0, column=idx, sticky="w", padx=(0 if idx == 0 else 6, 0))
         section_count_radios.append(radio)
 
-    pages_frame = ttk.Frame(header_frame)
-    # place pages_frame closer to the section count and tighten spacing
-    pages_frame.grid(row=1, column=2, columnspan=3, sticky="w", padx=(4, 8))
-    ttk.Label(pages_frame, text="Section pages:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    section_detail_frame = ttk.Frame(header_frame)
+    section_detail_frame.grid(row=2, column=1, rowspan=2, columnspan=5, sticky="w", padx=(8, 0), pady=(0, 6))
 
     format_name = config.get("format_name", "")
     page_increment = min_pages_for_format(format_name)
     max_pages = page_increment * 10
 
-    initial_pages = config.get("section_pages", [page_increment] * 4)
+    initial_pages = config.get("section_pages", [0] * 4)
     # Section names (editable labels for S1..S4)
     initial_names = config.get("section_names")
     # determine initial enabled section count (from config/var)
@@ -264,7 +264,6 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             base_names = [f"S{i+1}" for i in range(4)]
         else:
             base_names = ["A", "B", "C", "D"]
-        # only prefill names for enabled sections; disabled sections remain blank
         initial_names = [base_names[i] if i < init_count else "" for i in range(4)]
 
     section_name_vars = []
@@ -385,45 +384,53 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         name_value = str(initial_names[idx] if idx < len(initial_names) else "")
         nvar = tk.StringVar(value=name_value)
         section_name_vars.append(nvar)
-        entry = ttk.Entry(pages_frame, textvariable=nvar, width=6, justify="center", font=(None, 10))
-        # center the name above the page spinbox column
-        entry.grid(row=0, column=2 + idx * 2, sticky="", padx=(6, 2))
+        entry = ttk.Entry(section_detail_frame, textvariable=nvar, width=6, justify="center", font=(None, 10))
+        entry.grid(row=0, column=idx, sticky="w", padx=(0 if idx == 0 else 6, 0))
         section_name_entries.append(entry)
 
+    section_page_labels = []
     for idx in range(4):
-        page_value = str(initial_pages[idx] if idx < len(initial_pages) else page_increment)
+        page_value = str(initial_pages[idx] if idx < len(initial_pages) else 0)
         var = tk.StringVar(value=page_value)
         section_page_vars.append(var)
+        lbl = ttk.Label(section_detail_frame, textvariable=var, width=6, anchor="center")
+        lbl.grid(row=1, column=idx, sticky="w", padx=(0 if idx == 0 else 6, 0), pady=(18, 0))
+        section_page_labels.append(lbl)
 
-        ttk.Label(pages_frame, text=f"S{idx + 1}", font=(None, 10)).grid(
-            row=1, column=1 + idx * 2, sticky="e", padx=(10, 2)
-        )
-        sp = ttk.Spinbox(
-            pages_frame,
-            from_=page_increment,
-            to=max_pages,
-            increment=page_increment,
-            textvariable=var,
-            width=4,
-            justify="center"
-        )
-        sp.grid(row=1, column=2 + idx * 2, sticky="w")
-        section_page_entries.append(sp)
-
-    # Auto-select text on focus for all section page spinboxes
-    for sp in section_page_entries:
-        sp.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
+    def _refresh_section_page_counts():
+        try:
+            count = max(1, min(4, int(section_count_var.get())))
+        except Exception:
+            count = 1
+        counts = [0] * count
+        for unit_dict in units:
+            section_id = unit_section_assignments.get(unit_dict["label"])
+            if section_id is None:
+                try:
+                    section_id = _resolve_section_assignment_id((unit_dict["section_entry"].get() or "").strip())
+                except Exception:
+                    section_id = None
+            if section_id is None or not (1 <= int(section_id) <= count):
+                continue
+            page_total = 0
+            for row in unit_dict.get("entries", []):
+                for cell in row:
+                    if safe_int(cell.get()) is not None:
+                        page_total += 1
+            counts[int(section_id) - 1] += page_total
+        for idx in range(4):
+            if idx < count:
+                section_page_vars[idx].set(str(counts[idx]))
+            else:
+                section_page_vars[idx].set("")
 
     def _update_section_page_states(count):
-        for idx, entry in enumerate(section_page_entries):
+        for idx, _label in enumerate(section_page_labels):
             if idx < count:
-                entry.state(["!disabled"])
-                # enable name entries as well
                 try:
                     section_name_entries[idx].state(["!disabled"])
                 except Exception:
                     pass
-                # ensure enabled sections have a sensible default if blank
                 try:
                     cur = (section_name_vars[idx].get() or "").strip()
                     if cur == "":
@@ -434,7 +441,6 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 except Exception:
                     pass
             else:
-                entry.state(["disabled"])
                 section_page_vars[idx].set("")
                 try:
                     section_name_entries[idx].state(["disabled"])
@@ -448,9 +454,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             except Exception:
                 pass
         _refresh_unit_section_choices()
-
-
-    apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True)
+        _refresh_section_page_counts()
 
     # Press area
     press_area_frame = ttk.Frame(win, padding=(16, 0, 16, 12))
@@ -571,6 +575,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "section_name_vars": section_name_vars,
         "section_name_entries": section_name_entries,
         "_refresh_unit_section_choices": _refresh_unit_section_choices,
+        "_refresh_section_page_counts": _refresh_section_page_counts,
         "_capture_unit_section_assignments": _capture_unit_section_assignments,
         "imposition_entry": imposition_entry,
         "color_pages_var": color_pages_var,
@@ -641,6 +646,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
 
                 section_name_prev[i] = new
                 _refresh_unit_section_choices()
+                _refresh_section_page_counts()
             except Exception:
                 pass
         return _on_name_change
@@ -1450,6 +1456,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             return
         ctx["_imposition_updating"] = True
         try:
+            try:
+                _refresh_section_page_counts()
+            except Exception:
+                pass
             imposition_var.set(build_imposition_text(ctx))
         finally:
             ctx["_imposition_updating"] = False
@@ -1536,7 +1546,6 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             count = max(1, min(4, count))
             section_count_var.set(str(count))
             _update_section_page_states(count)
-            apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True)
             update_imposition()
             refresh_color_overlays()
         finally:
@@ -1544,8 +1553,6 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
 
     section_count_var.trace_add("write", lambda *_: _on_section_count_changed())
 
-    for var in section_page_vars:
-        var.trace_add("write", lambda *_: update_imposition())
 
     # ---- Per-cell color selection logic ----
     def toggle_color_cell(unit_dict, r, c):
@@ -1699,9 +1706,9 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         entries = u["entries"]
         section_entry = u.get("section_entry")
         if section_entry is not None:
-            section_entry.bind("<KeyRelease>", lambda e, _u=u: (_record_unit_section_assignment(_u), update_imposition()))
-            section_entry.bind("<<ComboboxSelected>>", lambda e, _u=u: (_record_unit_section_assignment(_u), update_imposition()))
-            section_entry.bind("<FocusOut>", lambda e, _u=u: (_record_unit_section_assignment(_u), update_imposition()))
+            section_entry.bind("<KeyRelease>", lambda e, _u=u: (_record_unit_section_assignment(_u), _refresh_section_page_counts(), update_imposition()))
+            section_entry.bind("<<ComboboxSelected>>", lambda e, _u=u: (_record_unit_section_assignment(_u), _refresh_section_page_counts(), update_imposition()))
+            section_entry.bind("<FocusOut>", lambda e, _u=u: (_record_unit_section_assignment(_u), _refresh_section_page_counts(), update_imposition()))
         for r in range(len(overlays)):
             for c in range(len(overlays[r])):
                 ov = overlays[r][c]
@@ -1720,8 +1727,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
 
                 ov.bind("<Button-1>", on_overlay_click)
                 entry.bind("<FocusIn>", lambda e, _ov=ov: overlay_hide(_ov) if not color_select_var.get() else None)
-                entry.bind("<FocusOut>", lambda e, _u=u, _r=r, _c=c: (refresh_cell_overlay(_u, _r, _c), update_imposition()))
-                entry.bind("<KeyRelease>", lambda e, _u=u, _r=r, _c=c: (refresh_cell_overlay(_u, _r, _c), update_imposition()))
+                entry.bind("<FocusOut>", lambda e, _u=u, _r=r, _c=c: (refresh_cell_overlay(_u, _r, _c), _refresh_section_page_counts(), update_imposition()))
+                entry.bind("<KeyRelease>", lambda e, _u=u, _r=r, _c=c: (refresh_cell_overlay(_u, _r, _c), _refresh_section_page_counts(), update_imposition()))
 
     if color_toggle is not None:
         color_toggle.configure(command=refresh_color_overlays)
@@ -1750,7 +1757,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                             section_name_vars[i].set("")
             _capture_unit_section_assignments()
             _refresh_unit_section_choices()
-            apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True)
+            _refresh_section_page_counts()
             if not template_mode:
                 starter_format_var.set(data.get("starter_format") or "Standard")
 
@@ -1821,7 +1828,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         grid_rows=grid_rows,
         grid_cols=grid_cols,
         press_name=config.get("press_name", ""),
-        extra_widgets=section_count_radios + section_page_entries
+        extra_widgets=section_count_radios + section_name_entries
     )
     set_custom_tab_order(focus_list)
     enable_arrow_navigation(focus_list, units, config.get("press_name", ""))
@@ -1854,7 +1861,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     try:
         issue_entry.bind("<KeyRelease>", _mark_dirty_event)
         product_entry.bind("<KeyRelease>", _mark_dirty_event)
-        for sv in section_page_vars:
+        for sv in section_name_vars:
             try:
                 sv.trace_add("write", _mark_dirty_var)
             except Exception:
@@ -2943,12 +2950,13 @@ def open_new_regular(parent):
     win.withdraw()
     build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=None, load_as_copy=False)
 
+
 def build_new_layout_launcher(parent):
     root = tk.Toplevel(parent)
     root.title("New Layout")
-    root.geometry("980x720")
-    root.minsize(900, 640)
-    remember_window_geometry(root, "new_layout_launcher", default_geometry="980x720", minsize=(900, 640))
+    root.geometry("1180x760")
+    root.minsize(1040, 680)
+    remember_window_geometry(root, "new_layout_launcher", default_geometry="1180x760", minsize=(1040, 680))
     _bind_window_size_memory(root, "new_layout_launcher")
 
     paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
@@ -2960,69 +2968,74 @@ def build_new_layout_launcher(parent):
 
     mode_state = {"regular": False}
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
-    template_paths = []
-    regular_rows = {}
+    launcher_template_sort_state = {"col": None, "desc": False}
     launcher_regular_sort_state = {"col": None, "desc": False}
+    template_rows_by_iid = {}
+    regular_rows = {}
 
     mode_bar = ttk.Frame(frame)
     mode_bar.grid(row=0, column=0, columnspan=12, sticky="ew", pady=(0, 8))
     mode_bar.columnconfigure(1, weight=1)
     mode_button = ttk.Button(mode_bar, text="From Regular", width=16)
     mode_button.grid(row=0, column=0, sticky="w")
-    mode_note_var = tk.StringVar(value="Guided mode: choose press / format / sections and optionally start from a template.")
+    mode_note_var = tk.StringVar(value="Guided mode: filter templates, then pick one or create a blank layout from a specific press / format / section setup.")
     ttk.Label(mode_bar, textvariable=mode_note_var).grid(row=0, column=1, sticky="w", padx=(12, 0))
 
     ttk.Label(frame, text="Press:", font=(None, 11, "bold")).grid(row=1, column=0, sticky="w", pady=8, padx=(0, 8))
-    press_var = tk.StringVar(value="Press 1")
-    press_combo = ttk.Combobox(frame, textvariable=press_var, values=["Press 1", "Press 2"], state="readonly", width=16)
+    press_var = tk.StringVar(value="All")
+    press_combo = ttk.Combobox(frame, textvariable=press_var, values=["All", "Press 1", "Press 2"], state="readonly", width=16)
     press_combo.grid(row=1, column=1, sticky="w", padx=(0, 24))
 
     ttk.Label(frame, text="Format:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="w", pady=8, padx=(0, 8))
-    format_var = tk.StringVar(value="Broadsheet")
-    format_combo = ttk.Combobox(frame, textvariable=format_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=16)
+    format_var = tk.StringVar(value="All")
+    format_combo = ttk.Combobox(frame, textvariable=format_var, values=["All", "Broadsheet", "Tab", "8 up"], state="readonly", width=16)
     format_combo.grid(row=2, column=1, sticky="w", padx=(0, 24))
 
     section_frame = ttk.Frame(frame)
     section_frame.grid(row=3, column=0, columnspan=12, sticky="ew")
     ttk.Label(section_frame, text="Sections:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", pady=8, padx=(0, 8))
-    section_count_var = tk.StringVar(value="1")
-    section_count_frame = ttk.Frame(section_frame)
-    section_count_frame.grid(row=0, column=1, sticky="w", padx=(0, 24))
-    for idx in range(4):
-        ttk.Radiobutton(section_count_frame, text=str(idx + 1), value=str(idx + 1), variable=section_count_var, width=3).grid(row=0, column=idx, sticky="w", padx=(0 if idx == 0 else 6, 0))
-    ttk.Label(section_frame, text="Pages:", font=(None, 11, "bold")).grid(row=0, column=2, sticky="w", padx=(0, 8))
-    section_page_vars = []
-    section_page_spinboxes = []
-    for idx in range(4):
-        var = tk.StringVar(value=str(min_pages_for_format(format_var.get())))
-        section_page_vars.append(var)
-        ttk.Label(section_frame, text=f"S{idx+1}:", font=(None, 10)).grid(row=0, column=3 + idx * 2, sticky="e", padx=(12, 4))
-        spinbox = ttk.Spinbox(section_frame, from_=2, to=80, increment=2, textvariable=var, width=3, justify="center")
-        spinbox.grid(row=0, column=4 + idx * 2, sticky="w")
-        spinbox.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
-        section_page_spinboxes.append(spinbox)
+    section_count_var = tk.StringVar(value="All")
+    section_count_combo = ttk.Combobox(section_frame, textvariable=section_count_var, values=["All", "1", "2", "3", "4"], state="readonly", width=8)
+    section_count_combo.grid(row=0, column=1, sticky="w", padx=(0, 24))
 
     template_container = ttk.Frame(frame)
     template_container.grid(row=4, column=0, columnspan=12, sticky="nsew", pady=(8, 0))
-    template_container.columnconfigure(1, weight=1)
-    template_container.rowconfigure(0, weight=1)
-    ttk.Label(template_container, text="Templates:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="nw", padx=(0, 8))
+    template_container.columnconfigure(0, weight=1)
+    template_container.rowconfigure(2, weight=1)
+    ttk.Label(template_container, text="Templates:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="nw")
+    template_search_row = ttk.Frame(template_container)
+    template_search_row.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+    template_search_row.columnconfigure(1, weight=1)
+    ttk.Label(template_search_row, text="Search:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+    template_search_var = tk.StringVar(value="")
+    ttk.Entry(template_search_row, textvariable=template_search_var).grid(row=0, column=1, sticky="ew")
     templates_frame = ttk.Frame(template_container)
-    templates_frame.grid(row=0, column=1, sticky="nsew")
+    templates_frame.grid(row=2, column=0, sticky="nsew")
     templates_frame.rowconfigure(0, weight=1)
     templates_frame.columnconfigure(0, weight=1)
-    templates_listbox = tk.Listbox(templates_frame, height=10, width=72, exportselection=False)
-    templates_listbox.grid(row=0, column=0, sticky="nsew")
-    templates_scroll = ttk.Scrollbar(templates_frame, orient="vertical", command=templates_listbox.yview)
+    template_columns = ("name", "press", "format", "sections", "pages", "saved")
+    templates_tree = ttk.Treeview(templates_frame, columns=template_columns, show="headings", selectmode="browse")
+    templates_tree.grid(row=0, column=0, sticky="nsew")
+    templates_scroll = ttk.Scrollbar(templates_frame, orient="vertical", command=templates_tree.yview)
     templates_scroll.grid(row=0, column=1, sticky="ns")
-    templates_listbox.configure(yscrollcommand=templates_scroll.set)
+    templates_tree.configure(yscrollcommand=templates_scroll.set)
+    launcher_template_heading_titles = {"name": "Template Name", "press": "Press", "format": "Format", "sections": "Sections", "pages": "Pages", "saved": "Last Saved"}
+    for key, title, width, anchor in [("name", launcher_template_heading_titles["name"], 300, "w"), ("press", launcher_template_heading_titles["press"], 90, "center"), ("format", launcher_template_heading_titles["format"], 110, "center"), ("sections", launcher_template_heading_titles["sections"], 80, "center"), ("pages", launcher_template_heading_titles["pages"], 130, "center"), ("saved", launcher_template_heading_titles["saved"], 170, "center")]:
+        templates_tree.heading(key, text=title)
+        templates_tree.column(key, width=width, anchor=anchor)
 
     regular_container = ttk.Frame(frame)
-    regular_container.columnconfigure(1, weight=1)
-    regular_container.rowconfigure(0, weight=1)
-    ttk.Label(regular_container, text="Regular Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="nw", padx=(0, 8))
+    regular_container.columnconfigure(0, weight=1)
+    regular_container.rowconfigure(2, weight=1)
+    ttk.Label(regular_container, text="Regular Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="nw")
+    regular_search_row = ttk.Frame(regular_container)
+    regular_search_row.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+    regular_search_row.columnconfigure(1, weight=1)
+    ttk.Label(regular_search_row, text="Search:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+    regular_search_var = tk.StringVar(value="")
+    ttk.Entry(regular_search_row, textvariable=regular_search_var).grid(row=0, column=1, sticky="ew")
     regular_frame = ttk.Frame(regular_container)
-    regular_frame.grid(row=0, column=1, sticky="nsew")
+    regular_frame.grid(row=2, column=0, sticky="nsew")
     regular_frame.rowconfigure(0, weight=1)
     regular_frame.columnconfigure(0, weight=1)
     regular_columns = ("product", "press", "format", "pages", "color_pages", "plates", "saved")
@@ -3031,15 +3044,7 @@ def build_new_layout_launcher(parent):
     regular_scroll = ttk.Scrollbar(regular_frame, orient="vertical", command=regular_tree.yview)
     regular_scroll.grid(row=0, column=1, sticky="ns")
     regular_tree.configure(yscrollcommand=regular_scroll.set)
-    launcher_regular_heading_titles = {
-        "product": "Product",
-        "press": "Press",
-        "format": "Format",
-        "pages": "Pages",
-        "color_pages": "Color Pages",
-        "plates": "Plates",
-        "saved": "Last Saved",
-    }
+    launcher_regular_heading_titles = {"product": "Product", "press": "Press", "format": "Format", "pages": "Pages", "color_pages": "Color Pages", "plates": "Plates", "saved": "Last Saved"}
     for key, title, width, anchor in [("product", launcher_regular_heading_titles["product"], 260, "w"), ("press", launcher_regular_heading_titles["press"], 90, "center"), ("format", launcher_regular_heading_titles["format"], 100, "center"), ("pages", launcher_regular_heading_titles["pages"], 120, "center"), ("color_pages", launcher_regular_heading_titles["color_pages"], 95, "center"), ("plates", launcher_regular_heading_titles["plates"], 70, "center"), ("saved", launcher_regular_heading_titles["saved"], 170, "center")]:
         regular_tree.heading(key, text=title)
         regular_tree.column(key, width=width, anchor=anchor)
@@ -3079,17 +3084,14 @@ def build_new_layout_launcher(parent):
             return bool(focused) and focused.winfo_toplevel() == root
         except Exception:
             return False
+    def selected_template_path():
+        sel = templates_tree.selection()
+        return sel[0] if sel else None
     def selected_regular_path():
         sel = regular_tree.selection()
         return sel[0] if sel else None
     def current_preview_path():
-        if mode_state["regular"]:
-            return selected_regular_path()
-        try:
-            sel = templates_listbox.curselection()
-            return template_paths[sel[0]] if sel else None
-        except Exception:
-            return None
+        return selected_regular_path() if mode_state["regular"] else selected_template_path()
     def show_preview(path):
         cancel_pending_preview()
         preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
@@ -3115,85 +3117,43 @@ def build_new_layout_launcher(parent):
             _set_preview_panel(preview_label, preview_state, image)
             preview_state["path"] = _path
         preview_state["after_id"] = root.after_idle(_do_show)
-
-    def _update_section_page_states(count):
-        for idx, sp in enumerate(section_page_spinboxes):
-            if idx < count:
-                sp.state(["!disabled"])
-            else:
-                sp.state(["disabled"])
-                section_page_vars[idx].set("")
-    def apply_min_pages_to_sections(fill_only_blanks=True):
-        fmt = format_var.get()
-        minimum = min_pages_for_format(fmt)
+    def _active_section_count():
+        value = (section_count_var.get() or "All").strip()
+        if value == "All":
+            return None
         try:
-            count = int(section_count_var.get())
+            return max(1, min(4, int(value)))
         except Exception:
-            count = 1
-        count = max(1, min(4, count))
-        for i in range(4):
-            if i < count:
-                cur = section_page_vars[i].get().strip()
-                if fill_only_blanks:
-                    if cur == "" or not is_valid_page_count(cur, minimum):
-                        section_page_vars[i].set(str(minimum))
-                else:
-                    section_page_vars[i].set(str(minimum))
-            else:
-                section_page_vars[i].set("")
-    _busy = {"busy": False}
-    def _on_section_count_changed(event=None):
-        if _busy["busy"]:
-            return
-        _busy["busy"] = True
-        try:
-            try:
-                count = int(section_count_var.get())
-            except Exception:
-                count = 1
-            count = max(1, min(4, count))
-            section_count_var.set(str(count))
-            _update_section_page_states(count)
-            apply_min_pages_to_sections(fill_only_blanks=True)
-            refresh_templates()
-        finally:
-            _busy["busy"] = False
-    def refresh_templates(*_):
-        if mode_state["regular"]:
-            return
-        press = press_var.get()
-        fmt = format_var.get()
-        try:
-            count = int(section_count_var.get())
-        except Exception:
-            count = 1
-        count = max(1, min(4, count))
-        pages = []
-        for i in range(count):
-            try:
-                pages.append(max(1, int(section_page_vars[i].get().strip())))
-            except Exception:
-                pages.append(min_pages_for_format(fmt))
-        matches = list_matching_templates(press, fmt, section_count=count, section_pages=pages)
-        templates_listbox.delete(0, "end")
-        template_paths.clear()
-        for disp, path in matches:
-            templates_listbox.insert("end", disp)
-            template_paths.append(path)
-        templates_listbox.selection_clear(0, "end")
-        close_preview()
+            return None
+    def update_launcher_template_sort_headings():
+        for col in template_columns:
+            templates_tree.heading(col, text=_treeview_sort_heading_text(launcher_template_heading_titles[col], launcher_template_sort_state, col), command=lambda _c=col: sort_launcher_templates_by(_c))
+    def sort_launcher_template_rows(rows):
+        col = launcher_template_sort_state.get("col")
+        if not col:
+            return rows
+        def keyfunc(r):
+            if col == "name":
+                return ((r.get("name") or "").lower(), r.get("saved_dt") or datetime.min)
+            if col == "press":
+                return ((r.get("press") or "").lower(), (r.get("name") or "").lower())
+            if col == "format":
+                return ((r.get("format") or "").lower(), (r.get("name") or "").lower())
+            if col == "sections":
+                return (int(r.get("section_count") or 0), tuple(r.get("section_pages_sort", (0, 0, 0, 0))), (r.get("name") or "").lower())
+            if col == "pages":
+                return (tuple(r.get("section_pages_sort", (0, 0, 0, 0))), int(r.get("section_count") or 0), (r.get("name") or "").lower())
+            if col == "saved":
+                return (r.get("saved_dt") or datetime.min, (r.get("name") or "").lower())
+            return ""
+        return sorted(rows, key=keyfunc, reverse=launcher_template_sort_state["desc"])
     def sort_launcher_regular_rows(rows):
         col = launcher_regular_sort_state.get("col")
         if not col:
             return rows
-
         def keyfunc(r):
             if col == "product":
-                return (
-                    (r.get("product") or "").lower(),
-                    tuple(r.get("section_pages_sort", (0, 0, 0, 0))),
-                    r.get("saved_dt") or datetime.min,
-                )
+                return ((r.get("product") or "").lower(), tuple(r.get("section_pages_sort", (0, 0, 0, 0))), r.get("saved_dt") or datetime.min)
             if col == "press":
                 return (r.get("press") or "").lower()
             if col == "format":
@@ -3207,17 +3167,17 @@ def build_new_layout_launcher(parent):
             if col == "saved":
                 return r.get("saved_dt") or datetime.min
             return ""
-
         return sorted(rows, key=keyfunc, reverse=launcher_regular_sort_state["desc"])
-
     def update_launcher_regular_sort_headings():
         for col in regular_columns:
-            regular_tree.heading(
-                col,
-                text=_treeview_sort_heading_text(launcher_regular_heading_titles[col], launcher_regular_sort_state, col),
-                command=lambda _c=col: sort_launcher_regular_by(_c),
-            )
-
+            regular_tree.heading(col, text=_treeview_sort_heading_text(launcher_regular_heading_titles[col], launcher_regular_sort_state, col), command=lambda _c=col: sort_launcher_regular_by(_c))
+    def sort_launcher_templates_by(col):
+        if launcher_template_sort_state["col"] == col:
+            launcher_template_sort_state["desc"] = not launcher_template_sort_state["desc"]
+        else:
+            launcher_template_sort_state["col"] = col
+            launcher_template_sort_state["desc"] = False
+        refresh_templates()
     def sort_launcher_regular_by(col):
         if launcher_regular_sort_state["col"] == col:
             launcher_regular_sort_state["desc"] = not launcher_regular_sort_state["desc"]
@@ -3225,12 +3185,66 @@ def build_new_layout_launcher(parent):
             launcher_regular_sort_state["col"] = col
             launcher_regular_sort_state["desc"] = False
         refresh_regulars()
-
+    def _matches_template_filters(row):
+        search_text = (template_search_var.get() or "").strip().lower()
+        press_filter = (press_var.get() or "All").strip()
+        format_filter = (format_var.get() or "All").strip()
+        active_count = _active_section_count()
+        if search_text:
+            searchable = " ".join([row.get("name", ""), row.get("press", ""), row.get("format", ""), str(row.get("section_count") or ""), row.get("pages_disp", ""), row.get("saved_disp", "")]).lower()
+            if search_text not in searchable:
+                return False
+        if press_filter != "All" and row.get("press", "") != press_filter:
+            return False
+        if format_filter != "All" and row.get("format", "") != format_filter:
+            return False
+        if active_count is not None and int(row.get("section_count") or 0) != active_count:
+            return False
+        return True
+    def _matches_regular_filters(row):
+        search_text = (regular_search_var.get() or "").strip().lower()
+        press_filter = (press_var.get() or "All").strip()
+        format_filter = (format_var.get() or "All").strip()
+        if search_text:
+            searchable = " ".join([row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), str(row.get("color_pages", "")), str(row.get("plates", "")), row.get("saved_disp", "")]).lower()
+            if search_text not in searchable:
+                return False
+        if press_filter != "All" and row.get("press", "") != press_filter:
+            return False
+        if format_filter != "All" and row.get("format", "") != format_filter:
+            return False
+        return True
+    def refresh_templates(*_):
+        if mode_state["regular"]:
+            return
+        selected = selected_template_path()
+        template_rows_by_iid.clear()
+        templates_tree.delete(*templates_tree.get_children())
+        cached_rows, _changed = get_cached_templates(force=False)
+        rows = []
+        for cached in cached_rows:
+            if not bool(cached.get("valid", False)):
+                continue
+            row = {"path": cached.get("path"), "name": cached.get("name") or os.path.splitext(os.path.basename(cached.get("path") or ""))[0], "press": cached.get("press") or "", "format": cached.get("format") or "", "section_count": int(cached.get("section_count") or 0), "section_pages_sort": tuple(([int(v) for v in (cached.get("section_pages") or []) if str(v).strip() != "" and int(v) > 0] + [0, 0, 0, 0])[:4]), "pages_disp": _format_section_pages_for_display({"section_pages": cached.get("section_pages") or [], "section_count": cached.get("section_count") or 0}), "saved_dt": cached.get("saved_dt"), "saved_disp": cached.get("saved_disp") or ""}
+            if _matches_template_filters(row):
+                rows.append(row)
+        rows = sort_launcher_template_rows(rows)
+        for row in rows:
+            iid = row["path"]
+            template_rows_by_iid[iid] = row
+            templates_tree.insert("", "end", iid=iid, values=(row.get("name", ""), row.get("press", ""), row.get("format", ""), row.get("section_count", ""), row.get("pages_disp", ""), row.get("saved_disp", "")))
+        update_launcher_template_sort_headings()
+        if selected and selected in template_rows_by_iid:
+            templates_tree.selection_set(selected)
+            templates_tree.focus(selected)
+        else:
+            close_preview()
     def refresh_regulars(*_):
         if not mode_state["regular"]:
             return
         selected = selected_regular_path()
-        rows = list_matching_regular_layouts(press_var.get(), format_var.get())
+        rows, _changed = get_cached_regular_rows(force=False)
+        rows = [row for row in rows if _matches_regular_filters(row)]
         rows = sort_launcher_regular_rows(rows)
         regular_tree.delete(*regular_tree.get_children())
         regular_rows.clear()
@@ -3244,16 +3258,6 @@ def build_new_layout_launcher(parent):
             regular_tree.focus(selected)
         else:
             close_preview()
-    update_launcher_regular_sort_headings()
-    def _on_format_changed(event=None):
-        fmt = format_var.get()
-        inc = min_pages_for_format(fmt)
-        max_pages = inc * 10
-        for sp in section_page_spinboxes:
-            sp.configure(from_=inc, to=max_pages, increment=inc)
-        apply_min_pages_to_sections(fill_only_blanks=False)
-        refresh_templates()
-        refresh_regulars()
     def update_mode_widgets():
         if mode_state["regular"]:
             section_frame.grid_remove()
@@ -3262,7 +3266,7 @@ def build_new_layout_launcher(parent):
             action_button.configure(text="Clone Regular")
             refresh_button.configure(text="Refresh Regulars", command=refresh_regulars)
             mode_button.configure(text="Standard Mode")
-            mode_note_var.set("Regular mode: choose press / format and clone a saved regular layout into a new layout dated tomorrow.")
+            mode_note_var.set("Regular mode: filter regular layouts, then clone the selected regular into a new layout dated tomorrow.")
         else:
             regular_container.grid_remove()
             section_frame.grid()
@@ -3270,16 +3274,54 @@ def build_new_layout_launcher(parent):
             action_button.configure(text="New / Open")
             refresh_button.configure(text="Refresh Templates", command=refresh_templates)
             mode_button.configure(text="From Regular")
-            mode_note_var.set("Guided mode: choose press / format / sections and optionally start from a template.")
+            mode_note_var.set("Guided mode: filter templates, then pick one or create a blank layout from a specific press / format / section setup.")
         close_preview()
         refresh_regulars()
         refresh_templates()
     def toggle_mode():
         mode_state["regular"] = not mode_state["regular"]
         update_mode_widgets()
+    def _create_blank_or_template_layout():
+        template_path = selected_template_path()
+        if template_path:
+            data = safe_read_json(template_path)
+            if not isinstance(data, dict):
+                messagebox.showerror("Open Failed", f"Could not read: {template_path}")
+                return
+            press = data.get("press")
+            fmt = data.get("format")
+            base_cfg = CONFIG_MAP.get((press, fmt))
+            if not base_cfg:
+                messagebox.showerror("Open Failed", f"No config found for {press} - {fmt}")
+                return
+            cfg = dict(base_cfg)
+            cfg["section_count"] = data.get("section_count", 1)
+            cfg["section_pages"] = data.get("section_pages", [0])
+            cfg["template_mode"] = False
+            close_preview()
+            win = tk.Toplevel(parent)
+            build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=template_path, load_as_copy=True)
+            root.destroy()
+            return
+        press = (press_var.get() or "All").strip()
+        fmt = (format_var.get() or "All").strip()
+        count = _active_section_count()
+        if press == "All" or fmt == "All" or count is None:
+            messagebox.showinfo("Select a Template or Layout Setup", "Select a template from the list, or choose a specific Press, Format, and Sections setup to create a blank layout.")
+            return
+        base_cfg = CONFIG_MAP.get((press, fmt))
+        if not base_cfg:
+            messagebox.showwarning("Not Configured", f"{press} - {fmt} is not configured yet.")
+            return
+        cfg = dict(base_cfg)
+        cfg["section_count"] = count
+        cfg["section_pages"] = [0] * count
+        cfg["template_mode"] = False
+        close_preview()
+        win = tk.Toplevel(parent)
+        build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=None, load_as_copy=True)
+        root.destroy()
     def on_new_or_open():
-        press = press_var.get()
-        fmt = format_var.get()
         if mode_state["regular"]:
             path = selected_regular_path()
             if not path:
@@ -3289,44 +3331,21 @@ def build_new_layout_launcher(parent):
             open_json_in_layout(parent, path, template_mode=False, load_as_copy=True, copy_issue_date_tomorrow=True)
             root.destroy()
             return
-        base_cfg = CONFIG_MAP.get((press, fmt))
-        if not base_cfg:
-            messagebox.showwarning("Not Configured", f"{press} - {fmt} is not configured yet.")
-            return
-        try:
-            count = int(section_count_var.get())
-        except Exception:
-            count = 1
-        count = max(1, min(4, count))
-        pages = []
-        for i in range(count):
-            try:
-                pages.append(max(1, int(section_page_vars[i].get().strip())))
-            except Exception:
-                pages.append(min_pages_for_format(fmt))
-        cfg = dict(base_cfg)
-        cfg["section_count"] = count
-        cfg["section_pages"] = pages
-        cfg["template_mode"] = False
-        sel = templates_listbox.curselection()
-        load_path = template_paths[sel[0]] if sel else None
-        close_preview()
-        win = tk.Toplevel(parent)
-        build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=load_path, load_as_copy=True)
-        root.destroy()
-    section_count_var.trace_add("write", lambda *_: _on_section_count_changed())
-    format_combo.bind("<<ComboboxSelected>>", _on_format_changed)
-    press_combo.bind("<<ComboboxSelected>>", lambda e: (refresh_templates(), refresh_regulars()))
-    for var in section_page_vars:
-        var.trace_add("write", lambda *_: refresh_templates())
-    templates_listbox.bind("<<ListboxSelect>>", lambda e: show_preview(current_preview_path()))
-    templates_listbox.bind("<Double-Button-1>", lambda e: on_new_or_open())
+        _create_blank_or_template_layout()
+
+    template_search_var.trace_add("write", lambda *_: refresh_templates())
+    regular_search_var.trace_add("write", lambda *_: refresh_regulars())
+    press_var.trace_add("write", lambda *_: (refresh_templates(), refresh_regulars()))
+    format_var.trace_add("write", lambda *_: (refresh_templates(), refresh_regulars()))
+    section_count_var.trace_add("write", lambda *_: refresh_templates())
+    templates_tree.bind("<<TreeviewSelect>>", lambda e: show_preview(current_preview_path()))
+    templates_tree.bind("<Double-Button-1>", lambda e: on_new_or_open())
     regular_tree.bind("<<TreeviewSelect>>", lambda e: show_preview(current_preview_path()))
     regular_tree.bind("<Double-Button-1>", lambda e: on_new_or_open())
     action_button.configure(command=on_new_or_open)
     mode_button.configure(command=toggle_mode)
-    _update_section_page_states(int(section_count_var.get()))
-    _on_format_changed()
+    update_launcher_template_sort_headings()
+    update_launcher_regular_sort_headings()
     template_cache_watcher = _bind_cache_watcher(root, get_cached_templates, lambda: refresh_templates())
     regular_cache_watcher = _bind_cache_watcher(root, get_cached_regular_rows, lambda: refresh_regulars())
     update_mode_widgets()
@@ -3895,6 +3914,244 @@ def build_regular_editor_launcher(parent):
     root.protocol("WM_DELETE_WINDOW", lambda: (_cancel_cache_watcher(root, regular_cache_watcher), close_preview(), root.destroy()))
     return root
 
+
+CHANGELOG_PATH = os.path.join(MAIN_DIR, "changelog.json")
+DEFAULT_CHANGELOG_DATA = {
+    "current_version": "1.0.1",
+    "versions": [
+        {
+            "version": "1.0.1",
+            "released": "2026-06-12",
+            "summary": "Adds launcher version loading from changelog.json and a clickable changelog history view.",
+            "changes": [
+                {
+                    "category": "Added",
+                    "items": [
+                        "The main launcher now pulls its version number from changelog.json.",
+                        "Clicking the version label opens the changelog history dialog."
+                    ]
+                },
+                {
+                    "category": "Changed",
+                    "items": [
+                        "Updated changelog storage to keep multiple versions in one file.",
+                        "Added a compact changelog view with collapsible version sections."
+                    ]
+                }
+            ]
+        },
+        {
+            "version": "1.0.0",
+            "released": "2026-06-11",
+            "summary": "Initial release of the Press Layout launcher.",
+            "changes": [
+                {
+                    "category": "Added",
+                    "items": [
+                        "Initial consolidated launcher UI for Press Layouts.",
+                        "Layout browsing, filtering, and preview support."
+                    ]
+                }
+            ]
+        }
+    ]
+}
+
+CHANGELOG_CATEGORY_COLORS = {
+    "added": "#2e7d32",
+    "changed": "#1565c0",
+    "fixed": "#ef6c00",
+    "removed": "#c62828",
+    "improved": "#6a1b9a",
+    "changes": "#444444",
+}
+
+def load_changelog_data():
+    data = safe_read_json(CHANGELOG_PATH)
+    if isinstance(data, dict):
+        return data
+    return json.loads(json.dumps(DEFAULT_CHANGELOG_DATA))
+
+def get_changelog_versions(changelog_data=None):
+    data = changelog_data if isinstance(changelog_data, dict) else load_changelog_data()
+    versions = data.get("versions") if isinstance(data, dict) else None
+    if isinstance(versions, list):
+        cleaned = [entry for entry in versions if isinstance(entry, dict)]
+        if cleaned:
+            return cleaned
+    if isinstance(data, dict):
+        return [{
+            "version": data.get("version", DEFAULT_CHANGELOG_DATA["versions"][0]["version"]),
+            "released": data.get("released", ""),
+            "summary": data.get("summary", ""),
+            "changes": data.get("changes", data.get("entries", [])),
+        }]
+    return json.loads(json.dumps(DEFAULT_CHANGELOG_DATA["versions"]))
+
+def get_current_changelog_entry(changelog_data=None):
+    data = changelog_data if isinstance(changelog_data, dict) else load_changelog_data()
+    versions = get_changelog_versions(data)
+    if not versions:
+        return {"version": DEFAULT_CHANGELOG_DATA["versions"][0]["version"]}
+    current_version = str(data.get("current_version") or "").strip() if isinstance(data, dict) else ""
+    current_compare = current_version[1:] if current_version.lower().startswith("v") else current_version
+    if current_compare:
+        for entry in versions:
+            version_value = str(entry.get("version") or "").strip()
+            version_compare = version_value[1:] if version_value.lower().startswith("v") else version_value
+            if version_compare == current_compare:
+                return entry
+    return versions[0]
+
+def get_version_label(changelog_data=None):
+    entry = get_current_changelog_entry(changelog_data)
+    version = str(entry.get("version") or DEFAULT_CHANGELOG_DATA["versions"][0]["version"]).strip()
+    if not version:
+        version = DEFAULT_CHANGELOG_DATA["versions"][0]["version"]
+    if not version.lower().startswith("v"):
+        version = f"v{version}"
+    return version
+
+def _normalize_change_sections(entry):
+    sections = entry.get("changes") if isinstance(entry, dict) else None
+    if not isinstance(sections, list) or not sections:
+        sections = entry.get("entries") if isinstance(entry, dict) else None
+    if not isinstance(sections, list):
+        return []
+    normalized = []
+    for section in sections:
+        if isinstance(section, dict):
+            title = str(section.get("category") or section.get("title") or "Changes").strip() or "Changes"
+            items = section.get("items") if isinstance(section.get("items"), list) else None
+            if items is None:
+                details = str(section.get("details") or "").strip()
+                items = [details] if details else []
+            normalized.append({"title": title, "items": [str(item).strip() for item in items if str(item).strip()]})
+        else:
+            item_text = str(section).strip()
+            if item_text:
+                normalized.append({"title": "Changes", "items": [item_text]})
+    return normalized
+
+def _category_tag_name(title):
+    slug = re.sub(r"[^a-z0-9]+", "_", str(title or "").lower()).strip("_")
+    return f"category_{slug or "changes"}"
+
+def _item_tag_name(title):
+    slug = re.sub(r"[^a-z0-9]+", "_", str(title or "").lower()).strip("_")
+    return f"item_{slug or "changes"}"
+
+def _category_color(title):
+    key = re.sub(r"[^a-z0-9]+", "", str(title or "").lower())
+    return CHANGELOG_CATEGORY_COLORS.get(key, "#444444")
+
+def _configure_changelog_tree_tags(tree):
+    tree.tag_configure("version", font=(None, 10, "bold"))
+    tree.tag_configure("summary", foreground="#333333")
+    tree.tag_configure("item", foreground="#222222")
+    for category_name in ["Added", "Changed", "Fixed", "Removed", "Improved", "Changes"]:
+        color = _category_color(category_name)
+        tree.tag_configure(_category_tag_name(category_name), foreground=color, font=(None, 10, "bold"))
+        tree.tag_configure(_item_tag_name(category_name), foreground=color)
+
+def populate_changelog_tree(tree, changelog_data=None):
+    data = changelog_data if isinstance(changelog_data, dict) else load_changelog_data()
+    versions = get_changelog_versions(data)
+    tree.delete(*tree.get_children())
+    _configure_changelog_tree_tags(tree)
+    if not versions:
+        tree.insert("", "end", text="No changelog entries found.", tags=("summary",))
+        return
+    for index, entry in enumerate(versions):
+        version_label = str(entry.get("version") or "").strip() or "0.0.0"
+        if not version_label.lower().startswith("v"):
+            version_label = f"v{version_label}"
+        released = str(entry.get("released") or "").strip()
+        summary = str(entry.get("summary") or "").strip()
+        version_text = f"Press Layouts {version_label}"
+        if released:
+            version_text += f"  •  {released}"
+        version_id = tree.insert("", "end", text=version_text, open=(index == 0), tags=("version",))
+        if summary:
+            tree.insert(version_id, "end", text=summary, tags=("summary",))
+        for section in _normalize_change_sections(entry):
+            title = section.get("title") or "Changes"
+            items = section.get("items") or []
+            category_tag = _category_tag_name(title)
+            item_tag = _item_tag_name(title)
+            color = _category_color(title)
+            tree.tag_configure(category_tag, foreground=color, font=(None, 10, "bold"))
+            tree.tag_configure(item_tag, foreground=color)
+            category_id = tree.insert(version_id, "end", text=title, open=True, tags=(category_tag,))
+            for item in items:
+                tree.insert(category_id, "end", text=item, tags=("item", item_tag))
+
+def show_changelog_dialog(parent):
+    existing = getattr(parent, "_changelog_dialog", None)
+    try:
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return existing
+    except Exception:
+        pass
+    changelog_data = load_changelog_data()
+    dialog = tk.Toplevel(parent)
+    parent._changelog_dialog = dialog
+    dialog.title(f"Changelog - {get_version_label(changelog_data)}")
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.geometry("760x560")
+    dialog.minsize(620, 420)
+    remember_window_geometry(dialog, "changelog_dialog", default_geometry="760x560", minsize=(620, 420))
+    _bind_window_size_memory(dialog, "changelog_dialog")
+    outer = ttk.Frame(dialog, padding=12)
+    outer.pack(fill="both", expand=True)
+    outer.columnconfigure(0, weight=1)
+    outer.rowconfigure(1, weight=1)
+    header = ttk.Frame(outer)
+    header.grid(row=0, column=0, sticky="ew")
+    header.columnconfigure(0, weight=1)
+    ttk.Label(header, text=f"Press Layouts {get_version_label(changelog_data)}", font=(None, 12, "bold")).grid(row=0, column=0, sticky="w")
+    ttk.Label(header, text="Expand or collapse each version to scan the history quickly.", foreground="#555555").grid(row=1, column=0, sticky="w", pady=(4, 0))
+    tree_frame = ttk.Frame(outer)
+    tree_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 10))
+    tree_frame.columnconfigure(0, weight=1)
+    tree_frame.rowconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse")
+    tree.grid(row=0, column=0, sticky="nsew")
+    vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+    vsb.grid(row=0, column=1, sticky="ns")
+    hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+    hsb.grid(row=1, column=0, sticky="ew")
+    tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+    populate_changelog_tree(tree, changelog_data)
+    button_row = ttk.Frame(outer)
+    button_row.grid(row=2, column=0, sticky="e")
+    ttk.Button(button_row, text="Expand All", command=lambda: [tree.item(item, open=True) for item in tree.get_children()]).pack(side="left", padx=(0, 8))
+    ttk.Button(button_row, text="Collapse All", command=lambda: [tree.item(item, open=False) for item in tree.get_children()]).pack(side="left", padx=(0, 8))
+    def _cleanup_dialog():
+        try:
+            if getattr(parent, "_changelog_dialog", None) is dialog:
+                parent._changelog_dialog = None
+        except Exception:
+            pass
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+    ttk.Button(button_row, text="Close", command=_cleanup_dialog, width=10).pack(side="right")
+    dialog.bind("<Escape>", lambda _event: _cleanup_dialog())
+    dialog.protocol("WM_DELETE_WINDOW", _cleanup_dialog)
+    try:
+        dialog.focus_set()
+    except Exception:
+        pass
+    return dialog
+
 def build_main_launcher():  
     ensure_dir(LAYOUTS_DIR)  
     ensure_dir(TEMPLATE_DIR)  
@@ -3905,6 +4162,7 @@ def build_main_launcher():
     root.minsize(980, 680)  
     remember_window_geometry(root, "main_launcher", default_geometry="1100x760", minsize=(980, 680))
     _bind_window_size_memory(root, "main_launcher")  
+    ttk.Style(root).configure("LauncherVersion.TLabel", foreground="#1a73e8")
     paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
     paned.pack(fill="both", expand=True)
     frame = ttk.Frame(paned, padding=16)
@@ -3912,6 +4170,12 @@ def build_main_launcher():
     frame.rowconfigure(2, weight=1)
     frame.columnconfigure(0, weight=1)
     ttk.Label(frame, text="Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    changelog_data = load_changelog_data()
+    version_label_var = tk.StringVar(value=get_version_label(changelog_data))
+    version_label = ttk.Label(frame, textvariable=version_label_var, style="LauncherVersion.TLabel", font=(None, 10))
+    version_label.grid(row=0, column=0, sticky="e")
+    version_label.configure(cursor="hand2")
+    version_label.bind("<Button-1>", lambda _event: show_changelog_dialog(root))
     filter_frame = ttk.Frame(frame)
     filter_frame.grid(row=1, column=0, sticky="ew", pady=(8, 8))
     filter_frame.columnconfigure(5, weight=1)
