@@ -156,8 +156,71 @@ def ask_issue_date_with_calendar(parent, initial_text="", anchor_widget=None, ti
     return result.get("value")
 
 
-def build_press_layout(win, title="Press Layout", config=None, load_path=None, load_as_copy=False):
+def build_press_layout(win, title="Press Layout", config=None, load_path=None, load_as_copy=False, initial_data=None):
     config = config or {}
+
+    def _unit_has_any_pages(unit_data):
+        for row in unit_data.get("grid", []) or []:
+            for cell in row:
+                if str(cell or "").strip():
+                    return True
+        return False
+
+    def _blank_grid(rows, cols):
+        return [["" for _ in range(cols)] for _ in range(rows)]
+
+    def _converted_press_data(data, old_press, new_press):
+        data = json.loads(json.dumps(data or {}))
+        if old_press == new_press:
+            data["press"] = new_press
+            return data
+        press_map = {
+            ("Press 1", "Press 2"): {
+                "E1": "E2", "D1": "D2", "C1": "C2",
+                "B1-Lower": "B2-Lower", "B1-Upper": "B2-Upper", "A1": "A2",
+                "F1": "F2", "G1-Lower": "G2-Lower", "G1-Upper": "G2-Upper",
+            },
+            ("Press 2", "Press 1"): {
+                "E2": "E1", "D2": "D1", "C2": "C1",
+                "B2-Lower": "B1-Lower", "B2-Upper": "B1-Upper", "A2": "A1",
+                "F2": "F1", "G2-Lower": "G1-Lower", "G2-Upper": "G1-Upper",
+            },
+        }.get((old_press, new_press), {})
+        target_cfg = CONFIG_MAP.get((new_press, data.get("format") or config.get("format_name") or "Broadsheet"), {})
+        target_labels = list(target_cfg.get("left_labels", [])) + list(target_cfg.get("right_labels", []))
+        rows = int(target_cfg.get("grid_rows", 2) or 2)
+        cols = int(target_cfg.get("grid_cols", 2) or 2)
+        source_units = {str(u.get("label") or ""): u for u in (data.get("units", []) or [])}
+        converted_units = []
+        for label in target_labels:
+            source_label = next((k for k, v in press_map.items() if v == label), None)
+            unit = dict(source_units.get(source_label) or {"label": label, "section": "", "grid": _blank_grid(rows, cols)})
+            unit["label"] = label
+            converted_units.append(unit)
+        color_items = []
+        for item in data.get("color_cells", []) or []:
+            new_label = press_map.get(str(item.get("unit") or ""))
+            if not new_label:
+                continue
+            new_item = dict(item)
+            new_item["unit"] = new_label
+            color_items.append(new_item)
+        data["units"] = converted_units
+        data["color_cells"] = color_items
+        data["press"] = new_press
+        return data
+
+    def _format_reset_data(data, new_format):
+        data = json.loads(json.dumps(data or {}))
+        press_name = data.get("press") or config.get("press_name") or "Press 1"
+        target_cfg = CONFIG_MAP.get((press_name, new_format), {})
+        target_labels = list(target_cfg.get("left_labels", [])) + list(target_cfg.get("right_labels", []))
+        rows = int(target_cfg.get("grid_rows", 2) or 2)
+        cols = int(target_cfg.get("grid_cols", 2) or 2)
+        data["units"] = [{"label": label, "section": "", "grid": _blank_grid(rows, cols)} for label in target_labels]
+        data["color_cells"] = []
+        data["format"] = new_format
+        return data
 
     style = ttk.Style(win)
     style.configure("Unit.TFrame", background="#f0f0f0", relief="solid", borderwidth=1)
@@ -204,7 +267,15 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         takefocus=False
     )
     imposition_entry.pack(side="left", fill="x", expand=True)
-    
+
+    editor_setup_frame = ttk.Frame(header_frame)
+    editor_setup_frame.grid(row=0, column=6, sticky="e")
+    ttk.Label(editor_setup_frame, text="Press:", font=(None, 11, "bold")).pack(side="left", padx=(0, 6))
+    press_selector_var = tk.StringVar(value=config.get("press_name", "Press 1") or "Press 1")
+    ttk.Combobox(editor_setup_frame, textvariable=press_selector_var, values=["Press 1", "Press 2"], state="readonly", width=10).pack(side="left", padx=(0, 12))
+    ttk.Label(editor_setup_frame, text="Format:", font=(None, 11, "bold")).pack(side="left", padx=(0, 6))
+    format_selector_var = tk.StringVar(value=config.get("format_name", "Broadsheet") or "Broadsheet")
+    ttk.Combobox(editor_setup_frame, textvariable=format_selector_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=12).pack(side="left")
 
     header_frame.columnconfigure(2, weight=1)
     header_frame.columnconfigure(3, weight=1)
@@ -402,25 +473,19 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             count = max(1, min(4, int(section_count_var.get())))
         except Exception:
             count = 1
-        counts = [0] * count
-        for unit_dict in units:
-            section_id = unit_section_assignments.get(unit_dict["label"])
-            if section_id is None:
-                try:
-                    section_id = _resolve_section_assignment_id((unit_dict["section_entry"].get() or "").strip())
-                except Exception:
-                    section_id = None
-            if section_id is None or not (1 <= int(section_id) <= count):
-                continue
-            page_total = 0
-            for row in unit_dict.get("entries", []):
-                for cell in row:
-                    if safe_int(cell.get()) is not None:
-                        page_total += 1
-            counts[int(section_id) - 1] += page_total
+
+        # Recompute directly from the live editor context so section name edits
+        # immediately reflect in the page-count labels and do not depend on any
+        # cached unit-to-section mapping state.
+        try:
+            counts = compute_section_page_counts_from_ctx(ctx, section_count=count)
+        except Exception:
+            counts = [0] * count
+
         for idx in range(4):
             if idx < count:
-                section_page_vars[idx].set(str(counts[idx]))
+                value = counts[idx] if idx < len(counts) else 0
+                section_page_vars[idx].set(str(value))
             else:
                 section_page_vars[idx].set("")
 
@@ -581,6 +646,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "color_pages_var": color_pages_var,
         "plates_var": plates_var,
         "grid_cols": grid_cols,
+        "press_selector_var": press_selector_var,
+        "format_selector_var": format_selector_var,
         "units": units,
         "file_path": None,
         "layout_name": None,
@@ -695,9 +762,12 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         if ok:
             _persist_starter_format_to_file()
             try:
-                ctx["dirty"] = False
+                _reset_dirty_tracking(False)
             except Exception:
-                pass
+                try:
+                    ctx["dirty"] = False
+                except Exception:
+                    pass
         return ok
 
     def do_save_as_with_starter():
@@ -705,9 +775,12 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         if ok:
             _persist_starter_format_to_file()
             try:
-                ctx["dirty"] = False
+                _reset_dirty_tracking(False)
             except Exception:
-                pass
+                try:
+                    ctx["dirty"] = False
+                except Exception:
+                    pass
         return ok
 
     def _starter_sheet_fields():
@@ -1027,6 +1100,30 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         ty = y0 + max(0, ((y1 - y0) - th) / 2)
         draw.text((tx, ty), text or "", fill=fill, font=font)
 
+    def _draw_centered_text_heavy(draw, box, text, font, fill="black", offset=1):
+        x0, y0, x1, y1 = box
+        tw, th = _measure_text(draw, text, font)
+        tx = x0 + max(0, ((x1 - x0) - tw) / 2)
+        ty = y0 + max(0, ((y1 - y0) - th) / 2)
+        for dx, dy in ((0, 0), (offset, 0), (0, offset), (offset, offset)):
+            draw.text((tx + dx, ty + dy), text or "", fill=fill, font=font)
+
+    def _wrap_text_to_width(draw, text, font, max_width):
+        words = str(text or "").split()
+        if not words:
+            return [""]
+        lines = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            if _measure_text(draw, candidate, font)[0] <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
     def _visible_print_labels():
         unit_map = {u["label"]: u for u in units}
         left_order = [lab for lab in left_labels if lab in unit_map]
@@ -1053,15 +1150,15 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             from PIL import Image, ImageDraw
         except Exception:
             raise RuntimeError("Pillow is required for printing. Please install pillow (pip install pillow).")
-        img_w, img_h = 2200, 1700
+        img_w, img_h = 2200, 1940
         img = Image.new("RGB", (img_w, img_h), "white")
         draw = ImageDraw.Draw(img)
         if grid_cols >= 8:
-            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 46, 34, 24, 24, 30, 18
+            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 50, 42, 24, 24, 30, 18
         elif grid_cols >= 4:
-            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 52, 36, 26, 24, 32, 22
+            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 56, 44, 26, 24, 32, 22
         else:
-            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 56, 38, 28, 24, 34, 26
+            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 60, 46, 28, 24, 34, 26
         title_font = _load_starter_font(title_sz, bold=True)
         header_font = _load_starter_font(header_sz, bold=True)
         issue_font = _load_starter_font(header_sz + 4, bold=True)
@@ -1071,10 +1168,14 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         unit_font = _load_starter_font(unit_sz, bold=True)
         section_font = _load_starter_font(section_sz, bold=True)
         cell_font_render = _load_starter_font(cell_sz, bold=True)
+        color_cell_font_render = _load_starter_font(cell_sz + 2, bold=True)
+        legend_font = _load_starter_font(header_sz, bold=True)
+        legend_symbol_font = _load_starter_font(header_sz, bold=True)
+        legend_list_font = _load_starter_font(header_sz, bold=True)
         margin_x = 55
         header_top = 26
         header_h = 180
-        footer_h = 74
+        footer_h = 150
         grid_top = header_top + header_h + 14
         footer_y = img_h - footer_h - 30
         raw_issue = issue_entry.get().strip()
@@ -1097,12 +1198,30 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             count = max(1, min(4, int(section_count_var.get())))
         except Exception:
             count = 1
+        section_display_lookup = {}
+        for idx in range(count):
+            try:
+                section_name = (section_name_vars[idx].get() or "").strip().upper()
+            except Exception:
+                section_name = ""
+            if not section_name:
+                section_name = chr(ord("A") + idx)
+            section_display_lookup[section_name] = idx
+        color_page_refs = []
+        seen_color_refs = set()
+        legend_circle_diameter = 54
+        show_bold_color_marks = ((ctx.get("format_name") or "").strip().lower() == "broadsheet")
         # Build section page counts as: Sections: 12 / 16 / 20
         values = []
+        total_page_count = 0
         for idx in range(count):
             value = (section_page_vars[idx].get() or "").strip()
             if value:
                 values.append(value)
+                try:
+                    total_page_count += int(value)
+                except Exception:
+                    pass
         sections_text = " / ".join(values)
         if sections_text:
             draw.text((margin_x, label_top + 118), f"Pages: {sections_text}", fill="black", font=sections_print_font)
@@ -1215,11 +1334,29 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                         value = (entries[r][c].get() or "").strip()
                     except Exception:
                         value = ""
+                    is_color_page = (lab, r, c) in ctx.get("color_cells", set())
                     if value:
-                        _draw_centered_text(draw, (cx0 + 2, cy0 + 2, cx1 - 2, cy1 - 2), value, cell_font_render)
-                    if (lab, r, c) in ctx.get("color_cells", set()):
-                        pad = max(5, int(min(cell_w, cell_h) * 0.12))
-                        draw.ellipse((cx0 + pad, cy0 + pad, cx1 - pad, cy1 - pad), outline="red", width=3)
+                        if is_color_page and show_bold_color_marks:
+                            _draw_centered_text_heavy(draw, (cx0 + 2, cy0 + 2, cx1 - 2, cy1 - 2), value, color_cell_font_render, fill="black", offset=1)
+                        else:
+                            _draw_centered_text(draw, (cx0 + 2, cy0 + 2, cx1 - 2, cy1 - 2), value, cell_font_render)
+                    if is_color_page:
+                        pad = max(5, int(min(cell_w, cell_h) * 0.11))
+                        circle_diameter = max(10, int(min(cell_w, cell_h) - (2 * pad)))
+                        legend_circle_diameter = circle_diameter
+                        circle_width = 6 if show_bold_color_marks else 3
+                        draw.ellipse((cx0 + pad, cy0 + pad, cx1 - pad, cy1 - pad), outline="red", width=circle_width)
+                        section_ref = section_text.strip().upper()
+                        page_ref = str(value or "").strip()
+                        if section_ref and page_ref:
+                            ref_text = f"{section_ref}{page_ref}"
+                            if ref_text not in seen_color_refs:
+                                seen_color_refs.add(ref_text)
+                                try:
+                                    page_num = int(page_ref)
+                                except Exception:
+                                    page_num = 10**9
+                                color_page_refs.append((section_display_lookup.get(section_ref, 999), section_ref, page_num, ref_text))
             # After cells, draw the unit label below the grid, then stacked larger swatches
             label_top = y1 + 6
             _draw_centered_text(draw, (x0, label_top, x1, label_top + unit_label_h), lab, unit_font)
@@ -1265,9 +1402,33 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             pass
         color_pages_text = (ctx.get("color_pages_var", color_pages_var).get() or "0").strip()
         plates_text = (ctx.get("plates_var", plates_var).get() or "0").strip()
-        draw.line((margin_x, footer_y - 14, img_w - margin_x, footer_y - 14), fill="#444444", width=3)
+        footer_line_y = footer_y - 14
+        draw.line((margin_x, footer_line_y, img_w - margin_x, footer_line_y), fill="#444444", width=3)
         draw.text((margin_x, footer_y), f"Color Pages: {color_pages_text}", fill="black", font=header_font)
         draw.text((margin_x + 480, footer_y), f"Plates: {plates_text}", fill="black", font=header_font)
+        draw.text((margin_x + 900, footer_y), f"Total Pages: {total_page_count}", fill="black", font=header_font)
+
+        # Large legend and color-page list above the footer line.
+        legend_circle_diameter = max(42, int(legend_circle_diameter))
+        legend_y = footer_line_y - 190
+        legend_circle_box = (
+            margin_x,
+            legend_y,
+            margin_x + legend_circle_diameter,
+            legend_y + legend_circle_diameter,
+        )
+        draw.ellipse(legend_circle_box, outline="red", width=6)
+        _draw_centered_text_heavy(draw, legend_circle_box, "#", legend_symbol_font, fill="black", offset=1)
+        draw.text((margin_x + legend_circle_diameter + 24, legend_y), "= color page", fill="black", font=legend_font)
+
+        color_page_refs_sorted = [item[3] for item in sorted(color_page_refs, key=lambda item: (item[0], item[2], item[3]))]
+        refs_text = "Color pages list: " + (", ".join(color_page_refs_sorted) if color_page_refs_sorted else "None")
+        list_y = legend_y + legend_circle_diameter + 26
+        max_text_width = max(260, img_w - (2 * margin_x))
+        wrapped_lines = _wrap_text_to_width(draw, refs_text, legend_list_font, max_text_width)
+        line_h = max(44, _measure_text(draw, "Ag", legend_list_font)[1] + 10)
+        for line_index, line_text in enumerate(wrapped_lines):
+            draw.text((margin_x, list_y + (line_index * line_h)), line_text, fill="black", font=legend_list_font)
         return img
 
     def _make_layout_preview_image(scale=0.75):
@@ -1532,6 +1693,77 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     product_entry.bind("<KeyRelease>", lambda e: update_imposition())
     product_entry.bind("<FocusOut>", lambda e: update_imposition())
 
+    selector_busy = {"press": False, "format": False}
+
+    def _collect_live_layout_state():
+        state = collect_layout_data(ctx)
+        state["starter_format"] = (starter_format_var.get() or "Standard").strip() or "Standard"
+        state["_file_path"] = ctx.get("file_path")
+        state["_layout_name"] = ctx.get("layout_name")
+        return state
+
+    def _reopen_layout(new_press, new_format, data):
+        next_cfg = dict(CONFIG_MAP[(new_press, new_format)])
+        next_cfg["section_count"] = max(1, min(4, int(data.get("section_count", 1) or 1)))
+        next_cfg["section_pages"] = list(data.get("section_pages") or [0] * next_cfg["section_count"])
+        next_cfg["section_names"] = list(data.get("section_names") or [])
+        next_cfg["template_mode"] = template_mode
+        next_cfg["default_dir"] = ctx.get("default_dir", TEMPLATE_DIR if template_mode else LAYOUTS_DIR)
+        next_cfg["prompt_save_template"] = bool(ctx.get("prompt_save_template", not template_mode))
+        for child in list(win.winfo_children()):
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        build_press_layout(win, title=f"{new_press} - {new_format}", config=next_cfg, initial_data=data)
+
+    def _on_press_selector_changed(*_):
+        if selector_busy["press"]:
+            return
+        old_press = ctx.get("press_name") or config.get("press_name") or "Press 1"
+        new_press = (press_selector_var.get() or "").strip() or old_press
+        if new_press == old_press:
+            return
+        data = _collect_live_layout_state()
+        if old_press == "Press 1" and new_press == "Press 2":
+            blocked = []
+            for label in ["E2", "D2", "C2"]:
+                unit = next((u for u in data.get("units", []) if str(u.get("label") or "") == label), None)
+                if unit and _unit_has_any_pages(unit):
+                    blocked.append(label)
+            if blocked:
+                msg = "Pages assigned to {} units can't be converted to Press 2 and would be removed if converting the press.\n\nClick OK to continue or Cancel to keep the current press.".format(', '.join(blocked))
+                if not messagebox.askokcancel("Convert Press", msg, parent=win):
+                    selector_busy["press"] = True
+                    press_selector_var.set(old_press)
+                    selector_busy["press"] = False
+                    return
+        converted = _converted_press_data(data, old_press, new_press)
+        converted["format"] = data.get("format") or config.get("format_name") or "Broadsheet"
+        _reopen_layout(new_press, converted["format"], converted)
+
+    def _on_format_selector_changed(*_):
+        if selector_busy["format"]:
+            return
+        old_format = ctx.get("format_name") or config.get("format_name") or "Broadsheet"
+        new_format = (format_selector_var.get() or "").strip() or old_format
+        if new_format == old_format:
+            return
+        data = _collect_live_layout_state()
+        if any(_unit_has_any_pages(unit) for unit in data.get("units", [])):
+            msg = "Changing the format will reset all units back to no section and pages.\n\nClick OK to continue or Cancel to keep the current format."
+            if not messagebox.askokcancel("Change Format", msg, parent=win):
+                selector_busy["format"] = True
+                format_selector_var.set(old_format)
+                selector_busy["format"] = False
+                return
+        data["press"] = ctx.get("press_name") or config.get("press_name") or "Press 1"
+        converted = _format_reset_data(data, new_format)
+        _reopen_layout(converted["press"], new_format, converted)
+
+    press_selector_var.trace_add("write", _on_press_selector_changed)
+    format_selector_var.trace_add("write", _on_format_selector_changed)
+
     # ---- Section count handler w/ recursion guard ----
     _busy = {"busy": False}
     def _on_section_count_changed(event=None):
@@ -1734,7 +1966,21 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         color_toggle.configure(command=refresh_color_overlays)
 
     # ---- Load file (open vs copy) ----
-    if load_path:
+    if initial_data is not None:
+        data = json.loads(json.dumps(initial_data))
+        populate_layout_from_data(ctx, data)
+        _capture_unit_section_assignments()
+        _refresh_unit_section_choices()
+        _refresh_section_page_counts()
+        if not template_mode:
+            starter_format_var.set(data.get("starter_format") or "Standard")
+        ctx["file_path"] = data.get("_file_path")
+        ctx["layout_name"] = data.get("_layout_name")
+        if ctx.get("file_path"):
+            win.title(f"{title_base}  —  {os.path.basename(ctx['file_path'])}")
+        else:
+            win.title(title_base)
+    elif load_path:
         data = safe_read_json(load_path)
         if data:
             populate_layout_from_data(ctx, data)
@@ -1805,20 +2051,63 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     refresh_color_overlays()
 
     # --- change tracking (dirty flag) ---------------------------------
-    ctx["dirty"] = False
+    _dirty_state = {
+        "baseline": None,
+        "pause_depth": 0,
+    }
+
+    def _build_dirty_snapshot():
+        data = collect_layout_data(ctx)
+        return {
+            "press": data.get("press", ""),
+            "format": data.get("format", ""),
+            "issue_date": data.get("issue_date", ""),
+            "product": data.get("product", ""),
+            "section_count": data.get("section_count", 1),
+            "section_pages": list(data.get("section_pages", []) or []),
+            "section_names": list(data.get("section_names", []) or []),
+            "units": list(data.get("units", []) or []),
+            "color_cells": list(data.get("color_cells", []) or []),
+            "starter_format": (starter_format_var.get() or "Standard").strip() or "Standard",
+        }
+
+    def _sync_dirty_state():
+        try:
+            if _dirty_state["pause_depth"] > 0:
+                return
+            baseline = _dirty_state.get("baseline")
+            if baseline is None:
+                ctx["dirty"] = False
+                return
+            ctx["dirty"] = (_build_dirty_snapshot() != baseline)
+        except Exception:
+            pass
+
+    def _reset_dirty_tracking(mark_dirty=False):
+        try:
+            _dirty_state["baseline"] = _build_dirty_snapshot()
+            ctx["dirty"] = bool(mark_dirty)
+            if mark_dirty:
+                try:
+                    baseline = json.loads(json.dumps(_dirty_state["baseline"]))
+                    baseline["_seed"] = "baseline"
+                    _dirty_state["baseline"] = baseline
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                ctx["dirty"] = bool(mark_dirty)
+            except Exception:
+                pass
 
     def _mark_dirty_event(event=None):
-        try:
-            ctx["dirty"] = True
-        except Exception:
-            pass
+        _sync_dirty_state()
 
     def _mark_dirty_var(*_):
-        try:
-            ctx["dirty"] = True
-        except Exception:
-            pass
+        _sync_dirty_state()
 
+
+    _reset_dirty_tracking(bool(initial_data is not None))
 
     # ---- tab order + arrows ----
     focus_list = build_focus_order(
@@ -1896,6 +2185,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     # Prompt to save on close if dirty
     def _on_close_request():
         try:
+            _sync_dirty_state()
+        except Exception:
+            pass
+        try:
             dirty = bool(ctx.get("dirty"))
         except Exception:
             dirty = False
@@ -1912,8 +2205,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         if res is True:
             ok = do_save_with_starter()
             if ok:
-                return
-            # if save failed or cancelled, do not close
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
             return
         # res is False -> discard and close
         try:
@@ -2080,9 +2375,12 @@ def _render_preview_panel_image(preview_label, preview_state):
     preview_state["photo"] = photo
 
 
-def _apply_saved_preview_pane_height(win, state_key, paned, preview_box, default_height=240, min_height=160):
-    def _apply():
+def _apply_saved_preview_pane_height(win, state_key, paned, preview_box, default_height=240, min_height=160, bind_state=None):
+    bind_state = bind_state if isinstance(bind_state, dict) else {}
+
+    def _apply(attempt=0):
         try:
+            bind_state["applying"] = True
             win.update_idletasks()
             total_h = max(1, int(paned.winfo_height()))
             data = _load_window_size_state().get(state_key, {})
@@ -2092,23 +2390,53 @@ def _apply_saved_preview_pane_height(win, state_key, paned, preview_box, default
             paned.sash_place(0, 0, sash_y)
         except Exception:
             pass
+        finally:
+            try:
+                bind_state["last_requested_height"] = target
+            except Exception:
+                pass
+            try:
+                bind_state["applying"] = False
+            except Exception:
+                pass
+        try:
+            if attempt < 5:
+                # Re-apply a few times while the window settles so the saved split wins
+                # over early geometry/configure events during startup.
+                win.after(120, lambda: _apply(attempt + 1))
+            else:
+                bind_state["armed"] = True
+        except Exception:
+            bind_state["armed"] = True
+
     try:
-        win.after_idle(_apply)
+        bind_state["armed"] = False
+        win.after(80, lambda: _apply(0))
     except Exception:
-        _apply()
+        _apply(5)
 
 
 def _bind_preview_pane_memory(win, state_key, paned, preview_box, default_height=240):
-    _apply_saved_preview_pane_height(win, state_key, paned, preview_box, default_height=default_height)
-    pending = {"id": None}
+    state = {"pending": None, "armed": False, "applying": False, "last_saved_height": None, "last_requested_height": None}
+    _apply_saved_preview_pane_height(win, state_key, paned, preview_box, default_height=default_height, bind_state=state)
 
-    def _persist_preview_height():
-        pending["id"] = None
+    def _persist_preview_height(force=False):
+        state["pending"] = None
         try:
+            if (state.get("applying") or not state.get("armed")) and not force:
+                return
+            win.update_idletasks()
             height = int(preview_box.winfo_height())
+            total_h = int(paned.winfo_height())
         except Exception:
             return
-        if height <= 1:
+        if height <= 1 or total_h <= 1:
+            return
+        max_allowed = max(default_height, total_h - 120)
+        min_allowed = min(160, max_allowed)
+        if height < min_allowed or height > max_allowed:
+            return
+        if (not force) and state.get("last_saved_height") == height:
             return
         data = _load_window_size_state()
         entry = data.get(state_key)
@@ -2117,23 +2445,53 @@ def _bind_preview_pane_memory(win, state_key, paned, preview_box, default_height
             data[state_key] = entry
         entry["preview_height"] = height
         _save_window_size_state(data)
+        state["last_saved_height"] = height
 
-    def _schedule(event=None):
+    def _schedule(event=None, delay=220):
         try:
-            if pending["id"] is not None:
-                win.after_cancel(pending["id"])
+            if state.get("applying") or not state.get("armed"):
+                return
+            if state["pending"] is not None:
+                win.after_cancel(state["pending"])
         except Exception:
             pass
         try:
-            pending["id"] = win.after(150, _persist_preview_height)
+            state["pending"] = win.after(delay, _persist_preview_height)
+        except Exception:
+            pass
+
+    def _persist_on_close(event=None):
+        try:
+            _persist_preview_height(force=True)
         except Exception:
             pass
 
     try:
-        preview_box.bind("<Configure>", _schedule, add="+")
-        paned.bind("<ButtonRelease-1>", _schedule, add="+")
+        callbacks = getattr(win, "_preview_pane_persist_callbacks", None)
+        if not isinstance(callbacks, list):
+            callbacks = []
+            setattr(win, "_preview_pane_persist_callbacks", callbacks)
+        callbacks.append(_persist_on_close)
     except Exception:
         pass
+
+    try:
+        preview_box.bind("<Configure>", lambda event: _schedule(event, delay=300), add="+")
+        paned.bind("<ButtonRelease-1>", lambda event: _schedule(event, delay=120), add="+")
+        win.bind("<Unmap>", _persist_on_close, add="+")
+        win.bind("<Destroy>", _persist_on_close, add="+")
+    except Exception:
+        pass
+    return _persist_on_close
+
+
+def _persist_bound_preview_panes(win):
+    callbacks = getattr(win, "_preview_pane_persist_callbacks", [])
+    for callback in list(callbacks):
+        try:
+            callback()
+        except Exception:
+            pass
 
 
 _TEMPLATE_CACHE = {"signature": None, "rows": []}
@@ -3306,9 +3664,12 @@ def build_new_layout_launcher(parent):
         press = (press_var.get() or "All").strip()
         fmt = (format_var.get() or "All").strip()
         count = _active_section_count()
-        if press == "All" or fmt == "All" or count is None:
-            messagebox.showinfo("Select a Template or Layout Setup", "Select a template from the list, or choose a specific Press, Format, and Sections setup to create a blank layout.")
-            return
+        if press == "All":
+            press = "Press 1"
+        if fmt == "All":
+            fmt = "Broadsheet"
+        if count is None:
+            count = 1
         base_cfg = CONFIG_MAP.get((press, fmt))
         if not base_cfg:
             messagebox.showwarning("Not Configured", f"{press} - {fmt} is not configured yet.")
@@ -3351,7 +3712,7 @@ def build_new_layout_launcher(parent):
     update_mode_widgets()
     root.bind("<FocusIn>", lambda e: show_preview(current_preview_path()), add="+")
     root.bind("<FocusOut>", lambda e: close_preview(), add="+")
-    root.protocol("WM_DELETE_WINDOW", lambda: (_cancel_cache_watcher(root, template_cache_watcher), _cancel_cache_watcher(root, regular_cache_watcher), close_preview(), root.destroy()))
+    root.protocol("WM_DELETE_WINDOW", lambda: (_persist_bound_preview_panes(root), _cancel_cache_watcher(root, template_cache_watcher), _cancel_cache_watcher(root, regular_cache_watcher), close_preview(), root.destroy()))
     return root
 def build_template_editor_launcher(parent):
     root = tk.Toplevel(parent)
@@ -3632,7 +3993,7 @@ def build_template_editor_launcher(parent):
     template_cache_watcher = _bind_cache_watcher(root, get_cached_templates, lambda: refresh())
     root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
     root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
-    root.protocol("WM_DELETE_WINDOW", lambda: (_cancel_cache_watcher(root, template_cache_watcher), close_preview(), root.destroy()))
+    root.protocol("WM_DELETE_WINDOW", lambda: (_persist_bound_preview_panes(root), _cancel_cache_watcher(root, template_cache_watcher), close_preview(), root.destroy()))
     return root
 
 def _layout_color_and_plate_counts_from_data(data):
@@ -3911,7 +4272,7 @@ def build_regular_editor_launcher(parent):
     _bind_preview_pane_memory(root, "regular_editor_launcher", paned, preview_box, default_height=240)
     refresh()
     regular_cache_watcher = _bind_cache_watcher(root, get_cached_regular_rows, lambda: refresh())
-    root.protocol("WM_DELETE_WINDOW", lambda: (_cancel_cache_watcher(root, regular_cache_watcher), close_preview(), root.destroy()))
+    root.protocol("WM_DELETE_WINDOW", lambda: (_persist_bound_preview_panes(root), _cancel_cache_watcher(root, regular_cache_watcher), close_preview(), root.destroy()))
     return root
 
 
@@ -4096,6 +4457,7 @@ def show_changelog_dialog(parent):
             return existing
     except Exception:
         pass
+
     changelog_data = load_changelog_data()
     dialog = tk.Toplevel(parent)
     parent._changelog_dialog = dialog
@@ -4108,31 +4470,173 @@ def show_changelog_dialog(parent):
     dialog.minsize(620, 420)
     remember_window_geometry(dialog, "changelog_dialog", default_geometry="760x560", minsize=(620, 420))
     _bind_window_size_memory(dialog, "changelog_dialog")
+
     outer = ttk.Frame(dialog, padding=12)
     outer.pack(fill="both", expand=True)
     outer.columnconfigure(0, weight=1)
     outer.rowconfigure(1, weight=1)
+
     header = ttk.Frame(outer)
     header.grid(row=0, column=0, sticky="ew")
     header.columnconfigure(0, weight=1)
     ttk.Label(header, text=f"Press Layouts {get_version_label(changelog_data)}", font=(None, 12, "bold")).grid(row=0, column=0, sticky="w")
     ttk.Label(header, text="Expand or collapse each version to scan the history quickly.", foreground="#555555").grid(row=1, column=0, sticky="w", pady=(4, 0))
-    tree_frame = ttk.Frame(outer)
-    tree_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 10))
-    tree_frame.columnconfigure(0, weight=1)
-    tree_frame.rowconfigure(0, weight=1)
-    tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse")
-    tree.grid(row=0, column=0, sticky="nsew")
-    vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+
+    body_frame = ttk.Frame(outer)
+    body_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 10))
+    body_frame.columnconfigure(0, weight=1)
+    body_frame.rowconfigure(0, weight=1)
+
+    canvas = tk.Canvas(body_frame, highlightthickness=0, borderwidth=0)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    vsb = ttk.Scrollbar(body_frame, orient="vertical", command=canvas.yview)
     vsb.grid(row=0, column=1, sticky="ns")
-    hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
-    hsb.grid(row=1, column=0, sticky="ew")
-    tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-    populate_changelog_tree(tree, changelog_data)
-    button_row = ttk.Frame(outer)
-    button_row.grid(row=2, column=0, sticky="e")
-    ttk.Button(button_row, text="Expand All", command=lambda: [tree.item(item, open=True) for item in tree.get_children()]).pack(side="left", padx=(0, 8))
-    ttk.Button(button_row, text="Collapse All", command=lambda: [tree.item(item, open=False) for item in tree.get_children()]).pack(side="left", padx=(0, 8))
+    canvas.configure(yscrollcommand=vsb.set)
+
+    content = ttk.Frame(canvas)
+    content.columnconfigure(0, weight=1)
+    canvas_window = canvas.create_window((0, 0), window=content, anchor="nw")
+
+    version_widgets = {}
+    versions = get_changelog_versions(changelog_data)
+
+    def _version_key(entry, index):
+        version_label = str(entry.get("version") or "").strip() or "0.0.0"
+        if not version_label.lower().startswith("v"):
+            version_label = f"v{version_label}"
+        released = str(entry.get("released") or "").strip()
+        return f"{version_label}|{released}|{index}"
+
+    version_states = {
+        _version_key(entry, index): (index == 0)
+        for index, entry in enumerate(versions)
+    }
+
+    def _current_wraplength():
+        try:
+            width = int(canvas.winfo_width())
+        except Exception:
+            width = 0
+        return max(280, width - 60 if width > 0 else 700)
+
+    def _apply_version_state(version_key):
+        info = version_widgets.get(version_key)
+        if not info:
+            return
+        is_open = bool(version_states.get(version_key, False))
+        arrow = "▾" if is_open else "▸"
+        info["button"].configure(text=f"{arrow}  {info['title']}")
+        if is_open:
+            info["body"].grid()
+        else:
+            info["body"].grid_remove()
+
+    def _toggle_version(version_key):
+        version_states[version_key] = not bool(version_states.get(version_key, False))
+        _apply_version_state(version_key)
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _set_all_versions(open_state):
+        for version_key in list(version_widgets.keys()):
+            version_states[version_key] = bool(open_state)
+            _apply_version_state(version_key)
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _add_wrapped_label(parent_frame, text, row_index, *, foreground="#222222", font=None, indent=0, pady=(0, 2)):
+        lbl = ttk.Label(
+            parent_frame,
+            text=text,
+            foreground=foreground,
+            font=font,
+            justify="left",
+            anchor="w",
+            wraplength=_current_wraplength(),
+        )
+        lbl.grid(row=row_index, column=0, sticky="ew", padx=(indent, 0), pady=pady)
+        return lbl
+
+    if not versions:
+        ttk.Label(content, text="No changelog entries found.", foreground="#333333", justify="left", anchor="w", wraplength=700).grid(row=0, column=0, sticky="ew")
+    else:
+        for index, entry in enumerate(versions):
+            version_label = str(entry.get("version") or "").strip() or "0.0.0"
+            if not version_label.lower().startswith("v"):
+                version_label = f"v{version_label}"
+            released = str(entry.get("released") or "").strip()
+            title_text = f"Press Layouts {version_label}"
+            if released:
+                title_text += f"  •  {released}"
+            version_key = _version_key(entry, index)
+
+            card = ttk.Frame(content, padding=(0, 0, 0, 10))
+            card.grid(row=index, column=0, sticky="ew")
+            card.columnconfigure(0, weight=1)
+
+            header_button = ttk.Button(card, text=title_text, command=(lambda key=version_key: _toggle_version(key)))
+            header_button.grid(row=0, column=0, sticky="ew")
+
+            details = ttk.Frame(card, padding=(24, 8, 0, 0))
+            details.grid(row=1, column=0, sticky="ew")
+            details.columnconfigure(0, weight=1)
+
+            wrap_labels = []
+            next_row = 0
+            summary = str(entry.get("summary") or "").strip()
+            if summary:
+                wrap_labels.append(_add_wrapped_label(details, summary, next_row, foreground="#333333", pady=(0, 8)))
+                next_row += 1
+
+            for section in _normalize_change_sections(entry):
+                title = section.get("title") or "Changes"
+                items = section.get("items") or []
+                color = _category_color(title)
+                section_label = ttk.Label(details, text=title, foreground=color, font=(None, 10, "bold"), justify="left", anchor="w")
+                section_label.grid(row=next_row, column=0, sticky="ew", pady=(0, 4))
+                next_row += 1
+                for item in items:
+                    wrap_labels.append(_add_wrapped_label(details, f"• {item}", next_row, indent=0, pady=(0, 2)))
+                    next_row += 1
+
+            version_widgets[version_key] = {
+                "button": header_button,
+                "body": details,
+                "title": title_text,
+                "wrap_labels": wrap_labels,
+            }
+            _apply_version_state(version_key)
+
+    def _update_wrap_lengths(_event=None):
+        wraplength = _current_wraplength()
+        try:
+            canvas.itemconfigure(canvas_window, width=max(1, canvas.winfo_width()))
+        except Exception:
+            pass
+        for info in version_widgets.values():
+            for lbl in info.get("wrap_labels", []):
+                try:
+                    lbl.configure(wraplength=wraplength)
+                except Exception:
+                    pass
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _on_mousewheel(event):
+        try:
+            if event.delta:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return "break"
+        except Exception:
+            pass
+        return None
+
     def _cleanup_dialog():
         try:
             if getattr(parent, "_changelog_dialog", None) is dialog:
@@ -4143,7 +4647,18 @@ def show_changelog_dialog(parent):
             dialog.destroy()
         except Exception:
             pass
+
+    content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", _update_wrap_lengths)
+    canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
+    _update_wrap_lengths()
+
+    button_row = ttk.Frame(outer)
+    button_row.grid(row=2, column=0, sticky="e")
+    ttk.Button(button_row, text="Expand All", command=lambda: _set_all_versions(True)).pack(side="left", padx=(0, 8))
+    ttk.Button(button_row, text="Collapse All", command=lambda: _set_all_versions(False)).pack(side="left", padx=(0, 8))
     ttk.Button(button_row, text="Close", command=_cleanup_dialog, width=10).pack(side="right")
+
     dialog.bind("<Escape>", lambda _event: _cleanup_dialog())
     dialog.protocol("WM_DELETE_WINDOW", _cleanup_dialog)
     try:
@@ -4571,8 +5086,104 @@ def build_main_launcher():
         cleanup_tree.bind("<Double-Button-1>", toggle_from_event)  
         cleanup_tree.bind("<space>", toggle_from_event)  
         populate_cleanup_tree()  
+        status_var = tk.StringVar(value="Ready.")
+        ttk.Label(outer, textvariable=status_var, foreground="#555555").grid(row=2, column=0, sticky="w", pady=(12, 0))
         btns = ttk.Frame(outer)  
-        btns.grid(row=2, column=0, pady=(12, 0), sticky="e")  
+        btns.grid(row=3, column=0, pady=(12, 0), sticky="e")  
+
+        def _regen_preview_for_path(path, template_mode=False, default_dir=None, prompt_save_template=None):
+            temp_win = None
+            try:
+                temp_win = open_json_in_layout(
+                    root,
+                    path,
+                    template_mode=template_mode,
+                    default_dir=default_dir,
+                    prompt_save_template=prompt_save_template,
+                )
+                if not temp_win:
+                    return f"{os.path.basename(path)}: could not open file"
+                _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
+                save_window_preview_image(temp_win, path, scale=0.75)
+                return None
+            except Exception as exc:
+                return f"{os.path.basename(path)}: {exc}"
+            finally:
+                try:
+                    if temp_win and temp_win.winfo_exists():
+                        temp_win.destroy()
+                except Exception:
+                    pass
+
+        def regen_all_previews_cleanup():
+            jobs = []
+            layout_rows, _changed = get_cached_layout_rows(force=False)
+            for row in layout_rows:
+                jobs.append({
+                    "label": os.path.basename(row["path"]),
+                    "path": row["path"],
+                    "template_mode": False,
+                    "default_dir": None,
+                    "prompt_save_template": None,
+                })
+            for _name, path in list_json_files(TEMPLATE_DIR):
+                jobs.append({
+                    "label": os.path.basename(path),
+                    "path": path,
+                    "template_mode": True,
+                    "default_dir": None,
+                    "prompt_save_template": None,
+                })
+            for _name, path in list_json_files(REGULAR_DIR):
+                jobs.append({
+                    "label": os.path.basename(path),
+                    "path": path,
+                    "template_mode": False,
+                    "default_dir": REGULAR_DIR,
+                    "prompt_save_template": False,
+                })
+            total = len(jobs)
+            if total <= 0:
+                messagebox.showinfo("Regen ALL Previews", "No layout, template, or regular files were found.", parent=dialog)
+                return
+            if not messagebox.askyesno(
+                "Regen ALL Previews",
+                f"Regenerate previews for {total} files?",
+                parent=dialog,
+            ):
+                return
+            close_preview()
+            errors = []
+            for idx, job in enumerate(jobs, start=1):
+                status_var.set(f"Regenerating {idx} of {total}: {job['label']}")
+                dialog.update_idletasks()
+                error_text = _regen_preview_for_path(
+                    job["path"],
+                    template_mode=job["template_mode"],
+                    default_dir=job["default_dir"],
+                    prompt_save_template=job["prompt_save_template"],
+                )
+                if error_text:
+                    errors.append(error_text)
+            _rebuild_template_cache()
+            _rebuild_regular_cache()
+            _rebuild_layout_cache()
+            refresh(preserve_state=False)
+            success_count = total - len(errors)
+            status_var.set(f"Finished regenerating {success_count} of {total} previews.")
+            if errors:
+                messagebox.showerror(
+                    "Regen ALL Previews",
+                    f"Regenerated {success_count} of {total} previews.\n\nErrors:\n" + "\n".join(errors),
+                    parent=dialog,
+                )
+            else:
+                messagebox.showinfo(
+                    "Regen ALL Previews",
+                    f"Successfully regenerated {total} previews.",
+                    parent=dialog,
+                )
+
         def delete_selected_cleanup():  
             to_delete = [path for path, checked in delete_state.items() if checked]  
             if not to_delete:  
@@ -4599,8 +5210,10 @@ def build_main_launcher():
                     parent=dialog,  
                 )  
             dialog.destroy()  
+        ttk.Button(btns, text="Regen ALL Previews", command=regen_all_previews_cleanup, width=18).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="Delete", command=delete_selected_cleanup, width=12).pack(side="left", padx=(0, 8))  
         ttk.Button(btns, text="Cancel", command=dialog.destroy, width=12).pack(side="left")  
+
     tree.bind("<<TreeviewSelect>>", lambda e: show_preview(selected_path()))
     tree.bind("<Double-Button-1>", lambda e: open_selected())
     btns = ttk.Frame(frame)
@@ -4673,6 +5286,7 @@ def build_main_launcher():
                 root.after_cancel(refresh_job["id"])  
         except Exception:  
             pass  
+        _persist_bound_preview_panes(root)
         close_preview()
         root.destroy()  
     root.bind("<FocusIn>", _on_launcher_focus_in, add="+")

@@ -1,6 +1,93 @@
 {
-  "current_version": "1.0.2",
+  "current_version": "1.1.2",
   "versions": [
+    {
+      "version": "1.1.2",
+      "released": "2026-06-11",
+      "summary": "Fix layout issues in printed output",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Resolved an issue where the layout of the printed output was not displaying correctly."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.1",
+      "released": "2026-06-11",
+      "summary": "Add legend and color page list to printed layout",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a legend to the printed layout to provide context for the page list.",
+            "Added a color page list to the printed layout."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the layout of the printed output to accommodate the new legend and color page list.",
+            "Improved the styling of the printed layout for better readability."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.1",
+      "released": "2026-06-11",
+      "summary": "Add legend and color page list to printed layout",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a legend to the printed layout to provide context for the page list.",
+            "Added a color page list to the printed layout."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the layout of the printed output to accommodate the new legend and color page list.",
+            "Improved the styling of the printed layout for better readability."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.0",
+      "released": "2026-06-11",
+      "summary": "Press and format conversions in layout editor",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Press and format conversions in layout editor."
+          ]
+        },
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed a bug where change tracking in the layout editor was not working correctly causing the save changes dialog to trigger even when no changes were made."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.0.3",
+      "released": "2026-06-11",
+      "summary": "Fixed page count calculation in layout editor",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Corrected the page count calculation in the layout editor."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.0.2",
       "released": "2026-06-11",
