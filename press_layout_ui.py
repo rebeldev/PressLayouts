@@ -156,6 +156,529 @@ def ask_issue_date_with_calendar(parent, initial_text="", anchor_widget=None, ti
     return result.get("value")
 
 
+
+class _StaticValue:
+    """Tiny headless adapter that mimics Tk Variables / Entries through .get()."""
+    def __init__(self, value=""):
+        self._value = "" if value is None else str(value)
+
+    def get(self):
+        return self._value
+
+
+def _layout_data_to_headless_ctx(data, config=None, title_base=""):
+    data = data if isinstance(data, dict) else {}
+    config = config if isinstance(config, dict) else {}
+    fmt = str(data.get("format") or config.get("format_name") or "")
+    try:
+        section_count = max(1, min(4, int(data.get("section_count", 1))))
+    except Exception:
+        section_count = 1
+
+    minimum_pages = min_pages_for_format(fmt)
+    raw_section_pages = data.get("section_pages", []) or []
+    section_page_vars = []
+    for idx in range(4):
+        value = ""
+        if idx < section_count:
+            try:
+                value = str(max(1, int(raw_section_pages[idx])))
+            except Exception:
+                value = str(minimum_pages)
+        section_page_vars.append(_StaticValue(value))
+
+    raw_section_names = data.get("section_names", []) or []
+    section_name_vars = []
+    for idx in range(4):
+        value = ""
+        if idx < section_count:
+            try:
+                value = str(raw_section_names[idx] or "")
+            except Exception:
+                value = ""
+        section_name_vars.append(_StaticValue(value))
+
+    units = []
+    for unit in data.get("units", []) or []:
+        if not isinstance(unit, dict):
+            continue
+        label = str(unit.get("label") or "")
+        section_text = str(unit.get("section") or "")
+        grid_entries = []
+        for row in unit.get("grid", []) or []:
+            row = row if isinstance(row, list) else []
+            grid_entries.append([_StaticValue("" if value is None else str(value).strip()) for value in row])
+        units.append({
+            "label": label,
+            "section_entry": _StaticValue(section_text),
+            "entries": grid_entries,
+        })
+
+    color_cells = set()
+    for item in data.get("color_cells", []) or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            unit_label = str(item.get("unit") or "")
+            row_index = int(item.get("r"))
+            col_index = int(item.get("c"))
+        except Exception:
+            continue
+        if unit_label:
+            color_cells.add((unit_label, row_index, col_index))
+
+    return {
+        "title_base": title_base,
+        "press_name": str(data.get("press") or config.get("press_name") or ""),
+        "format_name": fmt,
+        "issue_entry": _StaticValue(data.get("issue_date", "")),
+        "product_entry": _StaticValue(data.get("product", "")),
+        "section_count_var": _StaticValue(section_count),
+        "section_page_vars": section_page_vars,
+        "section_name_vars": section_name_vars,
+        "units": units,
+        "color_cells": color_cells,
+    }
+
+
+def _build_imposition_text_from_layout_data(data, config=None):
+    try:
+        ctx = _layout_data_to_headless_ctx(data, config=config, title_base="")
+        return build_imposition_text(ctx)
+    except Exception:
+        pass
+    fallback = str((data or {}).get("name") or "").strip()
+    if fallback.lower().endswith('.json'):
+        fallback = os.path.splitext(fallback)[0]
+    return fallback
+
+
+def _render_load_starter_font(size, bold=False):
+    try:
+        from PIL import ImageFont
+    except Exception:
+        return None
+    font_names = []
+    if bold:
+        font_names.extend(["arialbd.ttf", "Arial Bold.ttf", "ARIALBD.TTF", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf"])
+    font_names.extend(["arial.ttf", "Arial.ttf", "ARIAL.TTF", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"])
+    search_paths = [
+        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/truetype/liberation2",
+        "/usr/share/fonts/truetype/liberation",
+    ]
+    for folder in search_paths:
+        for name in font_names:
+            try:
+                candidate = os.path.join(folder, name)
+                if os.path.exists(candidate):
+                    return ImageFont.truetype(candidate, size=size)
+            except Exception:
+                pass
+    for name in font_names:
+        try:
+            return ImageFont.truetype(name, size=size)
+        except Exception:
+            pass
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _render_measure_text(draw, text, font):
+    text = text or ""
+    try:
+        left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+        return right - left, bottom - top
+    except Exception:
+        return draw.textsize(text, font=font)
+
+
+def _render_measure_text_bounds(draw, text, font):
+    text = text or ""
+    try:
+        return draw.textbbox((0, 0), text, font=font)
+    except Exception:
+        width, height = draw.textsize(text, font=font)
+        return 0, 0, width, height
+
+
+def _render_draw_centered_text(draw, box, text, font, fill="black"):
+    x0, y0, x1, y1 = box
+    left, top, right, bottom = _render_measure_text_bounds(draw, text, font)
+    tw = right - left
+    th = bottom - top
+    tx = x0 + max(0, ((x1 - x0) - tw) / 2) - left
+    ty = y0 + max(0, ((y1 - y0) - th) / 2) - top
+    draw.text((tx, ty), text or "", fill=fill, font=font)
+
+
+def _render_draw_centered_text_heavy(draw, box, text, font, fill="black", offset=1):
+    x0, y0, x1, y1 = box
+    left, top, right, bottom = _render_measure_text_bounds(draw, text, font)
+    tw = right - left
+    th = bottom - top
+    tx = x0 + max(0, ((x1 - x0) - tw) / 2) - left
+    ty = y0 + max(0, ((y1 - y0) - th) / 2) - top
+    for dx, dy in ((0, 0), (offset, 0), (0, offset), (offset, offset)):
+        draw.text((tx + dx, ty + dy), text or "", fill=fill, font=font)
+
+
+def _render_wrap_text_to_width(draw, text, font, max_width):
+    words = str(text or "").split()
+    if not words:
+        return [""]
+    lines = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        if _render_measure_text(draw, candidate, font)[0] <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+def _visible_print_labels_for_render(ctx, units, left_labels, right_labels):
+    unit_map = {u["label"]: u for u in units}
+    left_order = [lab for lab in left_labels if lab in unit_map]
+    right_order = []
+    special_group = {"E2", "D2", "C2"}
+    special_used = False
+    if ctx.get("press_name") == "Press 1":
+        for lab in special_group:
+            unit = unit_map.get(lab)
+            if unit is not None and unit_min_page_number(unit) is not None:
+                special_used = True
+                break
+    for lab in right_labels:
+        unit = unit_map.get(lab)
+        if unit is None:
+            continue
+        if ctx.get("press_name") == "Press 1" and lab in special_group and not special_used:
+            continue
+        right_order.append(lab)
+    return left_order, right_order, unit_map
+
+
+def render_layout_print_image_from_data(data, config, title_base="", template_mode=False):
+    try:
+        from PIL import Image as PILImage, ImageDraw
+    except Exception:
+        raise RuntimeError("Pillow is required for printing. Please install pillow (pip install pillow).")
+
+    data = data if isinstance(data, dict) else {}
+    config = dict(config or {})
+    ctx = _layout_data_to_headless_ctx(data, config=config, title_base=title_base)
+    units = ctx.get("units", [])
+    grid_cols = int(config.get("grid_cols", 0) or 0)
+    swatch_cols = int(config.get("swatch_cols", 1) or 1)
+    unit_padx = int(config.get("unit_padx", 6) or 6)
+    folder_padx = int(config.get("folder_padx", 24) or 24)
+    folder_label = str(config.get("folder_label") or "Folder")
+    midline_thickness = int(config.get("midline_thickness", 4) or 4)
+    midline_color = str(config.get("midline_color") or "#444444")
+    only_k_labels = set(config.get("only_k_labels", set()) or set())
+    left_labels = list(config.get("left_labels", []) or [])
+    right_labels = list(config.get("right_labels", []) or [])
+
+    img_w, img_h = 2200, 1940
+    img = PILImage.new("RGB", (img_w, img_h), "white")
+    draw = ImageDraw.Draw(img)
+
+    if grid_cols >= 8:
+        title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 50, 42, 24, 24, 30, 18
+    elif grid_cols >= 4:
+        title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 56, 44, 26, 24, 32, 22
+    else:
+        title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 60, 46, 28, 24, 34, 38
+
+    title_font = _render_load_starter_font(title_sz, bold=True)
+    header_font = _render_load_starter_font(header_sz, bold=True)
+    text_font = _render_load_starter_font(text_sz, bold=False)
+    small_font = _render_load_starter_font(max(18, text_sz - 4), bold=False)
+    sections_print_font = _render_load_starter_font(max(36, (max(18, text_sz - 4)) * 2), bold=True)
+    unit_font = _render_load_starter_font(unit_sz, bold=True)
+    section_font = _render_load_starter_font(section_sz, bold=True)
+    cell_font_render = _render_load_starter_font(cell_sz, bold=True)
+    color_cell_font_render = _render_load_starter_font(cell_sz + 2, bold=True)
+    legend_font = _render_load_starter_font(header_sz, bold=True)
+    legend_symbol_font = _render_load_starter_font(header_sz, bold=True)
+    legend_list_font = _render_load_starter_font(header_sz, bold=True)
+
+    margin_x = 55
+    header_top = 26
+    header_h = 180
+    footer_h = 150
+    grid_top = header_top + header_h + 14
+    footer_y = img_h - footer_h - 30
+
+    raw_issue = (data.get("issue_date") or "").strip()
+    issue_text = raw_issue
+    if not template_mode:
+        try:
+            dt = parse_issue_date_flexible(raw_issue)
+            if dt:
+                issue_text = dt.strftime("%m/%d/%Y")
+        except Exception:
+            pass
+    product_text = (data.get("product") or "").strip()
+    imposition_text = _build_imposition_text_from_layout_data(data, config=config)
+
+    label_top = header_top
+    fallback_title = title_base or ("Template Layout" if template_mode else "Press Layout")
+    _render_draw_centered_text(draw, (margin_x, label_top, img_w - margin_x, label_top + 60), product_text or fallback_title, title_font)
+    draw.text((margin_x, label_top + 66), f"Issue Date: {issue_text}", fill="black", font=sections_print_font)
+    draw.text((img_w - margin_x - 420 - 300, label_top + 66), f"Imposition: {imposition_text}", fill="black", font=text_font)
+
+    try:
+        count = max(1, min(4, int(data.get("section_count", 1))))
+    except Exception:
+        count = 1
+    section_display_lookup = {}
+    section_names = data.get("section_names", []) or []
+    for idx in range(count):
+        try:
+            section_name = str(section_names[idx] or "").strip().upper()
+        except Exception:
+            section_name = ""
+        if not section_name:
+            section_name = chr(ord("A") + idx)
+        section_display_lookup[section_name] = idx
+
+    color_page_refs = []
+    seen_color_refs = set()
+    legend_circle_diameter = 54
+    show_bold_color_marks = ((ctx.get("format_name") or "").strip().lower() == "broadsheet")
+
+    values = []
+    total_page_count = 0
+    section_pages = data.get("section_pages", []) or []
+    for idx in range(count):
+        value = ""
+        try:
+            value = str(section_pages[idx]).strip()
+        except Exception:
+            value = ""
+        if value:
+            values.append(value)
+            try:
+                total_page_count += int(value)
+            except Exception:
+                pass
+    sections_text = ' / '.join(values)
+    if sections_text:
+        draw.text((margin_x, label_top + 118), f"Pages: {sections_text}", fill="black", font=sections_print_font)
+
+    draw.line((margin_x, grid_top - 18, img_w - margin_x, grid_top - 18), fill="#444444", width=3)
+    left_order, right_order, unit_map = _visible_print_labels_for_render(ctx, units, left_labels, right_labels)
+    total_units = len(left_order) + len(right_order)
+    if total_units <= 0:
+        draw.text((margin_x, grid_top + 20), 'No units to print.', fill='black', font=text_font)
+        return img
+
+    gap = max(10, int(unit_padx * 2.4))
+    folder_gap = max(gap + 8, int(folder_padx * 1.5))
+    folder_w = 150 if grid_cols <= 4 else 175
+    left_gaps = max(0, len(left_order) - 1) * gap
+    right_gaps = max(0, len(right_order) - 1) * gap
+    usable_w = img_w - (2 * margin_x) - left_gaps - right_gaps - (2 * folder_gap) - folder_w
+    unit_w = max(115, int(usable_w / max(1, total_units)))
+    unit_h = footer_y - grid_top - 12
+    unit_label_h = 26
+    section_h = max(24, section_sz + 8)
+
+    x_positions = {}
+    x = margin_x
+    for lab in left_order:
+        x_positions[lab] = x
+        x += unit_w + gap
+    folder_x0 = x + folder_gap
+    folder_x1 = folder_x0 + folder_w
+    x = folder_x1 + folder_gap
+    for lab in right_order:
+        x_positions[lab] = x
+        x += unit_w + gap
+
+    folder_mid = (folder_x0 + folder_x1) / 2.0
+    folder_arrow_w = min(64, max(42, int(folder_w * 0.36)))
+    arrow_center_y = grid_top + 95
+    for offset in (0, 84, 168):
+        cy = arrow_center_y + offset
+        draw.polygon([
+            (folder_mid - folder_arrow_w / 2, cy - 24),
+            (folder_mid + folder_arrow_w / 2, cy - 24),
+            (folder_mid, cy + 28),
+        ], fill='#666666', outline='#666666')
+    left_triangle_center_y = arrow_center_y + 84
+    left_triangle_left = folder_x0 - 18
+    draw.polygon([
+        (left_triangle_left, left_triangle_center_y - 24),
+        (left_triangle_left + folder_arrow_w, left_triangle_center_y - 24),
+        (left_triangle_left + folder_arrow_w / 2, left_triangle_center_y + 28),
+    ], fill='#666666', outline='#666666')
+    folder_label_top = arrow_center_y + 168 + 36
+    _render_draw_centered_text(draw, (folder_x0, folder_label_top, folder_x1, folder_label_top + unit_label_h), folder_label, unit_font)
+
+    for lab in left_order + right_order:
+        unit = unit_map[lab]
+        x0 = x_positions[lab]
+        x1 = x0 + unit_w
+        y0 = grid_top
+        y1 = y0 + unit_h
+
+        section_text = (unit.get('section_entry').get() or '').strip().upper() if unit.get('section_entry') else ''
+        section_label_space = section_h + 6
+        if section_text:
+            _render_draw_centered_text(draw, (x0, y0, x1, y0 + section_h), section_text, section_font)
+
+        box_top = y0 + section_label_space
+        entries = unit.get('entries', [])
+        rows = len(entries)
+        cols = len(entries[0]) if rows else 0
+        if rows <= 0 or cols <= 0:
+            continue
+
+        cell_w = (x1 - x0) / cols
+        orig_box_h = max(1, y1 - box_top)
+        desired_box_h = int(rows * cell_w * 1.05)
+        box_h = min(orig_box_h, desired_box_h)
+        min_box_h = max(24, int(unit_label_h + section_h + 8))
+        box_h = max(min_box_h, box_h)
+        y1 = box_top + box_h
+        draw.rectangle((x0, box_top, x1, y1), outline='black', width=2, fill='white')
+        cell_h = box_h / rows
+        mid_col = cols // 2
+        mid_row = rows // 2
+        for row_index in range(1, rows):
+            yy = box_top + (row_index * cell_h)
+            width = midline_thickness if (rows % 2 == 0 and row_index == mid_row) else 1
+            color = midline_color if width > 1 else '#888888'
+            draw.line((x0, yy, x1, yy), fill=color, width=width)
+        for col_index in range(1, cols):
+            xx = x0 + (col_index * cell_w)
+            width = midline_thickness if (cols % 2 == 0 and col_index == mid_col) else 1
+            color = midline_color if width > 1 else '#888888'
+            draw.line((xx, box_top, xx, y1), fill=color, width=width)
+
+        for row_index in range(rows):
+            for col_index in range(cols):
+                cx0 = x0 + (col_index * cell_w)
+                cy0 = box_top + (row_index * cell_h)
+                cx1 = x0 + ((col_index + 1) * cell_w)
+                cy1 = box_top + ((row_index + 1) * cell_h)
+                try:
+                    value = (entries[row_index][col_index].get() or '').strip()
+                except Exception:
+                    value = ''
+                is_color_page = (lab, row_index, col_index) in ctx.get('color_cells', set())
+                if value:
+                    if is_color_page and show_bold_color_marks:
+                        _render_draw_centered_text_heavy(draw, (cx0 + 2, cy0 + 2, cx1 - 2, cy1 - 2), value, color_cell_font_render, fill='black', offset=1)
+                    else:
+                        _render_draw_centered_text(draw, (cx0 + 2, cy0 + 2, cx1 - 2, cy1 - 2), value, cell_font_render)
+                if is_color_page:
+                    pad = max(5, int(min(cell_w, cell_h) * 0.11))
+                    circle_diameter = max(10, int(min(cell_w, cell_h) - (2 * pad)))
+                    legend_circle_diameter = circle_diameter
+                    circle_width = 6 if show_bold_color_marks else 3
+                    draw.ellipse((cx0 + pad, cy0 + pad, cx1 - pad, cy1 - pad), outline='red', width=circle_width)
+                    section_ref = section_text.strip().upper()
+                    page_ref = str(value or '').strip()
+                    if section_ref and page_ref:
+                        ref_text = f'{section_ref}{page_ref}'
+                        if ref_text not in seen_color_refs:
+                            seen_color_refs.add(ref_text)
+                            try:
+                                page_num = int(page_ref)
+                            except Exception:
+                                page_num = 10 ** 9
+                            color_page_refs.append((section_display_lookup.get(section_ref, 999), section_ref, page_num, ref_text))
+
+        label_top = y1 + 6
+        _render_draw_centered_text(draw, (x0, label_top, x1, label_top + unit_label_h), lab, unit_font)
+        try:
+            use_cmyk = lab not in only_k_labels
+        except Exception:
+            use_cmyk = True
+        colors = [('K', '#7f7f7f'), ('Y', '#fff176'), ('M', '#f48fb1'), ('C', '#90caf9')] if use_cmyk else [('K', '#7f7f7f')]
+        sw_cols = swatch_cols if swatch_cols and swatch_cols > 0 else 1
+        sw_h = max(28, int(unit_label_h * 1.5))
+        sw_spacing = 8
+        sw_start_y = label_top + unit_label_h + 8
+        for ci, (key, color) in enumerate(colors):
+            row_count = sw_cols
+            sw_w = max(18, int(min((unit_w * 0.9) / max(1, row_count), cell_w * 0.9)))
+            row_total_w = row_count * sw_w + (row_count - 1) * sw_spacing
+            row_x = x0 + (unit_w - row_total_w) / 2.0
+            row_y = sw_start_y + ci * (sw_h + sw_spacing)
+            for item_index in range(sw_cols):
+                sx0 = row_x + item_index * (sw_w + sw_spacing)
+                sx1 = sx0 + sw_w
+                sy1 = row_y + sw_h
+                draw.rectangle((sx0, row_y, sx1, sy1), fill=color, outline='#333333')
+                try:
+                    rcol = int(color.lstrip('#')[0:2], 16)
+                    gcol = int(color.lstrip('#')[2:4], 16)
+                    bcol = int(color.lstrip('#')[4:6], 16)
+                    luminance = 0.299 * rcol + 0.587 * gcol + 0.114 * bcol
+                    text_fill = 'black' if luminance > 150 else 'white'
+                except Exception:
+                    text_fill = 'black'
+                _render_draw_centered_text(draw, (sx0, row_y, sx1, sy1), key, small_font, fill=text_fill)
+
+    color_pages_count, plates_count = _layout_color_and_plate_counts_from_data(data)
+    color_pages_text = str(color_pages_count)
+    plates_text = str(plates_count)
+    footer_line_y = footer_y - 14
+    draw.line((margin_x, footer_line_y, img_w - margin_x, footer_line_y), fill='#444444', width=3)
+    draw.text((margin_x, footer_y), f"Color Pages: {color_pages_text}", fill='black', font=header_font)
+    draw.text((margin_x + 480, footer_y), f"Plates: {plates_text}", fill='black', font=header_font)
+    draw.text((margin_x + 900, footer_y), f"Total Pages: {total_page_count}", fill='black', font=header_font)
+
+    legend_circle_diameter = max(42, int(legend_circle_diameter))
+    legend_y = footer_line_y - 190
+    legend_circle_box = (
+        margin_x,
+        legend_y,
+        margin_x + legend_circle_diameter,
+        legend_y + legend_circle_diameter,
+    )
+    draw.ellipse(legend_circle_box, outline='red', width=6)
+    _render_draw_centered_text_heavy(draw, legend_circle_box, '#', legend_symbol_font, fill='black', offset=1)
+    draw.text((margin_x + legend_circle_diameter + 24, legend_y), '= color page', fill='black', font=legend_font)
+
+    color_page_refs_sorted = [item[3] for item in sorted(color_page_refs, key=lambda item: (item[0], item[2], item[3]))]
+    refs_text = 'Color pages list: ' + (', '.join(color_page_refs_sorted) if color_page_refs_sorted else 'None')
+    list_y = legend_y + legend_circle_diameter + 26
+    max_text_width = max(260, img_w - (2 * margin_x))
+    wrapped_lines = _render_wrap_text_to_width(draw, refs_text, legend_list_font, max_text_width)
+    line_h = max(44, _render_measure_text(draw, 'Ag', legend_list_font)[1] + 10)
+    for line_index, line_text in enumerate(wrapped_lines):
+        draw.text((margin_x, list_y + (line_index * line_h)), line_text, fill='black', font=legend_list_font)
+    return img
+
+
+def render_layout_preview_image_from_data(data, config, scale=0.75, title_base='', template_mode=False):
+    img = render_layout_print_image_from_data(data, config, title_base=title_base, template_mode=template_mode)
+    if img is None:
+        return None
+    try:
+        scale = float(scale)
+    except Exception:
+        scale = 0.75
+    scale = max(0.1, min(1.0, scale))
+    preview_img = img.crop((0, 0, img.width, max(1, int(img.height * 0.5))))
+    if scale != 1.0:
+        width, height = preview_img.size
+        preview_img = preview_img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
+    return preview_img
+
+
 def build_press_layout(win, title="Press Layout", config=None, load_path=None, load_as_copy=False, initial_data=None):
     config = config or {}
 
@@ -1093,18 +1616,31 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         except Exception:
             return draw.textsize(text, font=font)
 
+    def _measure_text_bounds(draw, text, font):
+        text = text or ""
+        try:
+            left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+            return left, top, right, bottom
+        except Exception:
+            width, height = draw.textsize(text, font=font)
+            return 0, 0, width, height
+
     def _draw_centered_text(draw, box, text, font, fill="black"):
         x0, y0, x1, y1 = box
-        tw, th = _measure_text(draw, text, font)
-        tx = x0 + max(0, ((x1 - x0) - tw) / 2)
-        ty = y0 + max(0, ((y1 - y0) - th) / 2)
+        left, top, right, bottom = _measure_text_bounds(draw, text, font)
+        tw = right - left
+        th = bottom - top
+        tx = x0 + max(0, ((x1 - x0) - tw) / 2) - left
+        ty = y0 + max(0, ((y1 - y0) - th) / 2) - top
         draw.text((tx, ty), text or "", fill=fill, font=font)
 
     def _draw_centered_text_heavy(draw, box, text, font, fill="black", offset=1):
         x0, y0, x1, y1 = box
-        tw, th = _measure_text(draw, text, font)
-        tx = x0 + max(0, ((x1 - x0) - tw) / 2)
-        ty = y0 + max(0, ((y1 - y0) - th) / 2)
+        left, top, right, bottom = _measure_text_bounds(draw, text, font)
+        tw = right - left
+        th = bottom - top
+        tx = x0 + max(0, ((x1 - x0) - tw) / 2) - left
+        ty = y0 + max(0, ((y1 - y0) - th) / 2) - top
         for dx, dy in ((0, 0), (offset, 0), (0, offset), (offset, offset)):
             draw.text((tx + dx, ty + dy), text or "", fill=fill, font=font)
 
@@ -1158,7 +1694,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         elif grid_cols >= 4:
             title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 56, 44, 26, 24, 32, 22
         else:
-            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 60, 46, 28, 24, 34, 26
+            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 60, 46, 28, 24, 34, 38
         title_font = _load_starter_font(title_sz, bold=True)
         header_font = _load_starter_font(header_sz, bold=True)
         issue_font = _load_starter_font(header_sz + 4, bold=True)
@@ -2808,6 +3344,41 @@ def _cancel_cache_watcher(win, watcher_state):
         pass
 
 
+def regenerate_preview_image_for_json_path(
+    json_path,
+    template_mode=False,
+    default_dir=None,
+    prompt_save_template=None,
+    scale=0.75,
+):
+    """Regenerate and save a preview image directly from layout JSON without opening an editor window."""
+    data = safe_read_json(json_path)
+    if not data:
+        raise RuntimeError(f"Could not read: {json_path}")
+    press = data.get("press")
+    fmt = data.get("format")
+    if not press or not fmt:
+        raise RuntimeError("JSON missing 'press' or 'format'.")
+    base_cfg = CONFIG_MAP.get((press, fmt))
+    if not base_cfg:
+        raise RuntimeError(f"No config found for {press} - {fmt}")
+    image = render_layout_preview_image_from_data(
+        data,
+        dict(base_cfg),
+        scale=scale,
+        title_base=f"{press} - {fmt}",
+        template_mode=bool(template_mode),
+    )
+    if image is None:
+        raise RuntimeError(f"Could not build preview for: {json_path}")
+    out_path = preview_image_path_for_json(json_path)
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        ensure_dir(out_dir)
+    image.save(out_path, format="PNG")
+    return out_path
+
+
 def open_json_in_layout(
     root,
     json_path,
@@ -2931,27 +3502,6 @@ def _clamp_preview_position(monitor, x, y, width, height, margin=20):
     return x, y
 
 
-def _position_window_on_launcher_monitor(win, launcher, x_offset=32, y_offset=32):
-    monitor = _launcher_monitor_rect(launcher)
-    try:
-        root_rect = _window_rect(launcher) or {
-            "left": int(monitor.get("left", 0)),
-            "top": int(monitor.get("top", 0)),
-            "right": int(monitor.get("left", 0)) + 800,
-            "bottom": int(monitor.get("top", 0)) + 600,
-        }
-        win.update_idletasks()
-        width = max(1, int(win.winfo_reqwidth() or win.winfo_width() or 800))
-        height = max(1, int(win.winfo_reqheight() or win.winfo_height() or 600))
-        x = root_rect["left"] + x_offset
-        y = root_rect["top"] + y_offset
-        x, y = _clamp_preview_position(monitor, x, y, width, height)
-        win.geometry(f"{width}x{height}+{x}+{y}")
-    except Exception:
-        pass
-    return monitor
-
-
 def _capture_window_image(win):
     try:
         from PIL import ImageGrab
@@ -3068,66 +3618,6 @@ def _capture_window_image(win):
     return image
 
 
-def _build_preview_image_from_layout_window(win, scale=0.75):
-    try:
-        builder = getattr(win, "build_preview_image", None)
-        if callable(builder):
-            image = builder(scale=scale)
-            if image is not None:
-                return image
-    except Exception:
-        pass
-    try:
-        print_builder = getattr(win, "build_print_image", None)
-        if callable(print_builder):
-            image = print_builder()
-            if image is not None:
-                image = image.crop((0, 0, image.width, max(1, int(image.height * 0.5))))
-                return _resize_preview_image(image, scale=scale)
-    except Exception:
-        pass
-    image = _capture_window_image(win)
-    return _resize_preview_image(image, scale=scale)
-
-
-def _create_image_preview_window(root, image, title, launcher):
-    try:
-        from PIL import ImageTk
-    except Exception as e:
-        raise RuntimeError(f"Pillow is required for previews: {e}")
-    preview = tk.Toplevel(root)
-    preview.title(title)
-    try:
-        preview.transient(root)
-    except Exception:
-        pass
-    try:
-        preview.bind("<Escape>", lambda e: preview.destroy(), add="+")
-    except Exception:
-        pass
-    outer = ttk.Frame(preview, padding=8)
-    outer.pack(fill="both", expand=True)
-    label = ttk.Label(outer)
-    label.pack(fill="both", expand=True)
-    photo = ImageTk.PhotoImage(image)
-    label.configure(image=photo)
-    label.image = photo
-    preview._preview_photo = photo
-    try:
-        width, height = image.size
-        preview.geometry(f"{max(320, width + 24)}x{max(220, height + 24)}")
-        monitor = _launcher_monitor_rect(launcher)
-        launcher_rect = _window_rect(launcher) or monitor
-        # Prefer to open to the right of the launcher, but clamp to the same monitor.
-        x = launcher_rect["right"] + 16
-        y = launcher_rect["top"]
-        x, y = _clamp_preview_position(monitor, x, y, max(320, width + 24), max(220, height + 24))
-        preview.geometry(f"{max(320, width + 24)}x{max(220, height + 24)}+{x}+{y}")
-    except Exception:
-        pass
-    return preview
-
-
 def _clear_preview_panel(preview_label, preview_state, empty_text="Select an item to preview"):
     try:
         preview_label.configure(image="", text=empty_text)
@@ -3165,30 +3655,36 @@ def open_json_preview(root, json_path, template_mode=False):
             preview_title = "Preview"
         return image, preview_title
 
-    temp_win = open_json_in_layout(root, json_path, template_mode=template_mode)
-    if not temp_win:
+    data = safe_read_json(json_path)
+    if not data:
+        messagebox.showerror("Open Failed", f"Could not read: {json_path}")
         return None, None
-    preview_title = None
+    press = data.get("press")
+    fmt = data.get("format")
+    if not press or not fmt:
+        messagebox.showerror("Open Failed", "JSON missing 'press' or 'format'.")
+        return None, None
+    base_cfg = CONFIG_MAP.get((press, fmt))
+    if not base_cfg:
+        messagebox.showerror("Open Failed", f"No config found for {press} - {fmt}")
+        return None, None
+
+    image = render_layout_preview_image_from_data(
+        data,
+        dict(base_cfg),
+        scale=0.75,
+        title_base=f"{press} - {fmt}",
+        template_mode=bool(template_mode),
+    )
+    if image is None:
+        return None, None
     try:
-        _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
-        try:
-            preview_title = "Preview"
-        except Exception:
-            preview_title = "Preview"
-        image = _build_preview_image_from_layout_window(temp_win, scale=0.75)
-        try:
-            out_path = preview_image_path_for_json(json_path)
-            ensure_dir(os.path.dirname(out_path))
-            image.save(out_path, format="PNG")
-        except Exception:
-            pass
-    finally:
-        try:
-            if temp_win and temp_win.winfo_exists():
-                temp_win.destroy()
-        except Exception:
-            pass
-    return image, (preview_title or "Preview")
+        out_path = preview_image_path_for_json(json_path)
+        ensure_dir(os.path.dirname(out_path))
+        image.save(out_path, format="PNG")
+    except Exception:
+        pass
+    return image, "Preview"
 
 
 def open_new_template(parent):
@@ -3928,22 +4424,11 @@ def build_template_editor_launcher(parent):
             messagebox.showinfo("Select a Template", "Select a template to regenerate its preview.")
             return
         close_preview()
-        temp_win = None
         try:
-            temp_win = open_json_in_layout(root, path, template_mode=True)
-            if not temp_win:
-                return
-            _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
-            save_window_preview_image(temp_win, path, scale=0.75)
+            regenerate_preview_image_for_json_path(path, template_mode=True, scale=0.75)
             show_preview(path)
         except Exception as exc:
             messagebox.showerror("Regen Preview Failed", str(exc), parent=root)
-        finally:
-            try:
-                if temp_win and temp_win.winfo_exists():
-                    temp_win.destroy()
-            except Exception:
-                pass
 
     def delete_selected():
         path = selected_path()
@@ -4216,21 +4701,17 @@ def build_regular_editor_launcher(parent):
         if not path:
             messagebox.showinfo("Select a Regular Layout", "Select a regular layout to regenerate its preview.")
             return
-        temp_win = None
         try:
-            temp_win = open_json_in_layout(root, path, template_mode=False, default_dir=REGULAR_DIR, prompt_save_template=False)
-            if temp_win:
-                _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
-                save_window_preview_image(temp_win, path, scale=0.75)
-                show_preview(path)
+            regenerate_preview_image_for_json_path(
+                path,
+                template_mode=False,
+                default_dir=REGULAR_DIR,
+                prompt_save_template=False,
+                scale=0.75,
+            )
+            show_preview(path)
         except Exception as exc:
             messagebox.showerror("Regen Preview Failed", str(exc), parent=root)
-        finally:
-            try:
-                if temp_win and temp_win.winfo_exists():
-                    temp_win.destroy()
-            except Exception:
-                pass
     def delete_selected():
         path = selected_path()
         if not path:
@@ -4971,22 +5452,11 @@ def build_main_launcher():
             messagebox.showinfo("Select a Layout", "Select a layout to regenerate its preview.")
             return
         close_preview()
-        temp_win = None
         try:
-            temp_win = open_json_in_layout(root, path, template_mode=False)
-            if not temp_win:
-                return
-            _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
-            save_window_preview_image(temp_win, path, scale=0.75)
+            regenerate_preview_image_for_json_path(path, template_mode=False, scale=0.75)
             show_preview(path)
         except Exception as exc:
             messagebox.showerror("Regen Preview Failed", str(exc))
-        finally:
-            try:
-                if temp_win and temp_win.winfo_exists():
-                    temp_win.destroy()
-            except Exception:
-                pass
 
     def delete_selected():
         path = selected_path()
@@ -5092,28 +5562,17 @@ def build_main_launcher():
         btns.grid(row=3, column=0, pady=(12, 0), sticky="e")  
 
         def _regen_preview_for_path(path, template_mode=False, default_dir=None, prompt_save_template=None):
-            temp_win = None
             try:
-                temp_win = open_json_in_layout(
-                    root,
+                regenerate_preview_image_for_json_path(
                     path,
                     template_mode=template_mode,
                     default_dir=default_dir,
                     prompt_save_template=prompt_save_template,
+                    scale=0.75,
                 )
-                if not temp_win:
-                    return f"{os.path.basename(path)}: could not open file"
-                _position_window_on_launcher_monitor(temp_win, root, x_offset=40, y_offset=40)
-                save_window_preview_image(temp_win, path, scale=0.75)
                 return None
             except Exception as exc:
                 return f"{os.path.basename(path)}: {exc}"
-            finally:
-                try:
-                    if temp_win and temp_win.winfo_exists():
-                        temp_win.destroy()
-                except Exception:
-                    pass
 
         def regen_all_previews_cleanup():
             jobs = []

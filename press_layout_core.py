@@ -1718,27 +1718,27 @@ def _save_preview_for_saved_template(ctx, template_path):
     if not template_path:
         return
     try:
-        parent = None
-        try:
-            if ctx.get("issue_entry") is not None:
-                parent = ctx["issue_entry"].winfo_toplevel()
-        except Exception:
-            parent = None
-        if parent is None:
+        data = safe_read_json(template_path)
+        if not isinstance(data, dict):
             return
-        from press_layout_ui import open_json_in_layout
-        temp_win = open_json_in_layout(parent, template_path, template_mode=True)
-        if not temp_win:
+        press = data.get("press") or ""
+        fmt = data.get("format") or ""
+        cfg = CONFIG_MAP.get((press, fmt))
+        if not cfg:
             return
-        try:
-            temp_win.update_idletasks()
-            _save_preview_image_for_window(temp_win, template_path, scale=0.75)
-        finally:
-            try:
-                if temp_win and temp_win.winfo_exists():
-                    temp_win.destroy()
-            except Exception:
-                pass
+        from press_layout_ui import render_layout_preview_image_from_data
+        image = render_layout_preview_image_from_data(
+            data,
+            dict(cfg),
+            scale=0.75,
+            title_base=f"{press} - {fmt}",
+            template_mode=True,
+        )
+        if image is None:
+            return
+        out_path = preview_image_path_for_json(template_path)
+        ensure_dir(os.path.dirname(out_path))
+        image.save(out_path, format="PNG")
     except Exception:
         pass
 
@@ -2109,6 +2109,7 @@ def save_template_from_layout(ctx):
         data["name"] = os.path.splitext(template_filename)[0]
         
         safe_write_json(template_path, data)
+        _save_preview_for_saved_template(ctx, template_path)
         messagebox.showinfo("Template Saved", f"Template saved as:\n{template_filename}")
     except Exception as e:
         messagebox.showerror("Save Template Failed", f"Could not save template:\n{str(e)}")

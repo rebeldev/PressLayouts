@@ -1,9 +1,48 @@
 {
-  "current_version": "1.1.2",
+  "current_version": "1.1.4",
   "versions": [
     {
+      "version": "1.1.4",
+      "released": "6-12-2026",
+      "summary": "Headless preview regeneration for launcher and cleanup tools",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a direct preview regeneration helper that rebuilds .preview.png files from saved JSON data without opening a layout editor window."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the main launcher, template editor, regular editor, and Cleanup Layouts dialog to use headless preview regeneration for manual and bulk preview rebuilds.",
+            "Removed obsolete temporary-window preview regeneration code paths from the UI build where they were no longer needed."
+          ]
+        },
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed preview regeneration actions that still flashed a layout editor window when rebuilding individual previews or regenerating all previews from the cleanup tool."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.3",
+      "released": "6-12-2026",
+      "summary": "Adjusted font for printed layout to improve readability",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Adjusted the font used in the printed layout to improve readability and ensure that all text is clear and legible when printed."
+          ]
+        }
+      ]
+    },
+    {
       "version": "1.1.2",
-      "released": "2026-06-11",
+      "released": "6-11-2026",
       "summary": "Fix layout issues in printed output",
       "changes": [
         {
@@ -16,28 +55,7 @@
     },
     {
       "version": "1.1.1",
-      "released": "2026-06-11",
-      "summary": "Add legend and color page list to printed layout",
-      "changes": [
-        {
-          "category": "Added",
-          "items": [
-            "Added a legend to the printed layout to provide context for the page list.",
-            "Added a color page list to the printed layout."
-          ]
-        },
-        {
-          "category": "Changed",
-          "items": [
-            "Updated the layout of the printed output to accommodate the new legend and color page list.",
-            "Improved the styling of the printed layout for better readability."
-          ]
-        }
-      ]
-    },
-    {
-      "version": "1.1.1",
-      "released": "2026-06-11",
+      "released": "6-11-2026",
       "summary": "Add legend and color page list to printed layout",
       "changes": [
         {
@@ -58,7 +76,7 @@
     },
     {
       "version": "1.1.0",
-      "released": "2026-06-11",
+      "released": "6-11-2026",
       "summary": "Press and format conversions in layout editor",
       "changes": [
         {
@@ -77,7 +95,7 @@
     },
     {
       "version": "1.0.3",
-      "released": "2026-06-11",
+      "released": "6-11-2026",
       "summary": "Fixed page count calculation in layout editor",
       "changes": [
         {
@@ -90,7 +108,7 @@
     },
     {
       "version": "1.0.2",
-      "released": "2026-06-11",
+      "released": "6-11-2026",
       "summary": "Changes New Layout window to a treeview with filters",
       "changes": [
         {
@@ -105,7 +123,7 @@
     },
     {
       "version": "1.0.1",
-      "released": "2026-06-11",
+      "released": "6-11-2026",
       "summary": "Adds launcher version loading from changelog.json and a clickable changelog history view.",
       "changes": [
         {
@@ -126,7 +144,7 @@
     },
     {
       "version": "1.0.0",
-      "released": "2026-06-11",
+      "released": "6-11-2026",
       "summary": "Initial release of the Press Layout launcher.",
       "changes": [
         {
