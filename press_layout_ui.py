@@ -1314,11 +1314,31 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         raw_issue = issue_entry.get().strip()
         dt = parse_issue_date_flexible(raw_issue)
         issue_text = dt.strftime("%m/%d/%Y") if dt else raw_issue
+        total_pages = 0
+        try:
+            section_count = max(1, min(4, int(section_count_var.get())))
+        except Exception:
+            try:
+                section_count = len(section_page_vars)
+            except Exception:
+                section_count = 0
+        for idx in range(max(0, min(int(section_count or 0), len(section_page_vars)))):
+            try:
+                page_value = (section_page_vars[idx].get() or "").strip()
+            except Exception:
+                page_value = ""
+            if not page_value:
+                continue
+            try:
+                total_pages += int(page_value)
+            except Exception:
+                pass
         return {
             "publication": product_entry.get().strip(),
             "issue_date": issue_text,
             "color_pages": (ctx.get("color_pages_var", color_pages_var).get() or "").strip(),
             "plates": (ctx.get("plates_var", plates_var).get() or "").strip(),
+            "total_pages": str(total_pages),
         }
 
     def _load_starter_font(size, bold=False):
@@ -1355,107 +1375,234 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     def _draw_text(draw, xy, text, font):
         draw.text(xy, text or "", fill="black", font=font)
 
+
     def _make_starter_sheet_image(format_name, fields):
         try:
             from PIL import Image, ImageDraw
         except Exception:
             raise RuntimeError("Pillow is required for starter sheet printing. Please install pillow (pip install pillow).")
 
-        publication = fields.get("publication", "")
-        issue_date = fields.get("issue_date", "")
-        color_pages = fields.get("color_pages", "")
-        plates = fields.get("plates", "")
-        fmt = (format_name or "Standard").strip().upper()
+        publication = str(fields.get("publication", "") or "").strip()
+        issue_date = str(fields.get("issue_date", "") or "").strip()
+        color_pages = str(fields.get("color_pages", "") or "").strip()
+        plates = str(fields.get("plates", "") or "").strip()
+        total_pages = str(fields.get("total_pages", "") or "").strip()
+        fmt_key = (format_name or "Standard").strip().upper()
+        if fmt_key not in {"STANDARD", "USAT", "NYT"}:
+            fmt_key = "STANDARD"
 
-        if fmt == "NYT":
-            img = Image.new("RGB", (2200, 2000), "white")
-            draw = ImageDraw.Draw(img)
-            title_font = _load_starter_font(100, bold=True)
-            label_font = _load_starter_font(64, bold=True)
-            value_font = _load_starter_font(72, bold=True)
-            _draw_text(draw, (700, 55), "NYT CLOSE SHEET", title_font)
-            _draw_line(draw, (350, 175, 2000, 175), width=6)
-            _draw_text(draw, (10, 315), "Date:", label_font)
-            _draw_text(draw, (270, 315), issue_date, value_font)
-            _draw_line(draw, (190, 385, 720, 385), width=3)
-            _draw_text(draw, (1320, 315), "Kills:", label_font)
-            _draw_line(draw, (1510, 385, 1850, 385), width=3)
-            _draw_text(draw, (1360, 435), "PS:", label_font)
-            _draw_line(draw, (1510, 505, 1850, 505), width=3)
-            _draw_text(draw, (10, 650), "Publication:", label_font)
-            _draw_text(draw, (540, 650), publication, value_font)
-            _draw_line(draw, (450, 720, 1850, 720), width=3)
-            _draw_text(draw, (10, 900), "Color Pages:", label_font)
-            _draw_text(draw, (540, 900), color_pages, value_font)
-            _draw_line(draw, (450, 970, 1000, 970), width=3)
-            _draw_text(draw, (1130, 900), "Color add:", label_font)
-            _draw_line(draw, (1510, 970, 1850, 970), width=3)
-            _draw_text(draw, (1110, 1000), "Color drop:", label_font)
-            _draw_line(draw, (1510, 1070, 1850, 1070), width=3)
-            _draw_text(draw, (10, 1125), "Plates Needed:", label_font)
-            _draw_text(draw, (540, 1125), plates, value_font)
-            _draw_line(draw, (450, 1195, 870, 1195), width=3)
-            _draw_text(draw, (10, 1340), "Starter Image Time:", label_font)
-            _draw_line(draw, (720, 1410, 1130, 1410), width=3)
-            _draw_text(draw, (10, 1555), "Starter Plate Time:", label_font)
-            _draw_line(draw, (720, 1625, 1130, 1625), width=3)
-            _draw_text(draw, (10, 1765), "Closed:", label_font)
-            _draw_line(draw, (240, 1835, 880, 1835), width=3)
-            return img
-
-        if fmt == "USAT":
-            img = Image.new("RGB", (1900, 1820), "white")
-            draw = ImageDraw.Draw(img)
-            label_font = _load_starter_font(64, bold=True)
-            value_font = _load_starter_font(72, bold=True)
-            _draw_text(draw, (10, 70), "PUBLICATION:", label_font)
-            _draw_text(draw, (820, 70), publication, value_font)
-            _draw_line(draw, (660, 140, 1830, 140), width=4)
-            _draw_text(draw, (10, 305), "ISSUE DATE:", label_font)
-            _draw_text(draw, (980, 305), issue_date, value_font)
-            _draw_line(draw, (660, 375, 1830, 375), width=4)
-            _draw_text(draw, (10, 565), "COLOR PAGES:", label_font)
-            _draw_text(draw, (920, 565), color_pages, value_font)
-            _draw_line(draw, (660, 635, 1830, 635), width=4)
-            _draw_text(draw, (10, 825), "# OF PLATES:", label_font)
-            _draw_text(draw, (920, 825), plates, value_font)
-            _draw_line(draw, (660, 895, 1830, 895), width=4)
-            _draw_text(draw, (10, 1115), "FIRST IMAGE:", label_font)
-            _draw_line(draw, (660, 1185, 1830, 1185), width=4)
-            _draw_text(draw, (10, 1375), "LAST IMAGE:", label_font)
-            _draw_line(draw, (660, 1445, 1830, 1445), width=4)
-            _draw_text(draw, (10, 1635), "LAST PLATE:", label_font)
-            _draw_line(draw, (660, 1705, 1830, 1705), width=4)
-            return img
-
-        img = Image.new("RGB", (2100, 1700), "white")
+        # Render exactly for 8.5 x 11 landscape at 300 DPI.
+        page_w, page_h = 3300, 2550
+        margin = 110
+        gap = 36
+        img = Image.new("RGB", (page_w, page_h), "white")
         draw = ImageDraw.Draw(img)
-        label_font = _load_starter_font(64, bold=True)
-        value_font = _load_starter_font(72, bold=True)
-        _draw_text(draw, (10, 80), "PUBLICATION:", label_font)
-        _draw_text(draw, (760, 80), publication, value_font)
-        _draw_line(draw, (560, 150, 2010, 150), width=4)
-        _draw_text(draw, (10, 360), "ISSUE DATE:", label_font)
-        _draw_text(draw, (980, 360), issue_date, value_font)
-        _draw_line(draw, (560, 430, 2010, 430), width=4)
-        _draw_text(draw, (10, 640), "COLOR PAGES:", label_font)
-        _draw_text(draw, (980, 640), color_pages, value_font)
-        _draw_line(draw, (560, 710, 2010, 710), width=4)
-        _draw_text(draw, (10, 920), "# OF PLATES:", label_font)
-        _draw_text(draw, (980, 920), plates, value_font)
-        _draw_line(draw, (560, 990, 2010, 990), width=4)
-        _draw_text(draw, (10, 1220), "LAST IMAGE:", label_font)
-        _draw_line(draw, (560, 1290, 2010, 1290), width=4)
-        _draw_text(draw, (10, 1520), "LAST PLATE:", label_font)
-        _draw_line(draw, (560, 1590, 2010, 1590), width=4)
+
+        common_fields = [
+            {"label": "Issue Date", "value": issue_date, "handwritten": False},
+            {"label": "Color Pages", "value": color_pages, "handwritten": False},
+            {"label": "Number of Plates", "value": plates, "handwritten": False},
+            {"label": "Total Pages", "value": total_pages, "handwritten": False},
+            {"label": "Last Image", "value": "", "handwritten": True},
+            {"label": "Last Plate", "value": "", "handwritten": True},
+        ]
+        extra_fields_map = {
+            "STANDARD": [],
+            "USAT": [
+                {"label": "First Image", "value": "", "handwritten": True},
+            ],
+            "NYT": [
+                {"label": "Kills", "value": "", "handwritten": True},
+                {"label": "PS (Postscripts)", "value": "", "handwritten": True},
+                {"label": "Closed", "value": "", "handwritten": True},
+                {"label": "Color Addition", "value": "", "handwritten": True},
+                {"label": "Color Drop", "value": "", "handwritten": True},
+            ],
+        }
+        extra_fields = extra_fields_map.get(fmt_key, [])
+
+        def _measure(draw_obj, text, font):
+            content = text or ""
+            try:
+                left, top, right, bottom = draw_obj.textbbox((0, 0), content, font=font)
+                return max(0, right - left), max(0, bottom - top)
+            except Exception:
+                return draw_obj.textsize(content, font=font)
+
+        def _wrap_lines(text, font, max_width, max_lines=2):
+            content = str(text or "").strip()
+            if not content:
+                return [""]
+            words = content.split()
+            if len(words) <= 1:
+                return [content]
+            lines = []
+            current = words[0]
+            for word in words[1:]:
+                candidate = f"{current} {word}"
+                if _measure(draw, candidate, font)[0] <= max_width:
+                    current = candidate
+                else:
+                    lines.append(current)
+                    current = word
+            lines.append(current)
+            while len(lines) > max_lines:
+                lines[-2] = f"{lines[-2]} {lines[-1]}".strip()
+                lines.pop()
+            return lines
+
+        def _fit_text_lines(text, max_width, max_height, max_size, min_size=28, bold=False, max_lines=2):
+            content = str(text or "").strip()
+            if not content:
+                return [""], _load_starter_font(max_size, bold=bold)
+            for size in range(int(max_size), int(min_size) - 1, -2):
+                font = _load_starter_font(size, bold=bold)
+                lines = _wrap_lines(content, font, max_width, max_lines=max_lines)
+                sizes = [_measure(draw, line, font) for line in lines]
+                widths = [w for w, _h in sizes] or [0]
+                heights = [h for _w, h in sizes] or [0]
+                line_gap = max(10, int(size * 0.18))
+                total_h = sum(heights) + line_gap * max(0, len(lines) - 1)
+                if max(widths) <= max_width and total_h <= max_height:
+                    return lines, font
+            font = _load_starter_font(min_size, bold=bold)
+            return _wrap_lines(content, font, max_width, max_lines=max_lines), font
+
+        def _draw_centered_lines(lines, font, box, fill="black"):
+            x0, y0, x1, y1 = [int(v) for v in box]
+            lines = list(lines or [""])
+            sizes = [_measure(draw, line, font) for line in lines]
+            heights = [h for _w, h in sizes] or [0]
+            font_size = getattr(font, "size", 48)
+            line_gap = max(10, int(font_size * 0.18))
+            total_h = sum(heights) + line_gap * max(0, len(lines) - 1)
+            y = y0 + max(0, int(((y1 - y0) - total_h) / 2))
+            for line, (width, height) in zip(lines, sizes):
+                x = x0 + max(0, int(((x1 - x0) - width) / 2))
+                draw.text((x, y), line or "", fill=fill, font=font)
+                y += height + line_gap
+
+        def _draw_field_block(box, label, value="", handwritten=False, label_max_size=56, value_max_size=88):
+            x0, y0, x1, y1 = [int(v) for v in box]
+            radius = 26
+            border = 6
+            label_band_h = max(104, int((y1 - y0) * 0.28))
+            draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, outline="black", width=border)
+            draw.rounded_rectangle((x0 + border, y0 + border, x1 - border, y0 + label_band_h), radius=max(8, radius - 8), fill="#f2f2f2")
+            draw.line((x0 + border, y0 + label_band_h, x1 - border, y0 + label_band_h), fill="black", width=4)
+
+            label_lines, label_font = _fit_text_lines(
+                label,
+                max_width=max(100, (x1 - x0) - 70),
+                max_height=max(40, label_band_h - 26),
+                max_size=label_max_size,
+                min_size=26,
+                bold=True,
+                max_lines=2,
+            )
+            _draw_centered_lines(label_lines, label_font, (x0 + 24, y0 + 10, x1 - 24, y0 + label_band_h - 10))
+
+            content_box = (x0 + 34, y0 + label_band_h + 18, x1 - 34, y1 - 30)
+            if handwritten:
+                line_y = y1 - 78
+                draw.line((content_box[0] + 8, line_y, content_box[2] - 8, line_y), fill="black", width=5)
+            else:
+                value_lines, value_font = _fit_text_lines(
+                    value,
+                    max_width=max(100, content_box[2] - content_box[0]),
+                    max_height=max(40, content_box[3] - content_box[1]),
+                    max_size=value_max_size,
+                    min_size=32,
+                    bold=True,
+                    max_lines=2,
+                )
+                _draw_centered_lines(value_lines, value_font, content_box)
+
+        publication_box = (margin, 70, page_w - margin, 310)
+        _draw_field_block(
+            publication_box,
+            "Publication",
+            publication,
+            handwritten=False,
+            label_max_size=62,
+            value_max_size=116,
+        )
+
+        common_top = 360
+        common_field_h = 300
+        common_rows = 3
+        common_cols = 2
+        common_field_w = int((page_w - (2 * margin) - gap) / common_cols)
+        common_fields_for_draw = list(common_fields)
+        for index, field in enumerate(common_fields_for_draw):
+            row = index // common_cols
+            col = index % common_cols
+            x0 = margin + col * (common_field_w + gap)
+            y0 = common_top + row * (common_field_h + gap)
+            x1 = x0 + common_field_w
+            y1 = y0 + common_field_h
+            _draw_field_block(
+                (x0, y0, x1, y1),
+                field.get("label", ""),
+                field.get("value", ""),
+                handwritten=bool(field.get("handwritten")),
+                label_max_size=58,
+                value_max_size=88,
+            )
+
+        extras_top = common_top + common_rows * (common_field_h + gap) + 10
+        if fmt_key == "USAT":
+            usat_top = common_top + common_rows * (common_field_h + gap)
+            extra_box = (margin, usat_top, margin + common_field_w, usat_top + common_field_h)
+            for field in extra_fields:
+                _draw_field_block(
+                    extra_box,
+                    field.get("label", ""),
+                    field.get("value", ""),
+                    handwritten=True,
+                    label_max_size=58,
+                    value_max_size=88,
+                )
+        elif fmt_key == "NYT":
+            draw.line((margin, extras_top + 78, page_w - margin, extras_top + 78), fill="black", width=4)
+            nyt_top = extras_top + 110
+            nyt_gap = 30
+            nyt_cols = 3
+            nyt_rows = 2
+            nyt_field_w = int((page_w - (2 * margin) - (nyt_gap * (nyt_cols - 1))) / nyt_cols)
+            nyt_field_h = int((page_h - margin - nyt_top - nyt_gap) / nyt_rows)
+            positions = [
+                (0, 0),
+                (0, 1),
+                (0, 2),
+                (1, 0),
+                (1, 1),
+            ]
+            for field, (row, col) in zip(extra_fields, positions):
+                x0 = margin + col * (nyt_field_w + nyt_gap)
+                y0 = nyt_top + row * (nyt_field_h + nyt_gap)
+                x1 = x0 + nyt_field_w
+                y1 = y0 + nyt_field_h
+                _draw_field_block(
+                    (x0, y0, x1, y1),
+                    field.get("label", ""),
+                    field.get("value", ""),
+                    handwritten=True,
+                    label_max_size=46,
+                    value_max_size=80,
+                )
+
         return img
 
-    def _show_starter_printer_dialog():
+    def _show_print_dialog(dialog_title="Print", default_copies=1):
         try:
             import win32print
         except Exception as e:
             raise RuntimeError(f"Missing win32print dependency: {e}")
-        printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+        try:
+            printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+        except Exception as e:
+            raise RuntimeError(f"Could not enumerate printers: {e}")
         printer_names = [info[2] for info in printers if info and len(info) >= 3 and info[2]]
         if not printer_names:
             raise RuntimeError("No printers were found on this system.")
@@ -1465,55 +1612,66 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             default_printer = None
         if default_printer not in printer_names:
             default_printer = printer_names[0]
+
         result = {}
         dialog = tk.Toplevel(win)
-        dialog.title("Print Starter")
+        dialog.title(dialog_title or "Print")
         dialog.transient(win)
         dialog.resizable(False, False)
-        remember_window_geometry(dialog, "starter_print_dialog", default_geometry="560x150", minsize=(520, 150))
+        remember_window_geometry(dialog, "print_dialog", default_geometry="620x150", minsize=(560, 150))
         dialog.grab_set()
+
         printer_var = tk.StringVar(value=default_printer)
-        copies_var = tk.IntVar(value=1)
+        copies_var = tk.IntVar(value=max(1, int(default_copies or 1)))
+
         ttk.Label(dialog, text="Printer:").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
         printer_combo = ttk.Combobox(dialog, textvariable=printer_var, values=printer_names, state="readonly", width=50)
         printer_combo.grid(row=0, column=1, sticky="ew", padx=12, pady=(12, 4))
         printer_combo.focus_set()
+
         ttk.Label(dialog, text="Copies:").grid(row=1, column=0, sticky="w", padx=12, pady=4)
         copies_spin = ttk.Spinbox(dialog, from_=1, to=999, textvariable=copies_var, width=8)
         copies_spin.grid(row=1, column=1, sticky="w", padx=12, pady=4)
         copies_spin.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
-        ttk.Label(dialog, text="Orientation: Landscape", font=(None, 10, "bold")).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 4))
+
         button_frame = ttk.Frame(dialog)
-        button_frame.grid(row=3, column=0, columnspan=2, pady=(8, 12), padx=12, sticky="e")
+        button_frame.grid(row=2, column=0, columnspan=2, pady=(8, 12), padx=12, sticky="e")
+
         def _on_print():
-            result["printer"] = printer_var.get()
+            result['printer'] = printer_var.get()
             try:
-                result["copies"] = max(1, int(copies_var.get()))
+                result['copies'] = max(1, int(copies_var.get()))
             except Exception:
-                result["copies"] = 1
+                result['copies'] = 1
             dialog.destroy()
+
         def _on_cancel():
             dialog.destroy()
+
         ttk.Button(button_frame, text="Print", command=_on_print, width=10).pack(side="left", padx=(0, 8))
         ttk.Button(button_frame, text="Cancel", command=_on_cancel, width=10).pack(side="left")
         dialog.protocol("WM_DELETE_WINDOW", _on_cancel)
         dialog.columnconfigure(1, weight=1)
         win.wait_window(dialog)
-        if "printer" not in result:
+        if 'printer' not in result:
             return None
-        return result["printer"], result["copies"]
+        return result['printer'], result['copies']
 
-    def _direct_print_image(img_path, printer_name, copies, orientation="Landscape", margins_inches=None):
+    def _show_starter_printer_dialog():
+        return _show_print_dialog("Print", default_copies=1)
+
+    def _direct_print_image(img_path, printer_name, copies, orientation="Landscape", margins_inches=None, align_top=False):
         try:
             import win32ui
             import win32con
-            import win32api
-            import tempfile
-            import time
-            from PIL import Image, ImageWin
+            import win32print
+            from PIL import Image, ImageWin, ImageChops
             import traceback
         except Exception as e:
             raise RuntimeError(f"Missing dependency: {e}")
+
+        dc = None
+        printer_handle = None
         try:
             img = Image.open(img_path)
             img.load()
@@ -1524,55 +1682,131 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 img = white_bg
             elif img.mode != 'RGB':
                 img = img.convert('RGB')
-            if orientation == 'Landscape':
-                img = img.transpose(Image.ROTATE_90)
+
+            # Trim white outer padding so the print fills the page more tightly
+            # while still respecting the requested printer margins.
             try:
-                fd, shell_path = tempfile.mkstemp(suffix='.bmp')
-                os.close(fd)
-                img.save(shell_path, format='BMP')
-                for _ in range(max(1, copies)):
-                    win32api.ShellExecute(0, 'printto', shell_path, f'\"{printer_name}\"', '.', 0)
-                    time.sleep(1.5)
-                return True
+                bg = Image.new('RGB', img.size, 'white')
+                diff = ImageChops.difference(img, bg)
+                bbox = diff.getbbox()
+                if bbox:
+                    pad = 4
+                    left = max(0, int(bbox[0]) - pad)
+                    top = max(0, int(bbox[1]) - pad)
+                    right = min(int(img.size[0]), int(bbox[2]) + pad)
+                    bottom = min(int(img.size[1]), int(bbox[3]) + pad)
+                    if right > left and bottom > top:
+                        img = img.crop((left, top, right, bottom))
             except Exception:
                 pass
+
+            orientation_text = str(orientation or 'Landscape').strip().title()
+            if orientation_text not in ('Landscape', 'Portrait'):
+                orientation_text = 'Landscape'
+
+            # Force every landscape print job to rotate 90 degrees so the
+            # physical print comes out in landscape on this pressroom setup.
+            if orientation_text == 'Landscape':
+                img = img.transpose(Image.ROTATE_90)
+            elif orientation_text == 'Portrait' and img.width > img.height:
+                img = img.transpose(Image.ROTATE_90)
+
+            margins_inches = margins_inches or {"left": 0.15, "top": 0.15, "right": 0.15, "bottom": 0.15}
+
+            # Force the printer DEVMODE orientation to match the requested output.
+            devmode = None
+            try:
+                printer_handle = win32print.OpenPrinter(printer_name)
+                printer_info = win32print.GetPrinter(printer_handle, 2)
+                if isinstance(printer_info, dict):
+                    devmode = printer_info.get('pDevMode')
+                if devmode is not None:
+                    requested_orientation = 1 if orientation_text == 'Landscape' else 2
+                    for attr in ('Orientation', 'dmOrientation'):
+                        try:
+                            setattr(devmode, attr, requested_orientation)
+                            break
+                        except Exception:
+                            pass
+                    for attr in ('Fields', 'dmFields'):
+                        try:
+                            setattr(devmode, attr, int(getattr(devmode, attr)) | int(win32con.DM_ORIENTATION))
+                            break
+                        except Exception:
+                            pass
+            except Exception:
+                devmode = None
+
             dc = win32ui.CreateDC()
-            dc.CreatePrinterDC(printer_name)
+            created_dc = False
+            if devmode is not None:
+                for create_args in (
+                    ("WINSPOOL", printer_name, None, devmode),
+                    (None, printer_name, None, devmode),
+                ):
+                    try:
+                        dc.CreateDC(*create_args)
+                        created_dc = True
+                        break
+                    except Exception:
+                        continue
+            if not created_dc:
+                dc.CreatePrinterDC(printer_name)
+
             printable_area = (dc.GetDeviceCaps(win32con.HORZRES), dc.GetDeviceCaps(win32con.VERTRES))
             offset_x = dc.GetDeviceCaps(win32con.PHYSICALOFFSETX)
             offset_y = dc.GetDeviceCaps(win32con.PHYSICALOFFSETY)
             dpi_x = max(1, dc.GetDeviceCaps(win32con.LOGPIXELSX))
             dpi_y = max(1, dc.GetDeviceCaps(win32con.LOGPIXELSY))
-            margins_inches = margins_inches or {"left": 0.15, "top": 0.15, "right": 0.15, "bottom": 0.15}
+
+            # Keep the already-rotated image orientation stable.
+            if orientation_text == 'Portrait' and printable_area[0] > printable_area[1] and img.width > img.height:
+                img = img.transpose(Image.ROTATE_90)
+
             left_margin = max(0, int(round(float(margins_inches.get("left", 0.15)) * dpi_x)))
             top_margin = max(0, int(round(float(margins_inches.get("top", 0.15)) * dpi_y)))
             right_margin = max(0, int(round(float(margins_inches.get("right", 0.15)) * dpi_x)))
             bottom_margin = max(0, int(round(float(margins_inches.get("bottom", 0.15)) * dpi_y)))
             safe_w = max(1, printable_area[0] - left_margin - right_margin)
             safe_h = max(1, printable_area[1] - top_margin - bottom_margin)
-            scale = min(safe_w / img.size[0], safe_h / img.size[1])
+            scale = min(safe_w / float(img.size[0]), safe_h / float(img.size[1]))
             scaled = img.resize((max(1, int(img.size[0] * scale)), max(1, int(img.size[1] * scale))), Image.LANCZOS)
             dib = ImageWin.Dib(scaled)
-            x = int(offset_x + left_margin + ((safe_w - scaled.size[0]) / 2))
-            y = int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
+            # On this landscape print path the image is rotated before printing,
+            # so a "top-aligned" starter sheet needs to anchor on the leading edge
+            # after rotation. That means using the X position for landscape starter
+            # alignment instead of only changing Y.
+            if align_top and orientation_text == 'Landscape':
+                x = int(offset_x + left_margin)
+                y = int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
+            else:
+                x = int(offset_x + left_margin + ((safe_w - scaled.size[0]) / 2))
+                y = int(offset_y + top_margin) if align_top else int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
+
             dc.StartDoc(img_path)
-            for _ in range(max(1, copies)):
+            for _ in range(max(1, int(copies or 1))):
                 dc.StartPage()
                 dib.draw(dc.GetHandleOutput(), (x, y, x + scaled.size[0], y + scaled.size[1]))
                 dc.EndPage()
             dc.EndDoc()
-            dc.DeleteDC()
             return True
         except Exception as e:
             try:
                 err = traceback.format_exc()
             except Exception:
                 err = str(e)
+            raise RuntimeError(err)
+        finally:
             try:
-                dc.DeleteDC()
+                if dc is not None:
+                    dc.DeleteDC()
             except Exception:
                 pass
-            raise RuntimeError(err)
+            try:
+                if printer_handle is not None:
+                    win32print.ClosePrinter(printer_handle)
+            except Exception:
+                pass
 
     def print_starter_sheet():
         if template_mode:
@@ -1583,7 +1817,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             import tempfile
             fd, path = tempfile.mkstemp(suffix=".png")
             os.close(fd)
-            img.save(path, format="PNG")
+            img.save(path, format="PNG", dpi=(300, 300))
         except Exception as e:
             messagebox.showerror("Starter Sheet", str(e))
             return
@@ -1592,10 +1826,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             error_message = None
             if os.name == 'nt':
                 try:
-                    selection = _show_starter_printer_dialog()
+                    selection = _show_print_dialog("Print", default_copies=1)
                     if selection:
                         printer_name, copies = selection
-                        printed = _direct_print_image(path, printer_name, copies, orientation="Landscape")
+                        printed = _direct_print_image(path, printer_name, copies, orientation="Landscape", align_top=True)
                 except Exception as e:
                     error_message = str(e)
             if not printed:
@@ -1997,109 +2231,21 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             import tempfile, os
             fd, path = tempfile.mkstemp(suffix=".png")
             os.close(fd)
-            img.save(path, format="PNG")
+            img.save(path, format="PNG", dpi=(300, 300))
             direct_print_error = {"message": None}
             def _show_printer_dialog():
                 try:
-                    import win32print
+                    return _show_print_dialog("Print", default_copies=5)
                 except Exception as e:
-                    direct_print_error["message"] = f"Missing win32print dependency: {e}"
+                    direct_print_error['message'] = str(e)
                     return None
-                try:
-                    printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
-                except Exception as e:
-                    direct_print_error["message"] = f"Could not enumerate printers: {e}"
-                    return None
-                printer_names = [info[2] for info in printers if info and len(info) >= 3 and info[2]]
-                if not printer_names:
-                    direct_print_error["message"] = "No printers were found on this system."
-                    return None
-                try:
-                    default_printer = win32print.GetDefaultPrinter()
-                except Exception:
-                    default_printer = None
-                if default_printer not in printer_names:
-                    default_printer = printer_names[0]
-                result = {}
-                dialog = tk.Toplevel(win)
-                dialog.title("Print")
-                dialog.transient(win)
-                dialog.resizable(False, False)
-                remember_window_geometry(dialog, "layout_print_dialog", default_geometry="620x240", minsize=(560, 220))
-                dialog.grab_set()
-                printer_var = tk.StringVar(value=default_printer)
-                copies_var = tk.IntVar(value=5)
-                orientation_var = tk.StringVar(value="Landscape")
-                left_margin_var = tk.StringVar(value="0.15")
-                top_margin_var = tk.StringVar(value="0.15")
-                right_margin_var = tk.StringVar(value="0.15")
-                bottom_margin_var = tk.StringVar(value="0.15")
-                ttk.Label(dialog, text="Printer:").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
-                printer_combo = ttk.Combobox(dialog, textvariable=printer_var, values=printer_names, state="readonly", width=50)
-                printer_combo.grid(row=0, column=1, sticky="ew", padx=12, pady=(12, 4))
-                printer_combo.focus_set()
-                ttk.Label(dialog, text="Copies:").grid(row=1, column=0, sticky="w", padx=12, pady=4)
-                copies_spin_print = ttk.Spinbox(dialog, from_=1, to=999, textvariable=copies_var, width=8)
-                copies_spin_print.grid(row=1, column=1, sticky="w", padx=12, pady=4)
-                copies_spin_print.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
-                ttk.Label(dialog, text="Orientation:").grid(row=2, column=0, sticky="w", padx=12, pady=4)
-                orient_frame = ttk.Frame(dialog)
-                orient_frame.grid(row=2, column=1, sticky="w", padx=12, pady=4)
-                ttk.Radiobutton(orient_frame, text="Landscape", variable=orientation_var, value="Landscape").pack(side="left")
-                ttk.Radiobutton(orient_frame, text="Portrait", variable=orientation_var, value="Portrait").pack(side="left", padx=(12, 0))
-                ttk.Label(dialog, text="Margins (inches):").grid(row=3, column=0, sticky="nw", padx=12, pady=4)
-                margins_frame = ttk.Frame(dialog)
-                margins_frame.grid(row=3, column=1, sticky="w", padx=12, pady=4)
-                ttk.Label(margins_frame, text="Left").grid(row=0, column=0, sticky="w")
-                left_spin = ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=left_margin_var, width=6)
-                left_spin.grid(row=0, column=1, padx=(6, 12), pady=2)
-                left_spin.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
-                ttk.Label(margins_frame, text="Top").grid(row=0, column=2, sticky="w")
-                top_spin = ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=top_margin_var, width=6)
-                top_spin.grid(row=0, column=3, padx=(6, 0), pady=2)
-                top_spin.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
-                ttk.Label(margins_frame, text="Right").grid(row=1, column=0, sticky="w")
-                right_spin = ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=right_margin_var, width=6)
-                right_spin.grid(row=1, column=1, padx=(6, 12), pady=2)
-                right_spin.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
-                ttk.Label(margins_frame, text="Bottom").grid(row=1, column=2, sticky="w")
-                bottom_spin = ttk.Spinbox(margins_frame, from_=0.0, to=2.0, increment=0.05, textvariable=bottom_margin_var, width=6)
-                bottom_spin.grid(row=1, column=3, padx=(6, 0), pady=2)
-                bottom_spin.bind('<FocusIn>', lambda e: e.widget.select_range(0, 'end'))
-                button_frame = ttk.Frame(dialog)
-                button_frame.grid(row=4, column=0, columnspan=2, pady=(8, 12), padx=12, sticky="e")
-                def _parse_margin(value, default=0.15):
-                    try:
-                        return max(0.0, float(str(value).strip()))
-                    except Exception:
-                        return default
-                def _on_print():
-                    result['printer'] = printer_var.get()
-                    try:
-                        result['copies'] = max(1, int(copies_var.get()))
-                    except Exception:
-                        result['copies'] = 1
-                    result['orientation'] = orientation_var.get()
-                    result['margins_inches'] = {'left': _parse_margin(left_margin_var.get()), 'top': _parse_margin(top_margin_var.get()), 'right': _parse_margin(right_margin_var.get()), 'bottom': _parse_margin(bottom_margin_var.get())}
-                    dialog.destroy()
-                def _on_cancel():
-                    dialog.destroy()
-                ttk.Button(button_frame, text="Print", command=_on_print, width=10).pack(side="left", padx=(0, 8))
-                ttk.Button(button_frame, text="Cancel", command=_on_cancel, width=10).pack(side="left")
-                dialog.protocol("WM_DELETE_WINDOW", _on_cancel)
-                dialog.columnconfigure(1, weight=1)
-                win.wait_window(dialog)
-                if 'printer' not in result:
-                    direct_print_error['message'] = "Printer selection was canceled."
-                    return None
-                return result['printer'], result['copies'], result['orientation'], result['margins_inches']
             printed = False
             if os.name == 'nt':
                 try:
                     printer_selection = _show_printer_dialog()
                     if printer_selection:
-                        printer_name, copies, orientation, margins_inches = printer_selection
-                        printed = _direct_print_image(path, printer_name, copies, orientation=orientation, margins_inches=margins_inches)
+                        printer_name, copies = printer_selection
+                        printed = _direct_print_image(path, printer_name, copies, orientation="Landscape", align_top=False)
                 except Exception as e:
                     direct_print_error['message'] = str(e)
                     printed = False

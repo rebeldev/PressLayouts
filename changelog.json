@@ -1,6 +1,45 @@
 {
-  "current_version": "1.1.4",
+  "current_version": "1.1.6",
   "versions": [
+    {
+      "version": "1.1.6",
+      "released": "6-12-2026",
+      "summary": "Starter sheet refinements for publication header, total pages, and format-specific field adjustments",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added an auto-populated Total Pages field to the Standard, USAT, and NYT starter sheet formats.",
+            "Replaced the starter sheet title label on all three starter sheet formats with a full-width Publication box."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the USAT starter sheet so the First Image box matches the Last Image box size and is positioned directly below it on the left side."
+          ]
+        },
+        {
+          "category": "Removed",
+          "items": [
+            "Removed the NYT CLOSE DETAILS header line from the NYT starter sheet format."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.5",
+      "released": "6-12-2026",
+      "summary": "All new starter sheets for all 3 formats",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added all new starter sheet layouts for the Standard, USAT, and NYT formats."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.1.4",
       "released": "6-12-2026",
