@@ -1,6 +1,47 @@
 {
-  "current_version": "1.1.6",
+  "current_version": "1.1.8",
   "versions": [
+    {
+      "version": "1.1.8",
+      "released": "6-12-2026",
+      "summary": "Starter sheet color change boxes expanded to every format with cleaner aligned sizing and placement.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added Color Addition and Color Drop boxes to the Standard and USAT starter sheet formats."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated all three starter sheet formats so Color Addition and Color Drop match the size of Last Image and Last Plate and sit directly underneath them.",
+            "Adjusted the remaining USAT and NYT starter sheet boxes to align cleanly with the same left and right column widths used by the main starter sheet rows."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.7",
+      "released": "6-12-2026",
+      "summary": "Automatic update checks with restart prompt for newer program versions.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added an automatic changelog version check that runs every 10 minutes while the main launcher is open.",
+            "Added an update dialog that tells users when they are not running the latest version and reminds them to save their work before restarting.",
+            "Added Restart and Cancel buttons to the update dialog."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the launcher restart flow so choosing Restart closes the current instance and relaunches the program using the latest Python files on disk."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.1.6",
       "released": "6-12-2026",

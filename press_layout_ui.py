@@ -5,6 +5,7 @@ import glob
 import json
 import calendar
 import re
+import sys
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -1406,6 +1407,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             {"label": "Last Image", "value": "", "handwritten": True},
             {"label": "Last Plate", "value": "", "handwritten": True},
         ]
+        color_change_fields = [
+            {"label": "Color Addition", "value": "", "handwritten": True},
+            {"label": "Color Drop", "value": "", "handwritten": True},
+        ]
         extra_fields_map = {
             "STANDARD": [],
             "USAT": [
@@ -1415,8 +1420,6 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 {"label": "Kills", "value": "", "handwritten": True},
                 {"label": "PS (Postscripts)", "value": "", "handwritten": True},
                 {"label": "Closed", "value": "", "handwritten": True},
-                {"label": "Color Addition", "value": "", "handwritten": True},
-                {"label": "Color Drop", "value": "", "handwritten": True},
             ],
         }
         extra_fields = extra_fields_map.get(fmt_key, [])
@@ -1550,46 +1553,56 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 value_max_size=88,
             )
 
-        extras_top = common_top + common_rows * (common_field_h + gap) + 10
-        if fmt_key == "USAT":
-            usat_top = common_top + common_rows * (common_field_h + gap)
-            extra_box = (margin, usat_top, margin + common_field_w, usat_top + common_field_h)
-            for field in extra_fields:
-                _draw_field_block(
-                    extra_box,
-                    field.get("label", ""),
-                    field.get("value", ""),
-                    handwritten=True,
-                    label_max_size=58,
-                    value_max_size=88,
-                )
-        elif fmt_key == "NYT":
+        color_change_top = common_top + common_rows * (common_field_h + gap)
+        for index, field in enumerate(color_change_fields):
+            col = index % common_cols
+            x0 = margin + col * (common_field_w + gap)
+            y0 = color_change_top
+            x1 = x0 + common_field_w
+            y1 = y0 + common_field_h
+            _draw_field_block(
+                (x0, y0, x1, y1),
+                field.get("label", ""),
+                field.get("value", ""),
+                handwritten=True,
+                label_max_size=58,
+                value_max_size=88,
+            )
+
+        extras_top = color_change_top + common_field_h + gap + 10
+        if fmt_key == "USAT" and extra_fields:
+            field = extra_fields[0]
+            extra_box = (margin, extras_top, margin + common_field_w, extras_top + common_field_h)
+            _draw_field_block(
+                extra_box,
+                field.get("label", ""),
+                field.get("value", ""),
+                handwritten=True,
+                label_max_size=58,
+                value_max_size=88,
+            )
+        elif fmt_key == "NYT" and extra_fields:
             draw.line((margin, extras_top + 78, page_w - margin, extras_top + 78), fill="black", width=4)
             nyt_top = extras_top + 110
-            nyt_gap = 30
-            nyt_cols = 3
-            nyt_rows = 2
-            nyt_field_w = int((page_w - (2 * margin) - (nyt_gap * (nyt_cols - 1))) / nyt_cols)
-            nyt_field_h = int((page_h - margin - nyt_top - nyt_gap) / nyt_rows)
-            positions = [
-                (0, 0),
-                (0, 1),
-                (0, 2),
-                (1, 0),
-                (1, 1),
+            nyt_row1_y0 = nyt_top
+            nyt_row1_y1 = nyt_row1_y0 + common_field_h
+            nyt_row2_y0 = nyt_row1_y1 + gap
+            nyt_row2_y1 = nyt_row2_y0 + common_field_h
+            nyt_positions = [
+                (margin, nyt_row1_y0, margin + common_field_w, nyt_row1_y1),
+                (margin + common_field_w + gap, nyt_row1_y0, page_w - margin, nyt_row1_y1),
+                (margin, nyt_row2_y0, page_w - margin, nyt_row2_y1),
             ]
-            for field, (row, col) in zip(extra_fields, positions):
-                x0 = margin + col * (nyt_field_w + nyt_gap)
-                y0 = nyt_top + row * (nyt_field_h + nyt_gap)
-                x1 = x0 + nyt_field_w
-                y1 = y0 + nyt_field_h
+            nyt_label_sizes = [46, 46, 50]
+            nyt_value_sizes = [80, 80, 84]
+            for field, box, label_size, value_size in zip(extra_fields, nyt_positions, nyt_label_sizes, nyt_value_sizes):
                 _draw_field_block(
-                    (x0, y0, x1, y1),
+                    box,
                     field.get("label", ""),
                     field.get("value", ""),
                     handwritten=True,
-                    label_max_size=46,
-                    value_max_size=80,
+                    label_max_size=label_size,
+                    value_max_size=value_size,
                 )
 
         return img
@@ -5000,6 +5013,152 @@ def get_version_label(changelog_data=None):
         version = f"v{version}"
     return version
 
+CHANGELOG_CHECK_INTERVAL_MS = 1 * 60 * 1000
+
+def _normalize_version_text(version_value):
+    text = str(version_value or "").strip()
+    if text.lower().startswith("v"):
+        text = text[1:]
+    return text.strip()
+
+def _format_version_label(version_value):
+    version_text = _normalize_version_text(version_value)
+    return f"v{version_text}" if version_text else "v0.0.0"
+
+def _version_sort_key(version_value):
+    normalized = _normalize_version_text(version_value)
+    if not normalized:
+        return tuple()
+    key = []
+    for part in re.split(r"([0-9]+)", normalized):
+        if not part:
+            continue
+        if part.isdigit():
+            key.append((0, int(part)))
+        else:
+            key.append((1, part.lower()))
+    return tuple(key)
+
+def _is_version_newer(candidate_version, baseline_version):
+    candidate = _normalize_version_text(candidate_version)
+    baseline = _normalize_version_text(baseline_version)
+    if not candidate or not baseline or candidate == baseline:
+        return False
+    return _version_sort_key(candidate) > _version_sort_key(baseline)
+
+def _get_changelog_current_version_value(changelog_data=None):
+    data = changelog_data if isinstance(changelog_data, dict) else load_changelog_data()
+    current_version = _normalize_version_text(data.get("current_version")) if isinstance(data, dict) else ""
+    if current_version:
+        return current_version
+    entry = get_current_changelog_entry(data)
+    return _normalize_version_text(entry.get("version"))
+
+def restart_press_layout_program(root=None):
+    python_executable = sys.executable or "python"
+    if getattr(sys, "frozen", False):
+        restart_args = [python_executable]
+    else:
+        script_path = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else os.path.join(MAIN_DIR, "press_layout_entry.py")
+        restart_args = [python_executable, script_path]
+        if len(sys.argv) > 1:
+            restart_args.extend(sys.argv[1:])
+    try:
+        os.chdir(MAIN_DIR)
+    except Exception:
+        pass
+    if root is not None:
+        try:
+            _persist_bound_preview_panes(root)
+        except Exception:
+            pass
+        try:
+            root.update_idletasks()
+        except Exception:
+            pass
+        try:
+            root.destroy()
+        except Exception:
+            pass
+    os.execv(python_executable, restart_args)
+
+def show_restart_required_dialog(parent, running_version, latest_version):
+    existing = getattr(parent, "_restart_required_dialog", None)
+    try:
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return existing
+    except Exception:
+        pass
+
+    dialog = tk.Toplevel(parent)
+    parent._restart_required_dialog = dialog
+    dialog.title("Update Available")
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    try:
+        dialog.grab_set()
+    except Exception:
+        pass
+    dialog.resizable(False, False)
+    remember_window_geometry(dialog, "restart_required_dialog", default_geometry="520x220", minsize=(520, 220))
+
+    body = ttk.Frame(dialog, padding=16)
+    body.pack(fill="both", expand=True)
+    body.columnconfigure(0, weight=1)
+
+    ttk.Label(body, text="A newer version of Press Layouts is available.", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    message = (
+        f"You are using {_format_version_label(running_version)}, but {_format_version_label(latest_version)} is now available.\n\n"
+        "Please save your work and restart the program to load the latest version."
+    )
+    ttk.Label(body, text=message, justify="left", wraplength=460).grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+    button_row = ttk.Frame(body)
+    button_row.grid(row=2, column=0, sticky="e", pady=(18, 0))
+
+    def _close_dialog():
+        try:
+            dialog.grab_release()
+        except Exception:
+            pass
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+        if getattr(parent, "_restart_required_dialog", None) is dialog:
+            parent._restart_required_dialog = None
+
+    def _restart_now():
+        _close_dialog()
+        try:
+            restart_press_layout_program(parent)
+        except Exception as exc:
+            messagebox.showerror("Restart Failed", f"Could not restart Press Layouts.\n\n{exc}")
+
+    ttk.Button(button_row, text="Restart", command=_restart_now, width=12).pack(side="left", padx=(0, 8))
+    ttk.Button(button_row, text="Cancel", command=_close_dialog, width=12).pack(side="left")
+
+    dialog.protocol("WM_DELETE_WINDOW", _close_dialog)
+    dialog.bind("<Escape>", lambda _event: _close_dialog())
+    try:
+        dialog.lift()
+        dialog.focus_force()
+    except Exception:
+        pass
+    return dialog
+
+def check_for_required_restart(parent, running_version):
+    latest_version = _get_changelog_current_version_value()
+    if _is_version_newer(latest_version, running_version):
+        show_restart_required_dialog(parent, running_version, latest_version)
+        return True, latest_version
+    return False, latest_version
+
 def _normalize_change_sections(entry):
     sections = entry.get("changes") if isinstance(entry, dict) else None
     if not isinstance(sections, list) or not sections:
@@ -5313,7 +5472,9 @@ def build_main_launcher():
     frame.columnconfigure(0, weight=1)
     ttk.Label(frame, text="Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
     changelog_data = load_changelog_data()
-    version_label_var = tk.StringVar(value=get_version_label(changelog_data))
+    running_version = _get_changelog_current_version_value(changelog_data)
+    version_check_job = {"id": None}
+    version_label_var = tk.StringVar(value=_format_version_label(running_version))
     version_label = ttk.Label(frame, textvariable=version_label_var, style="LauncherVersion.TLabel", font=(None, 10))
     version_label.grid(row=0, column=0, sticky="e")
     version_label.configure(cursor="hand2")
@@ -5885,12 +6046,46 @@ def build_main_launcher():
 
     ttk.Button(left_btns, text="Print Starter", command=_print_selected_starter, width=14).pack(side="left", padx=(8, 8))
     ttk.Button(left_btns, text="Print Layout", command=_print_selected_layout, width=12).pack(side="left", padx=(0, 8))
+
+    def schedule_version_check(delay_ms=CHANGELOG_CHECK_INTERVAL_MS):
+        try:
+            if version_check_job["id"] is not None:
+                root.after_cancel(version_check_job["id"])
+        except Exception:
+            pass
+        try:
+            version_check_job["id"] = root.after(int(delay_ms), run_version_check)
+        except Exception:
+            version_check_job["id"] = None
+
+    def run_version_check():
+        version_check_job["id"] = None
+        try:
+            check_for_required_restart(root, running_version)
+        finally:
+            try:
+                if root.winfo_exists():
+                    schedule_version_check(CHANGELOG_CHECK_INTERVAL_MS)
+            except Exception:
+                pass
+
     def on_close():  
         try:  
             if refresh_job["id"] is not None:  
                 root.after_cancel(refresh_job["id"])  
         except Exception:  
             pass  
+        try:
+            if version_check_job["id"] is not None:
+                root.after_cancel(version_check_job["id"])
+        except Exception:
+            pass
+        try:
+            restart_dialog = getattr(root, "_restart_required_dialog", None)
+            if restart_dialog is not None and restart_dialog.winfo_exists():
+                restart_dialog.destroy()
+        except Exception:
+            pass
         _persist_bound_preview_panes(root)
         close_preview()
         root.destroy()  
@@ -5899,6 +6094,7 @@ def build_main_launcher():
     root.protocol("WM_DELETE_WINDOW", on_close)  
     refresh(preserve_state=False)  
     schedule_refresh()  
+    schedule_version_check()
     root.mainloop()
 
 # ===== END: launchers.py =====
