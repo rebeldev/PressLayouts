@@ -2187,6 +2187,13 @@ def collect_layout_data(ctx):
         data["units"].append({"label": u["label"], "section": section, "grid": grid})
 
     if not ctx.get("template_mode", False):
+        try:
+            starter_format_var = ctx.get("starter_format_var")
+            starter_format = (starter_format_var.get() or "").strip() if starter_format_var else ""
+        except Exception:
+            starter_format = ""
+        if starter_format:
+            data["starter_format"] = starter_format
         data["color_cells"] = [
             {"unit": unit, "r": int(r), "c": int(c)}
             for (unit, r, c) in sorted(ctx.get("color_cells", set()))
@@ -2456,6 +2463,52 @@ def _template_exists_for_imposition(ctx) -> bool:
             return True
 
     return False
+def save_regular_from_layout(ctx, parent=None):
+    """Save the current layout as a regular using the regular suggested filename."""
+    try:
+        ensure_dir(REGULAR_DIR)
+
+        data = collect_layout_data(ctx)
+        data["issue_date"] = ""
+
+        errors = validate_layout_data_for_mode(
+            data,
+            template_mode=False,
+            regular_mode=True,
+        )
+        if errors:
+            messagebox.showerror(
+                "Save as Regular Failed",
+                "Please fix the following before saving as a regular:\n\n" + "\n".join(f"• {item}" for item in errors),
+                parent=parent,
+            )
+            return False, None
+
+        regular_filename = build_regular_filename_suggestion(ctx)
+        regular_path = os.path.join(REGULAR_DIR, regular_filename)
+
+        if os.path.exists(regular_path):
+            base, ext = os.path.splitext(regular_filename)
+            counter = 1
+            while os.path.exists(os.path.join(REGULAR_DIR, f"{base}_{counter}{ext}")):
+                counter += 1
+            regular_filename = f"{base}_{counter}{ext}"
+            regular_path = os.path.join(REGULAR_DIR, regular_filename)
+
+        data["name"] = os.path.splitext(regular_filename)[0]
+        safe_write_json(regular_path, data)
+        try:
+            if parent is not None:
+                _save_preview_for_current_window(parent, regular_path)
+        except Exception:
+            pass
+        messagebox.showinfo("Regular Saved", f"Regular saved as:\n{regular_filename}", parent=parent)
+        return True, regular_path
+    except Exception as e:
+        messagebox.showerror("Save as Regular Failed", f"Could not save regular:\n{str(e)}", parent=parent)
+        return False, None
+
+
 def save_template_from_layout(ctx):
     """Save the current layout as a template (without issue_date, product, color_cells)."""
     try:

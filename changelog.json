@@ -1,6 +1,186 @@
 {
-  "current_version": "1.1.17",
+  "current_version": "1.1.31",
   "versions": [
+    {
+      "version": "1.1.31",
+      "released": "6-15-2026",
+      "summary": "Added a Save as Regular action to the layout editor.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a Save as Regular button to the layout editor that saves the current layout as a regular using the regular suggested filename in the regulars directory."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.30",
+      "released": "6-15-2026",
+      "summary": "Touch ALL and save/save-as now share the same NYT and CO-aware USAT starter-format rules.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Updated Touch ALL so layouts whose product name contains NYT are set to the NYT starter format, and layouts whose product name contains USAT without the standalone word CO are set to the USAT starter format; all other layouts keep their existing starter format.",
+            "Updated layout save/save-as prompting so the USAT starter suggestion only appears when the product name contains USAT and does not contain the standalone word CO, while NYT still suggests the NYT starter format."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.29",
+      "released": "6-15-2026",
+      "summary": "Audited non-editor save paths and hardened starter format persistence across both editor and touch workflows.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Updated collect_layout_data so non-template saves persist starter_format directly whenever the live or headless context provides it, reducing reliance on follow-up file rewrites.",
+            "Updated headless layout contexts used by touch/cleanup workflows to carry starter_format, hardening future non-editor save paths against dropping that persisted layout field."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.28",
+      "released": "6-15-2026",
+      "summary": "Touch ALL now preserves each layout's existing starter format instead of resetting it to Standard.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Updated touch/cleanup normalization so layout files keep their existing starter_format value when Touch ALL re-saves them, preventing layouts from being reset back to Standard."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.27",
+      "released": "6-15-2026",
+      "summary": "Section renames in the layout editor now resolve unit assignments by displayed section names before canonical section parsing.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Made section renaming in the layout editor more reliable by resolving unit section assignments against the actual displayed section names first, preventing custom letter-based section names from being misread as canonical section ids and unintentionally clearing or misrouting unit assignments."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.25",
+      "released": "6-15-2026",
+      "summary": "Previews and printed layouts now share the same render path.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the layout editor so both preview images and printed layouts now use the same print-image renderer, with the preview continuing to show only the top 50 percent of that rendered image."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.24",
+      "released": "6-15-2026",
+      "summary": "Printed layouts now use the same taller unit color-box height as previews.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Updated the print renderer used by the layout editor so the color boxes below each unit use the same taller height based on grid cell size that previews already use."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.23",
+      "released": "6-15-2026",
+      "summary": "Color swatch boxes under each unit now render taller in previews and printed layouts.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "In the preview and printed layout renderers, the color boxes below each unit now use a height based on the layout grid cell height so they appear vertically larger and closer to the same height as the unit grid boxes."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.22",
+      "released": "6-15-2026",
+      "summary": "Fixed grouped launcher folder counts so template and regular treeviews load correctly again.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Resolved a group-count initialization error that could prevent the New Layout, Template Editor, and Regular Editor treeviews from loading templates and regulars after the bold counted folder update."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.21",
+      "released": "6-15-2026",
+      "summary": "Grouped treeviews now show bold counted folders, and the New Layout template list stretches correctly again.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Restored the New Layout template treeview layout so it stretches with the window again by reapplying the missing frame row and column weights."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated grouped rows in the main launcher, New Layout window, Template Editor, and Regular Editor to display bold folder-style labels with item counts for each press, format, and issue-date group."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.20",
+      "released": "6-15-2026",
+      "summary": "Grouped fields now act only as folders while sortable columns focus on production details.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the Template Editor and the New Layout template picker so press and format remain grouping folders only, while the sortable template columns are now Sections, Pages, and Last Saved.",
+            "Updated the Regular Editor and the New Layout regular picker so press and format remain grouping folders only, while the sortable regular columns are now Pages, Color Pages, Plates, and Last Saved.",
+            "Updated the main launcher so issue dates remain grouping folders only and the tree column now shows Product names for child rows while Press, Format, Pages, Color Pages, Plates, and Last Saved remain sortable."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.19",
+      "released": "6-15-2026",
+      "summary": "New Layout launcher now groups template and regular pickers by press and format.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the New Layout window so both the template picker and regular layout picker group rows by press and then by format, with all groups expanded by default."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.18",
+      "released": "6-15-2026",
+      "summary": "Launcher trees now group layouts by issue date and templates and regulars by press and format.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the main launcher treeview to group layouts under issue-date folders with tomorrow expanded by default and the remaining dates collapsed by default.",
+            "Updated the Template Editor and Regular Editor treeviews to group items first by press and then by format, with all groups expanded by default."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.1.17",
       "released": "6-12-2026",

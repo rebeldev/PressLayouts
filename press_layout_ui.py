@@ -234,6 +234,7 @@ def _layout_data_to_headless_ctx(data, config=None, title_base=""):
         "format_name": fmt,
         "issue_entry": _StaticValue(data.get("issue_date", "")),
         "product_entry": _StaticValue(data.get("product", "")),
+        "starter_format_var": _StaticValue(data.get("starter_format", "")),
         "section_count_var": _StaticValue(section_count),
         "section_page_vars": section_page_vars,
         "section_name_vars": section_name_vars,
@@ -255,6 +256,16 @@ def _build_imposition_text_from_layout_data(data, config=None):
 
 
 
+def _desired_starter_format_for_publication(publication_name):
+    normalized_name = normalize_publication_name(publication_name or "")
+    name_upper = normalized_name.upper()
+    if "NYT" in name_upper:
+        return "NYT"
+    if "USAT" in name_upper and not re.search(r'\bCO\b', name_upper):
+        return "USAT"
+    return None
+
+
 def _build_filename_suggestion_from_layout_data(data, template_mode=False, regular_mode=False, default_dir=None, config=None):
     ctx = _layout_data_to_headless_ctx(data, config=config, title_base="")
     ctx["template_mode"] = bool(template_mode)
@@ -274,6 +285,19 @@ def _normalize_layout_data_for_touch(data, path, template_mode=False, regular_mo
     ctx["layout_name"] = str((data or {}).get("name") or os.path.splitext(os.path.basename(path))[0]).strip()
 
     normalized = collect_layout_data(ctx)
+    # Preserve starter_format during touch/cleanup operations, but allow Touch ALL
+    # to enforce publication-specific starter rules when the product name clearly
+    # matches NYT or a non-CO USAT layout.
+    if not template_mode:
+        try:
+            existing_starter_format = str((data or {}).get("starter_format") or "").strip()
+        except Exception:
+            existing_starter_format = ""
+        desired_starter_format = _desired_starter_format_for_publication((data or {}).get("product") or normalized.get("product") or "")
+        if desired_starter_format:
+            normalized["starter_format"] = desired_starter_format
+        elif existing_starter_format:
+            normalized["starter_format"] = existing_starter_format
     if template_mode:
         normalized = helpers_mod._normalize_template_data(normalized)
         normalized.pop("issue_date", None)
@@ -707,7 +731,7 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
             use_cmyk = True
         colors = [('K', '#7f7f7f'), ('Y', '#fff176'), ('M', '#f48fb1'), ('C', '#90caf9')] if use_cmyk else [('K', '#7f7f7f')]
         sw_cols = swatch_cols if swatch_cols and swatch_cols > 0 else 1
-        sw_h = max(28, int(unit_label_h * 1.5))
+        sw_h = max(28, int(cell_h * 0.95))
         sw_spacing = 8
         sw_start_y = label_top + unit_label_h + 8
         for ci, (key, color) in enumerate(colors):
@@ -1011,17 +1035,21 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         raw = (text or "").strip().upper()
         if not raw:
             return None
-        parsed = parse_section_id(raw)
-        if parsed is not None:
-            return parsed
         try:
             count = max(1, min(4, int(section_count_var.get())))
         except Exception:
             count = 1
+        # Always prefer the displayed section names (or the provided snapshot)
+        # before falling back to canonical parsing. This makes section renames
+        # bulletproof even when users rename sections to letter-based names such
+        # as A/B/C/D that would otherwise collide with canonical section ids.
         for idx in range(count):
             display = _section_display_name(idx + 1, names_snapshot=names_snapshot)
             if raw == display:
                 return idx + 1
+        parsed = parse_section_id(raw)
+        if parsed is not None and 1 <= parsed <= count:
+            return parsed
         return None
 
     def _set_unit_section_value(entry_widget, value):
@@ -1425,15 +1453,19 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         publication_name = _normalize_publication_entry()
         current_starter = (starter_format_var.get() or "Standard").strip() or "Standard"
         current_upper = current_starter.upper()
-        for token, desired in (("USAT", "USAT"), ("NYT", "NYT")):
-            if token in publication_name and current_upper != desired:
-                if messagebox.askyesno(
-                    "Update Starter Format?",
-                    f"The publication name contains {token}, but Starter is set to {current_starter}.\n\nWould you like to change Starter to {desired} before saving?",
-                    parent=win,
-                ):
-                    starter_format_var.set(desired)
-                break
+        desired = _desired_starter_format_for_publication(publication_name)
+        if not desired or current_upper == desired:
+            return
+        if desired == "NYT":
+            reason_text = "The publication name contains NYT"
+        else:
+            reason_text = "The publication name contains USAT and does not contain the word CO"
+        if messagebox.askyesno(
+            "Update Starter Format?",
+            f"{reason_text}, but Starter is set to {current_starter}.\n\nWould you like to change Starter to {desired} before saving?",
+            parent=win,
+        ):
+            starter_format_var.set(desired)
 
     def do_save_with_starter():
         _prompt_update_starter_before_save()
@@ -1463,6 +1495,21 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                     pass
         return ok
 
+
+    def do_save_as_regular_with_starter():
+        if template_mode or regular_mode:
+            return False
+        _prompt_update_starter_before_save()
+        ok, _path = save_regular_from_layout(ctx, parent=win)
+        if ok:
+            try:
+                _reset_dirty_tracking(False)
+            except Exception:
+                try:
+                    ctx["dirty"] = False
+                except Exception:
+                    pass
+        return ok
     def _starter_sheet_fields():
         try:
             update_color_and_plate_counts()
@@ -2085,288 +2132,13 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         return left_order, right_order, unit_map
 
     def _make_layout_print_image():
-        try:
-            from PIL import Image, ImageDraw
-        except Exception:
-            raise RuntimeError("Pillow is required for printing. Please install pillow (pip install pillow).")
-        img_w, img_h = 2200, 1940
-        img = Image.new("RGB", (img_w, img_h), "white")
-        draw = ImageDraw.Draw(img)
-        if grid_cols >= 8:
-            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 50, 42, 24, 24, 30, 18
-        elif grid_cols >= 4:
-            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 56, 44, 26, 24, 32, 22
-        else:
-            title_sz, header_sz, text_sz, unit_sz, section_sz, cell_sz = 60, 46, 28, 24, 34, 38
-        title_font = _load_starter_font(title_sz, bold=True)
-        header_font = _load_starter_font(header_sz, bold=True)
-        issue_font = _load_starter_font(header_sz + 4, bold=True)
-        text_font = _load_starter_font(text_sz, bold=False)
-        small_font = _load_starter_font(max(18, text_sz - 4), bold=False)
-        sections_print_font = _load_starter_font(max(36, (max(18, text_sz - 4)) * 2), bold=True)
-        unit_font = _load_starter_font(unit_sz, bold=True)
-        section_font = _load_starter_font(section_sz, bold=True)
-        cell_font_render = _load_starter_font(cell_sz, bold=True)
-        color_cell_font_render = _load_starter_font(cell_sz + 2, bold=True)
-        legend_font = _load_starter_font(header_sz, bold=True)
-        legend_symbol_font = _load_starter_font(header_sz, bold=True)
-        legend_list_font = _load_starter_font(header_sz, bold=True)
-        margin_x = 55
-        header_top = 26
-        header_h = 180
-        footer_h = 150
-        grid_top = header_top + header_h + 14
-        footer_y = img_h - footer_h - 30
-        raw_issue = issue_entry.get().strip()
-        issue_text = raw_issue
-        if not template_mode:
-            try:
-                dt = parse_issue_date_flexible(raw_issue)
-                if dt:
-                    issue_text = dt.strftime("%m/%d/%Y")
-            except Exception:
-                pass
-        product_text = product_entry.get().strip()
-        # Use product name as the prominent centered title and place Issue Date on the same row
-        label_top = header_top
-        _draw_centered_text(draw, (margin_x, label_top, img_w - margin_x, label_top + 60), product_text or title_base or ("Template Layout" if template_mode else "Press Layout"), title_font)
-        draw.text((margin_x, label_top + 66), f"Issue Date: {issue_text}", fill="black", font=sections_print_font)
-        try:
-            count = max(1, min(4, int(section_count_var.get())))
-        except Exception:
-            count = 1
-        section_display_lookup = {}
-        for idx in range(count):
-            try:
-                section_name = (section_name_vars[idx].get() or "").strip().upper()
-            except Exception:
-                section_name = ""
-            if not section_name:
-                section_name = chr(ord("A") + idx)
-            section_display_lookup[section_name] = idx
-        color_page_refs = []
-        seen_color_refs = set()
-        legend_circle_diameter = 54
-        show_bold_color_marks = ((ctx.get("format_name") or "").strip().lower() == "broadsheet")
-        # Build section page counts as: Sections: 12 / 16 / 20
-        values = []
-        total_page_count = 0
-        for idx in range(count):
-            value = (section_page_vars[idx].get() or "").strip()
-            if value:
-                values.append(value)
-                try:
-                    total_page_count += int(value)
-                except Exception:
-                    pass
-        sections_text = " / ".join(values)
-        if sections_text:
-            draw.text((margin_x, label_top + 118), f"Pages: {sections_text}", fill="black", font=sections_print_font)
-        draw.line((margin_x, grid_top - 18, img_w - margin_x, grid_top - 18), fill="#444444", width=3)
-        left_order, right_order, unit_map = _visible_print_labels()
-        total_units = len(left_order) + len(right_order)
-        if total_units <= 0:
-            draw.text((margin_x, grid_top + 20), "No units to print.", fill="black", font=text_font)
-            return img
-        gap = max(10, int(unit_padx * 2.4))
-        folder_gap = max(gap + 8, int(folder_padx * 1.5))
-        folder_w = 150 if grid_cols <= 4 else 175
-        left_gaps = max(0, len(left_order) - 1) * gap
-        right_gaps = max(0, len(right_order) - 1) * gap
-        usable_w = img_w - (2 * margin_x) - left_gaps - right_gaps - (2 * folder_gap) - folder_w
-        unit_w = max(115, int(usable_w / max(1, total_units)))
-        unit_h = footer_y - grid_top - 12
-        box_top_offset = 64
-        unit_label_h = 26
-        section_h = max(24, section_sz + 8)
-        x_positions = {}
-        x = margin_x
-        for lab in left_order:
-            x_positions[lab] = x
-            x += unit_w + gap
-        folder_x0 = x + folder_gap
-        folder_x1 = folder_x0 + folder_w
-        x = folder_x1 + folder_gap
-        for lab in right_order:
-            x_positions[lab] = x
-            x += unit_w + gap
-        folder_mid = (folder_x0 + folder_x1) / 2.0
-        folder_arrow_w = min(64, max(42, int(folder_w * 0.36)))
-        arrow_center_y = grid_top + 95
-        for offset in (0, 84, 168):
-            cy = arrow_center_y + offset
-            draw.polygon([
-                (folder_mid - folder_arrow_w/2, cy - 24),
-                (folder_mid + folder_arrow_w/2, cy - 24),
-                (folder_mid, cy + 28)
-            ], fill="#666666", outline="#666666")
-        left_triangle_center_y = arrow_center_y + 84
-        # shift left triangle well to the left so it doesn't touch the middle triangle
-        left_triangle_left = folder_x0 - 18
-        draw.polygon([
-            (left_triangle_left, left_triangle_center_y - 24),
-            (left_triangle_left + folder_arrow_w, left_triangle_center_y - 24),
-            (left_triangle_left + folder_arrow_w / 2, left_triangle_center_y + 28)
-        ], fill="#666666", outline="#666666")
-        # Move folder label down below the entire stack of triangles
-        folder_label_top = arrow_center_y + 168 + 36
-        _draw_centered_text(draw, (folder_x0, folder_label_top, folder_x1, folder_label_top + unit_label_h), folder_label, unit_font)
-        for lab in left_order + right_order:
-            unit = unit_map[lab]
-            x0 = x_positions[lab]
-            x1 = x0 + unit_w
-            y0 = grid_top
-            y1 = y0 + unit_h
-
-            section_text = (unit.get("section_entry").get() or "").strip().upper() if unit.get("section_entry") else ""
-            section_label_space = section_h + 6
-            if section_text:
-                _draw_centered_text(draw, (x0, y0, x1, y0 + section_h), section_text, section_font)
-
-            box_top = y0 + section_label_space
-
-            # Compute cols/rows and constrain printed box height so cells
-            # don't become vertically stretched. Prefer roughly square cells
-            # by basing box height on cell width when possible.
-            entries = unit.get("entries", [])
-            rows = len(entries)
-            cols = len(entries[0]) if rows else 0
-            if rows <= 0 or cols <= 0:
-                continue
-
-            # base cell width from unit width
-            cell_w = (x1 - x0) / cols
-            # original available box height
-            orig_box_h = max(1, y1 - box_top)
-            # desired box height to keep cells near-square
-            desired_box_h = int(rows * cell_w * 1.05)
-            box_h = min(orig_box_h, desired_box_h)
-            # ensure a minimum reasonable height so labels/footer don't overlap
-            min_box_h = max(24, int(unit_label_h + section_h + 8))
-            box_h = max(min_box_h, box_h)
-            # recompute y1 to reflect adjusted box height
-            y1 = box_top + box_h
-            draw.rectangle((x0, box_top, x1, y1), outline="black", width=2, fill="white")
-            cell_h = box_h / rows
-            mid_col = cols // 2
-            mid_row = rows // 2
-            for r in range(1, rows):
-                yy = box_top + (r * cell_h)
-                width = midline_thickness if (rows % 2 == 0 and r == mid_row) else 1
-                color = midline_color if width > 1 else "#888888"
-                draw.line((x0, yy, x1, yy), fill=color, width=width)
-            for c in range(1, cols):
-                xx = x0 + (c * cell_w)
-                width = midline_thickness if (cols % 2 == 0 and c == mid_col) else 1
-                color = midline_color if width > 1 else "#888888"
-                draw.line((xx, box_top, xx, y1), fill=color, width=width)
-            for r in range(rows):
-                for c in range(cols):
-                    cx0 = x0 + (c * cell_w)
-                    cy0 = box_top + (r * cell_h)
-                    cx1 = x0 + ((c + 1) * cell_w)
-                    cy1 = box_top + ((r + 1) * cell_h)
-                    value = ""
-                    try:
-                        value = (entries[r][c].get() or "").strip()
-                    except Exception:
-                        value = ""
-                    is_color_page = (lab, r, c) in ctx.get("color_cells", set())
-                    if value:
-                        if is_color_page and show_bold_color_marks:
-                            _draw_centered_text_heavy(draw, (cx0 + 2, cy0 + 2, cx1 - 2, cy1 - 2), value, color_cell_font_render, fill="black", offset=1)
-                        else:
-                            _draw_centered_text(draw, (cx0 + 2, cy0 + 2, cx1 - 2, cy1 - 2), value, cell_font_render)
-                    if is_color_page:
-                        pad = max(5, int(min(cell_w, cell_h) * 0.11))
-                        circle_diameter = max(10, int(min(cell_w, cell_h) - (2 * pad)))
-                        legend_circle_diameter = circle_diameter
-                        circle_width = 6 if show_bold_color_marks else 3
-                        draw.ellipse((cx0 + pad, cy0 + pad, cx1 - pad, cy1 - pad), outline="red", width=circle_width)
-                        section_ref = section_text.strip().upper()
-                        page_ref = str(value or "").strip()
-                        if section_ref and page_ref:
-                            ref_text = f"{section_ref}{page_ref}"
-                            if ref_text not in seen_color_refs:
-                                seen_color_refs.add(ref_text)
-                                try:
-                                    page_num = int(page_ref)
-                                except Exception:
-                                    page_num = 10**9
-                                color_page_refs.append((section_display_lookup.get(section_ref, 999), section_ref, page_num, ref_text))
-            # After cells, draw the unit label below the grid, then stacked larger swatches
-            label_top = y1 + 6
-            _draw_centered_text(draw, (x0, label_top, x1, label_top + unit_label_h), lab, unit_font)
-            section_offset = 0
-
-            # Draw stacked, larger color swatches (one row per color, multiple columns per row)
-            try:
-                use_cmyk = lab not in only_k_labels
-            except Exception:
-                use_cmyk = True
-            if use_cmyk:
-                colors = [("K", "#7f7f7f"), ("Y", "#fff176"), ("M", "#f48fb1"), ("C", "#90caf9")]
-            else:
-                colors = [("K", "#7f7f7f")]
-            sw_cols = swatch_cols if swatch_cols and swatch_cols > 0 else 1
-            sw_h = max(28, int(unit_label_h * 1.5))
-            sw_spacing = 8
-            sw_start_y = label_top + unit_label_h + section_offset + 8
-            for ci, (key, color) in enumerate(colors):
-                # compute swatch width for this row
-                row_count = sw_cols
-                sw_w = max(18, int(min((unit_w * 0.9) / max(1, row_count), cell_w * 0.9)))
-                row_total_w = row_count * sw_w + (row_count - 1) * sw_spacing
-                row_x = x0 + (unit_w - row_total_w) / 2.0
-                row_y = sw_start_y + ci * (sw_h + sw_spacing)
-                for i in range(sw_cols):
-                    sx0 = row_x + i * (sw_w + sw_spacing)
-                    sx1 = sx0 + sw_w
-                    sy1 = row_y + sw_h
-                    draw.rectangle((sx0, row_y, sx1, sy1), fill=color, outline="#333333")
-                    try:
-                        rcol = int(color.lstrip('#')[0:2], 16)
-                        gcol = int(color.lstrip('#')[2:4], 16)
-                        bcol = int(color.lstrip('#')[4:6], 16)
-                        luminance = 0.299 * rcol + 0.587 * gcol + 0.114 * bcol
-                        text_fill = "black" if luminance > 150 else "white"
-                    except Exception:
-                        text_fill = "black"
-                    _draw_centered_text(draw, (sx0, row_y, sx1, sy1), key, small_font, fill=text_fill)
-        try:
-            update_color_and_plate_counts()
-        except Exception:
-            pass
-        color_pages_text = (ctx.get("color_pages_var", color_pages_var).get() or "0").strip()
-        plates_text = (ctx.get("plates_var", plates_var).get() or "0").strip()
-        footer_line_y = footer_y - 14
-        draw.line((margin_x, footer_line_y, img_w - margin_x, footer_line_y), fill="#444444", width=3)
-        draw.text((margin_x, footer_y), f"Color Pages: {color_pages_text}", fill="black", font=header_font)
-        draw.text((margin_x + 480, footer_y), f"Plates: {plates_text}", fill="black", font=header_font)
-        draw.text((margin_x + 900, footer_y), f"Total Pages: {total_page_count}", fill="black", font=header_font)
-
-        # Large legend and color-page list above the footer line.
-        legend_circle_diameter = max(42, int(legend_circle_diameter))
-        legend_y = footer_line_y - 190
-        legend_circle_box = (
-            margin_x,
-            legend_y,
-            margin_x + legend_circle_diameter,
-            legend_y + legend_circle_diameter,
+        data = collect_layout_data(ctx)
+        return render_layout_print_image_from_data(
+            data,
+            config,
+            title_base=title_base,
+            template_mode=template_mode,
         )
-        draw.ellipse(legend_circle_box, outline="red", width=6)
-        _draw_centered_text_heavy(draw, legend_circle_box, "#", legend_symbol_font, fill="black", offset=1)
-        draw.text((margin_x + legend_circle_diameter + 24, legend_y), "= color page", fill="black", font=legend_font)
-
-        color_page_refs_sorted = [item[3] for item in sorted(color_page_refs, key=lambda item: (item[0], item[2], item[3]))]
-        refs_text = "Color pages list: " + (", ".join(color_page_refs_sorted) if color_page_refs_sorted else "None")
-        list_y = legend_y + legend_circle_diameter + 26
-        max_text_width = max(260, img_w - (2 * margin_x))
-        wrapped_lines = _wrap_text_to_width(draw, refs_text, legend_list_font, max_text_width)
-        line_h = max(44, _measure_text(draw, "Ag", legend_list_font)[1] + 10)
-        for line_index, line_text in enumerate(wrapped_lines):
-            draw.text((margin_x, list_y + (line_index * line_h)), line_text, fill="black", font=legend_list_font)
-        return img
 
     def _make_layout_preview_image(scale=0.75):
         img = _make_layout_print_image()
@@ -2439,6 +2211,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     ttk.Button(btn_frame, text="Print", command=lambda: print_layout(win, ctx), width=10, takefocus=False).pack(side="left", padx=(0, 8))
     ttk.Button(btn_frame, text="Save", command=do_save_with_starter, width=10, takefocus=False).pack(side="left", padx=(0, 8))
     ttk.Button(btn_frame, text="Save As", command=do_save_as_with_starter, width=10, takefocus=False).pack(side="left")
+    if not template_mode and not regular_mode:
+        ttk.Button(btn_frame, text="Save as Regular", command=do_save_as_regular_with_starter, width=14, takefocus=False).pack(side="left", padx=(8, 0))
     btn_frame.pack(side="left")
 
     # Expose print functions for external callers (launcher use)
@@ -4150,6 +3924,8 @@ def build_new_layout_launcher(parent):
     launcher_regular_sort_state = {"col": None, "desc": False}
     template_rows_by_iid = {}
     regular_rows = {}
+    launcher_template_group_by_iid = {}
+    launcher_regular_group_by_iid = {}
 
     mode_bar = ttk.Frame(frame)
     mode_bar.grid(row=0, column=0, columnspan=12, sticky="ew", pady=(0, 8))
@@ -4191,16 +3967,23 @@ def build_new_layout_launcher(parent):
     templates_frame.grid(row=2, column=0, sticky="nsew")
     templates_frame.rowconfigure(0, weight=1)
     templates_frame.columnconfigure(0, weight=1)
-    template_columns = ("name", "press", "format", "sections", "pages", "saved")
-    templates_tree = ttk.Treeview(templates_frame, columns=template_columns, show="headings", selectmode="browse")
+    template_columns = ("sections", "pages", "saved")
+    templates_tree = ttk.Treeview(templates_frame, columns=template_columns, show="tree headings", selectmode="browse")
     templates_tree.grid(row=0, column=0, sticky="nsew")
     templates_scroll = ttk.Scrollbar(templates_frame, orient="vertical", command=templates_tree.yview)
     templates_scroll.grid(row=0, column=1, sticky="ns")
     templates_tree.configure(yscrollcommand=templates_scroll.set)
-    launcher_template_heading_titles = {"name": "Template Name", "press": "Press", "format": "Format", "sections": "Sections", "pages": "Pages", "saved": "Last Saved"}
-    for key, title, width, anchor in [("name", launcher_template_heading_titles["name"], 300, "w"), ("press", launcher_template_heading_titles["press"], 90, "center"), ("format", launcher_template_heading_titles["format"], 110, "center"), ("sections", launcher_template_heading_titles["sections"], 80, "center"), ("pages", launcher_template_heading_titles["pages"], 130, "center"), ("saved", launcher_template_heading_titles["saved"], 170, "center")]:
+    launcher_template_heading_titles = {"sections": "Sections", "pages": "Pages", "saved": "Last Saved"}
+    templates_tree.heading("#0", text="Template Name")
+    templates_tree.column("#0", width=300, anchor="w")
+    for key, title, width, anchor in [("sections", launcher_template_heading_titles["sections"], 80, "center"), ("pages", launcher_template_heading_titles["pages"], 130, "center"), ("saved", launcher_template_heading_titles["saved"], 170, "center")]:
         templates_tree.heading(key, text=title)
         templates_tree.column(key, width=width, anchor=anchor)
+    try:
+        templates_tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
+        templates_tree.tag_configure("subgroup_row", font=(None, 10, "bold"), foreground="#444444")
+    except Exception:
+        pass
 
     regular_container = ttk.Frame(frame)
     regular_container.columnconfigure(0, weight=1)
@@ -4216,17 +3999,23 @@ def build_new_layout_launcher(parent):
     regular_frame.grid(row=2, column=0, sticky="nsew")
     regular_frame.rowconfigure(0, weight=1)
     regular_frame.columnconfigure(0, weight=1)
-    regular_columns = ("product", "press", "format", "pages", "color_pages", "plates", "saved")
-    regular_tree = ttk.Treeview(regular_frame, columns=regular_columns, show="headings", selectmode="browse")
+    regular_columns = ("pages", "color_pages", "plates", "saved")
+    regular_tree = ttk.Treeview(regular_frame, columns=regular_columns, show="tree headings", selectmode="browse")
     regular_tree.grid(row=0, column=0, sticky="nsew")
     regular_scroll = ttk.Scrollbar(regular_frame, orient="vertical", command=regular_tree.yview)
     regular_scroll.grid(row=0, column=1, sticky="ns")
     regular_tree.configure(yscrollcommand=regular_scroll.set)
-    launcher_regular_heading_titles = {"product": "Product", "press": "Press", "format": "Format", "pages": "Pages", "color_pages": "Color Pages", "plates": "Plates", "saved": "Last Saved"}
-    for key, title, width, anchor in [("product", launcher_regular_heading_titles["product"], 260, "w"), ("press", launcher_regular_heading_titles["press"], 90, "center"), ("format", launcher_regular_heading_titles["format"], 100, "center"), ("pages", launcher_regular_heading_titles["pages"], 120, "center"), ("color_pages", launcher_regular_heading_titles["color_pages"], 95, "center"), ("plates", launcher_regular_heading_titles["plates"], 70, "center"), ("saved", launcher_regular_heading_titles["saved"], 170, "center")]:
+    launcher_regular_heading_titles = {"pages": "Pages", "color_pages": "Color Pages", "plates": "Plates", "saved": "Last Saved"}
+    regular_tree.heading("#0", text="Product")
+    regular_tree.column("#0", width=260, anchor="w")
+    for key, title, width, anchor in [("pages", launcher_regular_heading_titles["pages"], 120, "center"), ("color_pages", launcher_regular_heading_titles["color_pages"], 95, "center"), ("plates", launcher_regular_heading_titles["plates"], 70, "center"), ("saved", launcher_regular_heading_titles["saved"], 170, "center")]:
         regular_tree.heading(key, text=title)
         regular_tree.column(key, width=width, anchor=anchor)
-
+    try:
+        regular_tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
+        regular_tree.tag_configure("subgroup_row", font=(None, 10, "bold"), foreground="#444444")
+    except Exception:
+        pass
     btn_row = ttk.Frame(frame)
     btn_row.grid(row=5, column=0, columnspan=12, pady=(12, 0), sticky="w")
     action_button = ttk.Button(btn_row, text="New / Open", width=14)
@@ -4264,10 +4053,18 @@ def build_new_layout_launcher(parent):
             return False
     def selected_template_path():
         sel = templates_tree.selection()
-        return sel[0] if sel else None
+        candidate = sel[0] if sel else templates_tree.focus()
+        if candidate in template_rows_by_iid:
+            return candidate
+        focused = templates_tree.focus()
+        return focused if focused in template_rows_by_iid else None
     def selected_regular_path():
         sel = regular_tree.selection()
-        return sel[0] if sel else None
+        candidate = sel[0] if sel else regular_tree.focus()
+        if candidate in regular_rows:
+            return candidate
+        focused = regular_tree.focus()
+        return focused if focused in regular_rows else None
     def current_preview_path():
         return selected_regular_path() if mode_state["regular"] else selected_template_path()
     def show_preview(path):
@@ -4304,6 +4101,7 @@ def build_new_layout_launcher(parent):
         except Exception:
             return None
     def update_launcher_template_sort_headings():
+        templates_tree.heading("#0", text="Template Name")
         for col in template_columns:
             templates_tree.heading(col, text=_treeview_sort_heading_text(launcher_template_heading_titles[col], launcher_template_sort_state, col), command=lambda _c=col: sort_launcher_templates_by(_c))
     def sort_launcher_template_rows(rows):
@@ -4311,31 +4109,19 @@ def build_new_layout_launcher(parent):
         if not col:
             return rows
         def keyfunc(r):
-            if col == "name":
-                return ((r.get("name") or "").lower(), r.get("saved_dt") or datetime.min)
-            if col == "press":
-                return ((r.get("press") or "").lower(), (r.get("name") or "").lower())
-            if col == "format":
-                return ((r.get("format") or "").lower(), (r.get("name") or "").lower())
             if col == "sections":
                 return (int(r.get("section_count") or 0), tuple(r.get("section_pages_sort", (0, 0, 0, 0))), (r.get("name") or "").lower())
             if col == "pages":
                 return (tuple(r.get("section_pages_sort", (0, 0, 0, 0))), int(r.get("section_count") or 0), (r.get("name") or "").lower())
             if col == "saved":
                 return (r.get("saved_dt") or datetime.min, (r.get("name") or "").lower())
-            return ""
+            return (r.get("name") or "").lower()
         return sorted(rows, key=keyfunc, reverse=launcher_template_sort_state["desc"])
     def sort_launcher_regular_rows(rows):
         col = launcher_regular_sort_state.get("col")
         if not col:
             return rows
         def keyfunc(r):
-            if col == "product":
-                return ((r.get("product") or "").lower(), tuple(r.get("section_pages_sort", (0, 0, 0, 0))), r.get("saved_dt") or datetime.min)
-            if col == "press":
-                return (r.get("press") or "").lower()
-            if col == "format":
-                return (r.get("format") or "").lower()
             if col == "pages":
                 return tuple(r.get("section_pages_sort", (0, 0, 0, 0)))
             if col == "color_pages":
@@ -4344,9 +4130,10 @@ def build_new_layout_launcher(parent):
                 return int(r.get("plates", 0) or 0)
             if col == "saved":
                 return r.get("saved_dt") or datetime.min
-            return ""
+            return ((r.get("product") or "").lower(), tuple(r.get("section_pages_sort", (0, 0, 0, 0))), r.get("saved_dt") or datetime.min)
         return sorted(rows, key=keyfunc, reverse=launcher_regular_sort_state["desc"])
     def update_launcher_regular_sort_headings():
+        regular_tree.heading("#0", text="Product")
         for col in regular_columns:
             regular_tree.heading(col, text=_treeview_sort_heading_text(launcher_regular_heading_titles[col], launcher_regular_sort_state, col), command=lambda _c=col: sort_launcher_regular_by(_c))
     def sort_launcher_templates_by(col):
@@ -4397,6 +4184,7 @@ def build_new_layout_launcher(parent):
             return
         selected = selected_template_path()
         template_rows_by_iid.clear()
+        launcher_template_group_by_iid.clear()
         templates_tree.delete(*templates_tree.get_children())
         cached_rows, _changed = get_cached_templates(force=False)
         rows = []
@@ -4407,10 +4195,34 @@ def build_new_layout_launcher(parent):
             if _matches_template_filters(row):
                 rows.append(row)
         rows = sort_launcher_template_rows(rows)
+        press_order = ["Press 1", "Press 2"]
+        format_order = ["Broadsheet", "Tab", "8 up"]
+        grouped = {}
         for row in rows:
-            iid = row["path"]
-            template_rows_by_iid[iid] = row
-            templates_tree.insert("", "end", iid=iid, values=(row.get("name", ""), row.get("press", ""), row.get("format", ""), row.get("section_count", ""), row.get("pages_disp", ""), row.get("saved_disp", "")))
+            press_name = str(row.get("press") or "").strip() or "Unknown Press"
+            format_name = str(row.get("format") or "").strip() or "Unknown Format"
+            grouped.setdefault(press_name, {}).setdefault(format_name, []).append(row)
+        def press_sort_key(value):
+            return (press_order.index(value), value.lower()) if value in press_order else (len(press_order), value.lower())
+        def format_sort_key(value):
+            return (format_order.index(value), value.lower()) if value in format_order else (len(format_order), value.lower())
+        press_reverse = bool(launcher_template_sort_state.get("col") == "press" and launcher_template_sort_state.get("desc"))
+        format_reverse = bool(launcher_template_sort_state.get("col") == "format" and launcher_template_sort_state.get("desc"))
+        for press_name in sorted(grouped.keys(), key=press_sort_key, reverse=press_reverse):
+            press_iid = f"__new_layout_template_press__::{press_name}"
+            format_groups = grouped.get(press_name, {})
+            press_count = sum(len(items) for items in format_groups.values())
+            templates_tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", ""), open=True, tags=("group_row",))
+            launcher_template_group_by_iid[press_iid] = ("press", press_name)
+            for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
+                format_iid = f"__new_layout_template_format__::{press_name}::{format_name}"
+                format_count = len(format_groups.get(format_name, []))
+                templates_tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", ""), open=True, tags=("subgroup_row",))
+                launcher_template_group_by_iid[format_iid] = ("format", press_name, format_name)
+                for row in format_groups.get(format_name, []):
+                    iid = row["path"]
+                    template_rows_by_iid[iid] = row
+                    templates_tree.insert(format_iid, "end", iid=iid, text=row.get("name", ""), values=(row.get("section_count", ""), row.get("pages_disp", ""), row.get("saved_disp", "")))
         update_launcher_template_sort_headings()
         if selected and selected in template_rows_by_iid:
             templates_tree.selection_set(selected)
@@ -4426,10 +4238,35 @@ def build_new_layout_launcher(parent):
         rows = sort_launcher_regular_rows(rows)
         regular_tree.delete(*regular_tree.get_children())
         regular_rows.clear()
+        launcher_regular_group_by_iid.clear()
+        press_order = ["Press 1", "Press 2"]
+        format_order = ["Broadsheet", "Tab", "8 up"]
+        grouped = {}
         for row in rows:
-            iid = row.get("path")
-            regular_rows[iid] = row
-            regular_tree.insert("", "end", iid=iid, values=(row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
+            press_name = str(row.get("press") or "").strip() or "Unknown Press"
+            format_name = str(row.get("format") or "").strip() or "Unknown Format"
+            grouped.setdefault(press_name, {}).setdefault(format_name, []).append(row)
+        def press_sort_key(value):
+            return (press_order.index(value), value.lower()) if value in press_order else (len(press_order), value.lower())
+        def format_sort_key(value):
+            return (format_order.index(value), value.lower()) if value in format_order else (len(format_order), value.lower())
+        press_reverse = bool(launcher_regular_sort_state.get("col") == "press" and launcher_regular_sort_state.get("desc"))
+        format_reverse = bool(launcher_regular_sort_state.get("col") == "format" and launcher_regular_sort_state.get("desc"))
+        for press_name in sorted(grouped.keys(), key=press_sort_key, reverse=press_reverse):
+            press_iid = f"__new_layout_regular_press__::{press_name}"
+            format_groups = grouped.get(press_name, {})
+            press_count = sum(len(items) for items in format_groups.values())
+            regular_tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", ""), open=True, tags=("group_row",))
+            launcher_regular_group_by_iid[press_iid] = ("press", press_name)
+            for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
+                format_iid = f"__new_layout_regular_format__::{press_name}::{format_name}"
+                format_count = len(format_groups.get(format_name, []))
+                regular_tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", ""), open=True, tags=("subgroup_row",))
+                launcher_regular_group_by_iid[format_iid] = ("format", press_name, format_name)
+                for row in format_groups.get(format_name, []):
+                    iid = row.get("path")
+                    regular_rows[iid] = row
+                    regular_tree.insert(format_iid, "end", iid=iid, text=row.get("product", ""), values=(row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
         update_launcher_regular_sort_headings()
         if selected and selected in regular_rows:
             regular_tree.selection_set(selected)
@@ -4519,10 +4356,42 @@ def build_new_layout_launcher(parent):
     press_var.trace_add("write", lambda *_: (refresh_templates(), refresh_regulars()))
     format_var.trace_add("write", lambda *_: (refresh_templates(), refresh_regulars()))
     section_count_var.trace_add("write", lambda *_: refresh_templates())
-    templates_tree.bind("<<TreeviewSelect>>", lambda e: show_preview(current_preview_path()))
-    templates_tree.bind("<Double-Button-1>", lambda e: on_new_or_open())
-    regular_tree.bind("<<TreeviewSelect>>", lambda e: show_preview(current_preview_path()))
-    regular_tree.bind("<Double-Button-1>", lambda e: on_new_or_open())
+    def _on_new_layout_template_select(event=None):
+        if mode_state["regular"]:
+            close_preview()
+        else:
+            show_preview(selected_template_path())
+
+    def _on_new_layout_regular_select(event=None):
+        if mode_state["regular"]:
+            show_preview(selected_regular_path())
+
+    def _on_new_layout_template_double_click(event=None):
+        item_id = templates_tree.identify_row(event.y) if event is not None else templates_tree.focus()
+        if item_id in launcher_template_group_by_iid:
+            try:
+                templates_tree.item(item_id, open=(not bool(templates_tree.item(item_id, "open"))))
+            except Exception:
+                pass
+            return "break"
+        on_new_or_open()
+        return "break"
+
+    def _on_new_layout_regular_double_click(event=None):
+        item_id = regular_tree.identify_row(event.y) if event is not None else regular_tree.focus()
+        if item_id in launcher_regular_group_by_iid:
+            try:
+                regular_tree.item(item_id, open=(not bool(regular_tree.item(item_id, "open"))))
+            except Exception:
+                pass
+            return "break"
+        on_new_or_open()
+        return "break"
+
+    templates_tree.bind("<<TreeviewSelect>>", _on_new_layout_template_select)
+    regular_tree.bind("<<TreeviewSelect>>", _on_new_layout_regular_select)
+    templates_tree.bind("<Double-Button-1>", _on_new_layout_template_double_click)
+    regular_tree.bind("<Double-Button-1>", _on_new_layout_regular_double_click)
     action_button.configure(command=on_new_or_open)
     mode_button.configure(command=toggle_mode)
     update_launcher_template_sort_headings()
@@ -4572,28 +4441,34 @@ def build_template_editor_launcher(parent):
     list_frame.rowconfigure(0, weight=1)
     list_frame.columnconfigure(0, weight=1)
 
-    columns = ("name", "press", "format", "saved")
-    tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="browse")
+    columns = ("sections", "pages", "saved")
+    tree = ttk.Treeview(list_frame, columns=columns, show="tree headings", selectmode="browse")
     tree.grid(row=0, column=0, sticky="nsew")
     vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
     vsb.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=vsb.set)
 
     template_heading_titles = {
-        "name": "Template Name",
-        "press": "Press",
-        "format": "Format",
+        "sections": "Sections",
+        "pages": "Pages",
         "saved": "Last Saved",
     }
+    tree.heading("#0", text="Template Name")
     for key, title in template_heading_titles.items():
         tree.heading(key, text=title)
-    tree.column("name", width=280, anchor="w")
-    tree.column("press", width=90, anchor="center")
-    tree.column("format", width=120, anchor="center")
+    tree.column("#0", width=280, anchor="w")
+    tree.column("sections", width=80, anchor="center")
+    tree.column("pages", width=130, anchor="center")
     tree.column("saved", width=170, anchor="center")
+    try:
+        tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
+        tree.tag_configure("subgroup_row", font=(None, 10, "bold"), foreground="#444444")
+    except Exception:
+        pass
 
     template_rows = []
     row_by_iid = {}
+    group_by_iid = {}
     sort_state = {"col": None, "desc": False}
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
@@ -4656,25 +4531,53 @@ def build_template_editor_launcher(parent):
             return rows
 
         def keyfunc(r):
-            if col == "name":
-                return (r["name"] or "").lower()
-            if col == "press":
-                return (r["press"] or "").lower()
-            if col == "format":
-                return (r["format"] or "").lower()
+            if col == "sections":
+                return (int(r.get("section_count") or 0), tuple(r.get("section_pages_sort", (0, 0, 0, 0))), (r.get("name") or "").lower())
+            if col == "pages":
+                return (tuple(r.get("section_pages_sort", (0, 0, 0, 0))), int(r.get("section_count") or 0), (r.get("name") or "").lower())
             if col == "saved":
-                return r["saved_dt"] or datetime.min
-            return ""
+                return (r["saved_dt"] or datetime.min, (r.get("name") or "").lower())
+            return (r["name"] or "").lower()
 
         return sorted(rows, key=keyfunc, reverse=sort_state["desc"])
 
     def load_rows(rows):
         tree.delete(*tree.get_children())
         row_by_iid.clear()
+        group_by_iid.clear()
+
+        press_order = ["Press 1", "Press 2"]
+        format_order = ["Broadsheet", "Tab", "8 up"]
+        press_groups = {}
         for row in rows:
-            iid = row["path"]
-            tree.insert("", "end", iid=iid, values=(row["name"], row["press"], row["format"], row["saved_disp"]))
-            row_by_iid[iid] = row
+            press_name = str(row.get("press") or "").strip() or "Unknown Press"
+            format_name = str(row.get("format") or "").strip() or "Unknown Format"
+            press_groups.setdefault(press_name, {}).setdefault(format_name, []).append(row)
+
+        def press_sort_key(value):
+            return (press_order.index(value), value.lower()) if value in press_order else (len(press_order), value.lower())
+
+        def format_sort_key(value):
+            return (format_order.index(value), value.lower()) if value in format_order else (len(format_order), value.lower())
+
+        press_reverse = bool(sort_state.get("col") == "press" and sort_state.get("desc"))
+        format_reverse = bool(sort_state.get("col") == "format" and sort_state.get("desc"))
+
+        for press_name in sorted(press_groups.keys(), key=press_sort_key, reverse=press_reverse):
+            press_iid = f"__template_press__::{press_name}"
+            format_groups = press_groups.get(press_name, {})
+            press_count = sum(len(items) for items in format_groups.values())
+            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", ""), open=True, tags=("group_row",))
+            group_by_iid[press_iid] = ("press", press_name)
+            for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
+                format_iid = f"__template_format__::{press_name}::{format_name}"
+                format_count = len(format_groups.get(format_name, []))
+                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", ""), open=True, tags=("subgroup_row",))
+                group_by_iid[format_iid] = ("format", press_name, format_name)
+                for row in format_groups.get(format_name, []):
+                    iid = row["path"]
+                    tree.insert(format_iid, "end", iid=iid, text=row.get("name", ""), values=(row.get("section_count", ""), row.get("pages_disp", ""), row.get("saved_disp", "")))
+                    row_by_iid[iid] = row
 
     def _matches_template_filter(row):
         search_text = (search_var.get() or "").strip().lower()
@@ -4691,9 +4594,9 @@ def build_template_editor_launcher(parent):
         return True
 
     def update_sort_headings():
-        tree.heading("name", text=_treeview_sort_heading_text(template_heading_titles["name"], sort_state, "name"), command=lambda: sort_by("name"))
-        tree.heading("press", text=_treeview_sort_heading_text(template_heading_titles["press"], sort_state, "press"), command=lambda: sort_by("press"))
-        tree.heading("format", text=_treeview_sort_heading_text(template_heading_titles["format"], sort_state, "format"), command=lambda: sort_by("format"))
+        tree.heading("#0", text="Template Name")
+        tree.heading("sections", text=_treeview_sort_heading_text(template_heading_titles["sections"], sort_state, "sections"), command=lambda: sort_by("sections"))
+        tree.heading("pages", text=_treeview_sort_heading_text(template_heading_titles["pages"], sort_state, "pages"), command=lambda: sort_by("pages"))
         tree.heading("saved", text=_treeview_sort_heading_text(template_heading_titles["saved"], sort_state, "saved"), command=lambda: sort_by("saved"))
 
     def refresh():
@@ -4705,6 +4608,9 @@ def build_template_editor_launcher(parent):
                 "name": cached.get("name") or os.path.splitext(os.path.basename(cached.get("path") or ""))[0],
                 "press": cached.get("press") or "",
                 "format": cached.get("format") or "",
+                "section_count": int(cached.get("section_count") or 0),
+                "section_pages_sort": tuple(([int(v) for v in (cached.get("section_pages") or []) if str(v).strip() != "" and int(v) > 0] + [0, 0, 0, 0])[:4]),
+                "pages_disp": _format_section_pages_for_display({"section_pages": cached.get("section_pages") or [], "section_count": cached.get("section_count") or 0}),
                 "saved_dt": cached.get("saved_dt"),
                 "saved_disp": cached.get("saved_disp") or "",
             }
@@ -4725,7 +4631,11 @@ def build_template_editor_launcher(parent):
 
     def selected_path():
         sel = tree.selection()
-        return sel[0] if sel else None
+        candidate = sel[0] if sel else tree.focus()
+        if candidate in row_by_iid:
+            return candidate
+        focused = tree.focus()
+        return focused if focused in row_by_iid else None
 
     def open_selected():
         path = selected_path()
@@ -4776,8 +4686,22 @@ def build_template_editor_launcher(parent):
             return
         refresh()
 
-    tree.bind("<<TreeviewSelect>>", lambda e: show_preview(selected_path()))
-    tree.bind("<Double-Button-1>", lambda e: open_selected())
+    def _on_template_tree_select(event=None):
+        show_preview(selected_path())
+
+    def _on_template_tree_double_click(event=None):
+        item_id = tree.identify_row(event.y) if event is not None else tree.focus()
+        if item_id in group_by_iid:
+            try:
+                tree.item(item_id, open=(not bool(tree.item(item_id, "open"))))
+            except Exception:
+                pass
+            return "break"
+        open_selected()
+        return "break"
+
+    tree.bind("<<TreeviewSelect>>", _on_template_tree_select)
+    tree.bind("<Double-Button-1>", _on_template_tree_double_click)
     btns = ttk.Frame(frame)
     btns.grid(row=2, column=0, pady=12, sticky="ew")
     btns.columnconfigure(0, weight=1)
@@ -4901,25 +4825,30 @@ def build_regular_editor_launcher(parent):
     list_frame.grid(row=1, column=0, sticky="nsew")
     list_frame.rowconfigure(0, weight=1)
     list_frame.columnconfigure(0, weight=1)
-    columns = ("product", "press", "format", "pages", "color_pages", "plates", "saved")
-    tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="browse")
+    columns = ("pages", "color_pages", "plates", "saved")
+    tree = ttk.Treeview(list_frame, columns=columns, show="tree headings", selectmode="browse")
     tree.grid(row=0, column=0, sticky="nsew")
     vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
     vsb.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=vsb.set)
     regular_heading_titles = {
-        "product": "Product",
-        "press": "Press",
-        "format": "Format",
         "pages": "Pages",
         "color_pages": "Color Pages",
         "plates": "Plates",
         "saved": "Last Saved",
     }
-    for key, title, width, anchor in [("product", regular_heading_titles["product"], 260, "w"), ("press", regular_heading_titles["press"], 90, "center"), ("format", regular_heading_titles["format"], 100, "center"), ("pages", regular_heading_titles["pages"], 120, "center"), ("color_pages", regular_heading_titles["color_pages"], 95, "center"), ("plates", regular_heading_titles["plates"], 70, "center"), ("saved", regular_heading_titles["saved"], 170, "center")]:
+    tree.heading("#0", text="Product")
+    for key, title, width, anchor in [("pages", regular_heading_titles["pages"], 120, "center"), ("color_pages", regular_heading_titles["color_pages"], 95, "center"), ("plates", regular_heading_titles["plates"], 70, "center"), ("saved", regular_heading_titles["saved"], 170, "center")]:
         tree.heading(key, text=title)
         tree.column(key, width=width, anchor=anchor)
+    tree.column("#0", width=260, anchor="w")
+    try:
+        tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
+        tree.tag_configure("subgroup_row", font=(None, 10, "bold"), foreground="#444444")
+    except Exception:
+        pass
 
+    group_by_iid = {}
     sort_state = {"col": None, "desc": False}
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
@@ -4935,7 +4864,14 @@ def build_regular_editor_launcher(parent):
         _clear_preview_panel(preview_label, preview_state, empty_text="Select a regular layout to preview")
     def selected_path():
         sel = tree.selection()
-        return sel[0] if sel else None
+        candidate = sel[0] if sel else tree.focus()
+        group_prefixes = ("__regular_press__::", "__regular_format__::")
+        if candidate and str(candidate).startswith(group_prefixes):
+            candidate = None
+        if candidate:
+            return candidate
+        focused = tree.focus()
+        return None if str(focused).startswith(group_prefixes) else focused
     def show_preview(path):
         cancel_pending_preview()
         preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
@@ -4959,12 +4895,6 @@ def build_regular_editor_launcher(parent):
         if not col:
             return rows
         def keyfunc(r):
-            if col == "product":
-                return (r.get("product") or "").lower()
-            if col == "press":
-                return (r.get("press") or "").lower()
-            if col == "format":
-                return (r.get("format") or "").lower()
             if col == "pages":
                 return tuple(r.get("section_pages_sort", (0,0,0,0)))
             if col == "color_pages":
@@ -4973,7 +4903,7 @@ def build_regular_editor_launcher(parent):
                 return int(r.get("plates", 0) or 0)
             if col == "saved":
                 return r.get("saved_dt") or datetime.min
-            return ""
+            return (r.get("product") or "").lower()
         return sorted(rows, key=keyfunc, reverse=sort_state["desc"])
     def matches(row):
         search_text = (search_var.get() or "").strip().lower()
@@ -4987,6 +4917,7 @@ def build_regular_editor_launcher(parent):
             return False
         return True
     def update_sort_headings():
+        tree.heading("#0", text="Product")
         for col in columns:
             tree.heading(col, text=_treeview_sort_heading_text(regular_heading_titles[col], sort_state, col), command=lambda _c=col: sort_by(_c))
 
@@ -4994,8 +4925,38 @@ def build_regular_editor_launcher(parent):
         rows, _changed = get_cached_regular_rows(force=False)
         rows = sort_rows([row for row in rows if matches(row)])
         tree.delete(*tree.get_children())
+        group_by_iid.clear()
+
+        press_order = ["Press 1", "Press 2"]
+        format_order = ["Broadsheet", "Tab", "8 up"]
+        press_groups = {}
         for row in rows:
-            tree.insert("", "end", iid=row["path"], values=(row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
+            press_name = str(row.get("press") or "").strip() or "Unknown Press"
+            format_name = str(row.get("format") or "").strip() or "Unknown Format"
+            press_groups.setdefault(press_name, {}).setdefault(format_name, []).append(row)
+
+        def press_sort_key(value):
+            return (press_order.index(value), value.lower()) if value in press_order else (len(press_order), value.lower())
+
+        def format_sort_key(value):
+            return (format_order.index(value), value.lower()) if value in format_order else (len(format_order), value.lower())
+
+        press_reverse = bool(sort_state.get("col") == "press" and sort_state.get("desc"))
+        format_reverse = bool(sort_state.get("col") == "format" and sort_state.get("desc"))
+
+        for press_name in sorted(press_groups.keys(), key=press_sort_key, reverse=press_reverse):
+            press_iid = f"__regular_press__::{press_name}"
+            format_groups = press_groups.get(press_name, {})
+            press_count = sum(len(items) for items in format_groups.values())
+            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", ""), open=True, tags=("group_row",))
+            group_by_iid[press_iid] = ("press", press_name)
+            for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
+                format_iid = f"__regular_format__::{press_name}::{format_name}"
+                format_count = len(format_groups.get(format_name, []))
+                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", ""), open=True, tags=("subgroup_row",))
+                group_by_iid[format_iid] = ("format", press_name, format_name)
+                for row in format_groups.get(format_name, []):
+                    tree.insert(format_iid, "end", iid=row["path"], text=row.get("product", ""), values=(row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
         update_sort_headings()
     def sort_by(col):
         if sort_state["col"] == col:
@@ -5053,8 +5014,22 @@ def build_regular_editor_launcher(parent):
             messagebox.showerror("Delete Regular Layout", f"Could not delete regular layout: {exc}", parent=root)
             return
         refresh()
-    tree.bind("<<TreeviewSelect>>", lambda e: show_preview(selected_path()))
-    tree.bind("<Double-Button-1>", lambda e: open_selected())
+    def _on_regular_tree_select(event=None):
+        show_preview(selected_path())
+
+    def _on_regular_tree_double_click(event=None):
+        item_id = tree.identify_row(event.y) if event is not None else tree.focus()
+        if item_id in group_by_iid:
+            try:
+                tree.item(item_id, open=(not bool(tree.item(item_id, "open"))))
+            except Exception:
+                pass
+            return "break"
+        open_selected()
+        return "break"
+
+    tree.bind("<<TreeviewSelect>>", _on_regular_tree_select)
+    tree.bind("<Double-Button-1>", _on_regular_tree_double_click)
     btns = ttk.Frame(frame)
     btns.grid(row=2, column=0, pady=12, sticky="ew")
     btns.columnconfigure(0, weight=1)
@@ -5664,15 +5639,13 @@ def build_main_launcher():
     issue_date_combo = ttk.Combobox(filter_frame, textvariable=issue_date_var, values=["All"], state="readonly", width=16)
     issue_date_combo.grid(row=0, column=7, sticky="w", padx=(8, 0))
 
-    columns = ("issue", "product", "press", "format", "pages", "color_pages", "plates", "saved")
-    tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+    columns = ("press", "format", "pages", "color_pages", "plates", "saved")
+    tree = ttk.Treeview(frame, columns=columns, show="tree headings", selectmode="browse")
     tree.grid(row=2, column=0, sticky="nsew", pady=(0, 0))
     vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
     vsb.grid(row=2, column=1, sticky="ns", pady=(0, 0))
-    tree.configure(yscrollcommand=vsb.set)  
+    tree.configure(yscrollcommand=vsb.set)
     recent_heading_titles = {
-        "issue": "Issue Date",
-        "product": "Product",
         "press": "Press",
         "format": "Format",
         "pages": "Pages",
@@ -5680,17 +5653,22 @@ def build_main_launcher():
         "plates": "Plates",
         "saved": "Last Saved",
     }
+    tree.heading("#0", text="Product")
     for key, title in recent_heading_titles.items():
         tree.heading(key, text=title)
-    tree.column("issue", width=110, anchor="center")  
-    tree.column("product", width=260, anchor="w")  
-    tree.column("press", width=90, anchor="center")  
-    tree.column("format", width=100, anchor="center")  
-    tree.column("pages", width=120, anchor="center")  
-    tree.column("color_pages", width=95, anchor="center")  
-    tree.column("plates", width=70, anchor="center")  
-    tree.column("saved", width=170, anchor="center")  
-    row_by_iid = {}  
+    tree.column("#0", width=260, anchor="w")
+    tree.column("press", width=90, anchor="center")
+    tree.column("format", width=100, anchor="center")
+    tree.column("pages", width=120, anchor="center")
+    tree.column("color_pages", width=95, anchor="center")
+    tree.column("plates", width=70, anchor="center")
+    tree.column("saved", width=170, anchor="center")
+    try:
+        tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
+    except Exception:
+        pass
+    row_by_iid = {}
+    group_by_iid = {}
     sort_state = {"col": None, "desc": False}  
     refresh_job = {"id": None}  
     auto_refresh_ms = 5000    
@@ -5753,8 +5731,6 @@ def build_main_launcher():
         if not col:  
             return rows  
         def keyfunc(r):  
-            if col == "issue":  
-                return r["issue_dt"] or datetime.min  
             if col == "saved":  
                 return r["saved_dt"] or datetime.min  
             if col == "product":  
@@ -5771,33 +5747,85 @@ def build_main_launcher():
                 return int(r.get("plates", 0) or 0)
             return ""  
         return sorted(rows, key=keyfunc, reverse=sort_state["desc"])  
-    def load_rows_into_tree(rows, preserve_selection=None, preserve_focus=None, preserve_yview=None):  
-        tree.delete(*tree.get_children())  
-        row_by_iid.clear()  
-        for r in rows:  
-            iid = r["path"]  
-            tree.insert("", "end", iid=iid, values=(  
-                r["issue_disp"],  
-                r["product"],  
-                r["press"],  
-                r["format"],  
-                r.get("pages_disp", ""),
-                r.get("color_pages", 0),
-                r.get("plates", 0),
-                r["saved_disp"],  
-            ))  
-            row_by_iid[iid] = r  
-        if preserve_selection:  
-            existing = [iid for iid in preserve_selection if iid in row_by_iid]  
-            if existing:  
-                tree.selection_set(existing)  
-        if preserve_focus and preserve_focus in row_by_iid:  
-            tree.focus(preserve_focus)  
-        if preserve_yview and len(preserve_yview) > 0:  
-            try:  
-                tree.yview_moveto(preserve_yview[0])  
-            except Exception:  
-                pass  
+    def load_rows_into_tree(rows, preserve_selection=None, preserve_focus=None, preserve_yview=None):
+        preserve_selection = tuple(preserve_selection or ())
+        preserve_focus = preserve_focus or None
+        preserve_yview = tuple(preserve_yview or ())
+        preserve_tree_state = bool(preserve_selection or preserve_focus or preserve_yview)
+        existing_group_ids = tuple(tree.get_children(""))
+        existing_group_id_set = set(existing_group_ids)
+        expanded_group_ids = {
+            iid for iid in existing_group_ids
+            if bool(tree.item(iid, "open"))
+        } if preserve_tree_state else set()
+        preserved_selected_rows = [row_by_iid.get(iid) for iid in preserve_selection if iid in row_by_iid]
+        preserved_focus_row = row_by_iid.get(preserve_focus) if preserve_focus in row_by_iid else None
+        tree.delete(*existing_group_ids)
+        row_by_iid.clear()
+        group_by_iid.clear()
+
+        tomorrow_issue_display = fmt_issue_for_display(tomorrow_issue_date_mmddyyyy())
+
+        grouped_rows = {}
+        for r in rows:
+            issue_label = str(r.get("issue_disp") or "").strip() or "No Issue Date"
+            grouped_rows.setdefault(issue_label, []).append(r)
+
+        def issue_group_sort_key(issue_label):
+            if issue_label == "No Issue Date":
+                return (1, datetime.max)
+            issue_dt = parse_issue_date_flexible(issue_label)
+            return (0, issue_dt or datetime.max)
+
+        group_labels = list(grouped_rows.keys())
+        group_labels.sort(key=issue_group_sort_key)
+
+        known_group_ids = set()
+        selection_group_ids = {
+            f"__issue_group__::{str(row.get('issue_disp') or '').strip() or 'No Issue Date'}"
+            for row in preserved_selected_rows
+            if isinstance(row, dict)
+        }
+        focus_group_id = None
+        if isinstance(preserved_focus_row, dict):
+            focus_issue = str(preserved_focus_row.get("issue_disp") or "").strip() or "No Issue Date"
+            focus_group_id = f"__issue_group__::{focus_issue}"
+
+        for issue_label in group_labels:
+            group_iid = f"__issue_group__::{issue_label}"
+            default_open = (issue_label == tomorrow_issue_display)
+            if preserve_tree_state and group_iid in existing_group_id_set:
+                should_open = bool(group_iid in expanded_group_ids)
+            else:
+                should_open = default_open
+            if group_iid == focus_group_id or group_iid in selection_group_ids:
+                should_open = True
+            issue_count = len(grouped_rows.get(issue_label, []))
+            tree.insert("", "end", iid=group_iid, text=f"{issue_label} ({issue_count})", open=should_open, tags=("group_row",))
+            group_by_iid[group_iid] = issue_label
+            known_group_ids.add(group_iid)
+            for r in grouped_rows.get(issue_label, []):
+                iid = r["path"]
+                tree.insert(group_iid, "end", iid=iid, text=r["product"], values=(
+                    r["press"],
+                    r["format"],
+                    r.get("pages_disp", ""),
+                    r.get("color_pages", 0),
+                    r.get("plates", 0),
+                    r["saved_disp"],
+                ))
+                row_by_iid[iid] = r
+        if preserve_selection:
+            existing = [iid for iid in preserve_selection if iid in row_by_iid or iid in known_group_ids]
+            if existing:
+                tree.selection_set(existing)
+        if preserve_focus and (preserve_focus in row_by_iid or preserve_focus in known_group_ids):
+            tree.focus(preserve_focus)
+        if preserve_yview and len(preserve_yview) > 0:
+            try:
+                tree.yview_moveto(preserve_yview[0])
+            except Exception:
+                pass
     def _matches_layout_filter(row):
         search_text = (search_var.get() or "").strip().lower()
         press_filter = (press_var.get() or "All").strip()
@@ -5846,6 +5874,7 @@ def build_main_launcher():
         return True
 
     def update_sort_headings():
+        tree.heading("#0", text="Product")
         for col in columns:
             tree.heading(col, text=_treeview_sort_heading_text(recent_heading_titles[col], sort_state, col), command=lambda _c=col: sort_by(_c))
 
@@ -5889,9 +5918,13 @@ def build_main_launcher():
     press_var.trace_add("write", lambda *_: refresh(preserve_state=False))
     format_var.trace_add("write", lambda *_: refresh(preserve_state=False))
     issue_date_var.trace_add("write", lambda *_: refresh(preserve_state=False))
-    def selected_path():  
-        sel = tree.selection()  
-        return sel[0] if sel else None  
+    def selected_path():
+        sel = tree.selection()
+        candidate = sel[0] if sel else tree.focus()
+        if candidate in row_by_iid:
+            return candidate
+        focused = tree.focus()
+        return focused if focused in row_by_iid else None
     def open_selected():
         path = selected_path()
         if not path:
@@ -6208,8 +6241,22 @@ def build_main_launcher():
         ttk.Button(btns, text="Delete", command=delete_selected_cleanup, width=12).pack(side="left", padx=(0, 8))  
         ttk.Button(btns, text="Cancel", command=dialog.destroy, width=12).pack(side="left")  
 
-    tree.bind("<<TreeviewSelect>>", lambda e: show_preview(selected_path()))
-    tree.bind("<Double-Button-1>", lambda e: open_selected())
+    def _on_main_tree_select(event=None):
+        show_preview(selected_path())
+
+    def _on_main_tree_double_click(event=None):
+        item_id = tree.identify_row(event.y) if event is not None else tree.focus()
+        if item_id in group_by_iid:
+            try:
+                tree.item(item_id, open=(not bool(tree.item(item_id, "open"))))
+            except Exception:
+                pass
+            return "break"
+        open_selected()
+        return "break"
+
+    tree.bind("<<TreeviewSelect>>", _on_main_tree_select)
+    tree.bind("<Double-Button-1>", _on_main_tree_double_click)
     btns = ttk.Frame(frame)
     btns.grid(row=3, column=0, columnspan=2, pady=12, sticky="ew")
     btns.columnconfigure(0, weight=1)
