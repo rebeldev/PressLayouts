@@ -254,6 +254,107 @@ def _build_imposition_text_from_layout_data(data, config=None):
     return fallback
 
 
+
+def _build_filename_suggestion_from_layout_data(data, template_mode=False, regular_mode=False, default_dir=None, config=None):
+    ctx = _layout_data_to_headless_ctx(data, config=config, title_base="")
+    ctx["template_mode"] = bool(template_mode)
+    ctx["regular_mode"] = bool(regular_mode)
+    if default_dir:
+        ctx["default_dir"] = default_dir
+    ctx["layout_name"] = str((data or {}).get("name") or "").strip()
+    return build_save_filename_suggestion(ctx)
+
+
+def _normalize_layout_data_for_touch(data, path, template_mode=False, regular_mode=False, default_dir=None, config=None):
+    ctx = _layout_data_to_headless_ctx(data, config=config, title_base="")
+    ctx["template_mode"] = bool(template_mode)
+    ctx["regular_mode"] = bool(regular_mode)
+    if default_dir:
+        ctx["default_dir"] = default_dir
+    ctx["layout_name"] = str((data or {}).get("name") or os.path.splitext(os.path.basename(path))[0]).strip()
+
+    normalized = collect_layout_data(ctx)
+    if template_mode:
+        normalized = helpers_mod._normalize_template_data(normalized)
+        normalized.pop("issue_date", None)
+        normalized.pop("product", None)
+        normalized.pop("color_cells", None)
+    return normalized, ctx
+
+
+def _unique_cleanup_target_path(target_path, current_path=None):
+    target_path = os.path.abspath(str(target_path or ""))
+    current_path = os.path.abspath(str(current_path or "")) if current_path else ""
+    if not target_path:
+        return target_path
+    if (not os.path.exists(target_path)) or (current_path and os.path.normcase(target_path) == os.path.normcase(current_path)):
+        return target_path
+    base, ext = os.path.splitext(target_path)
+    counter = 1
+    while True:
+        candidate = f"{base}_{counter}{ext}"
+        if (not os.path.exists(candidate)) or (current_path and os.path.normcase(candidate) == os.path.normcase(current_path)):
+            return candidate
+        counter += 1
+
+
+def touch_cleanup_json_path(path, template_mode=False, regular_mode=False, default_dir=None, prompt_save_template=None):
+    try:
+        data = safe_read_json(path)
+        if not isinstance(data, dict):
+            return f"{os.path.basename(path)}: Could not read JSON data.", path, path
+
+        errors = validate_layout_data_for_mode(
+            data,
+            template_mode=bool(template_mode),
+            regular_mode=bool(regular_mode),
+        )
+        if errors:
+            return f"{os.path.basename(path)}: " + " | ".join(errors), path, path
+
+        prepared_data, ctx = _normalize_layout_data_for_touch(
+            data,
+            path,
+            template_mode=template_mode,
+            regular_mode=regular_mode,
+            default_dir=default_dir,
+        )
+        prepared_data["saved_at"] = datetime.now().isoformat(timespec="seconds")
+
+        original_path = path
+        final_path = path
+
+        if template_mode:
+            target_filename = build_filename_suggestion(ctx)
+            target_filename = sanitize_filename(target_filename).strip()
+            if not target_filename.lower().endswith('.json'):
+                target_filename += '.json'
+            desired_path = os.path.join(os.path.dirname(path), target_filename)
+            final_path = _unique_cleanup_target_path(desired_path, current_path=path)
+            prepared_data["name"] = os.path.splitext(os.path.basename(final_path))[0]
+            if os.path.normcase(os.path.abspath(final_path)) != os.path.normcase(os.path.abspath(path)):
+                os.replace(path, final_path)
+                remove_preview_image_for_json(path)
+                path = final_path
+        else:
+            if not prepared_data.get("name"):
+                prepared_data["name"] = os.path.splitext(os.path.basename(path))[0]
+
+        safe_write_json(path, prepared_data)
+        try:
+            regenerate_preview_image_for_json_path(
+                path,
+                template_mode=template_mode,
+                default_dir=default_dir,
+                prompt_save_template=prompt_save_template,
+                scale=0.75,
+            )
+        except Exception as exc:
+            return f"{os.path.basename(path)}: {exc}", original_path, path
+        return None, original_path, path
+    except Exception as exc:
+        return f"{os.path.basename(path)}: {exc}", path, path
+
 def _render_load_starter_font(size, bold=False):
     try:
         from PIL import ImageFont
@@ -428,13 +529,11 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
         except Exception:
             pass
     product_text = (data.get("product") or "").strip()
-    imposition_text = _build_imposition_text_from_layout_data(data, config=config)
 
     label_top = header_top
     fallback_title = title_base or ("Template Layout" if template_mode else "Press Layout")
     _render_draw_centered_text(draw, (margin_x, label_top, img_w - margin_x, label_top + 60), product_text or fallback_title, title_font)
     draw.text((margin_x, label_top + 66), f"Issue Date: {issue_text}", fill="black", font=sections_print_font)
-    draw.text((img_w - margin_x - 420 - 300, label_top + 66), f"Imposition: {imposition_text}", fill="black", font=text_font)
 
     try:
         count = max(1, min(4, int(data.get("section_count", 1))))
@@ -763,7 +862,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     win.title(title_base)
 
     template_mode = bool(config.get("template_mode", False))
-    window_state_key = "template_layout_window" if template_mode else "layout_window"
+    regular_mode = bool(config.get("regular_mode", False))
+    window_state_key = "template_layout_window" if template_mode else ("regular_layout_window" if regular_mode else "layout_window")
     has_saved_window_state = bool(load_window_state_map().get(window_state_key))
 
     header_frame = ttk.Frame(win, padding=(16, 12, 16, 8))
@@ -811,9 +911,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     controls_center_frame.pack(anchor="center")
     btn_frame = ttk.Frame(controls_center_frame)
 
-    # template mode disables issue/product
-    if template_mode:
+    # template mode disables issue/product; regular mode disables issue date only
+    if template_mode or regular_mode:
         issue_entry.state(["disabled"])
+    if template_mode:
         product_entry.state(["disabled"])
 
     # Sections
@@ -1155,6 +1256,9 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "title_base": title_base,
         "press_name": config.get("press_name", ""),
         "format_name": format_name,
+        "template_mode": template_mode,
+        "regular_mode": regular_mode,
+        "default_dir": config.get("default_dir", TEMPLATE_DIR if template_mode else (REGULAR_DIR if regular_mode else LAYOUTS_DIR)),
         "issue_entry": issue_entry,
         "product_entry": product_entry,
         "section_count_var": section_count_var,
@@ -1281,7 +1385,58 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         except Exception:
             pass
 
+    def _set_publication_entry_text(value):
+        normalized = normalize_publication_name(value)
+        try:
+            current = product_entry.get()
+        except Exception:
+            current = ""
+        if current == normalized:
+            return normalized
+        try:
+            cursor_index = product_entry.index("insert")
+        except Exception:
+            cursor_index = None
+        try:
+            sel_start = product_entry.index("sel.first")
+            sel_end = product_entry.index("sel.last")
+        except Exception:
+            sel_start = None
+            sel_end = None
+        try:
+            product_entry.delete(0, "end")
+            product_entry.insert(0, normalized)
+            if sel_start is not None and sel_end is not None:
+                product_entry.selection_range(min(sel_start, len(normalized)), min(sel_end, len(normalized)))
+            elif cursor_index is not None:
+                product_entry.icursor(min(cursor_index, len(normalized)))
+        except Exception:
+            pass
+        return normalized
+
+    def _normalize_publication_entry(event=None):
+        if template_mode:
+            return normalize_publication_name(product_entry.get())
+        return _set_publication_entry_text(product_entry.get())
+
+    def _prompt_update_starter_before_save():
+        if template_mode:
+            return
+        publication_name = _normalize_publication_entry()
+        current_starter = (starter_format_var.get() or "Standard").strip() or "Standard"
+        current_upper = current_starter.upper()
+        for token, desired in (("USAT", "USAT"), ("NYT", "NYT")):
+            if token in publication_name and current_upper != desired:
+                if messagebox.askyesno(
+                    "Update Starter Format?",
+                    f"The publication name contains {token}, but Starter is set to {current_starter}.\n\nWould you like to change Starter to {desired} before saving?",
+                    parent=win,
+                ):
+                    starter_format_var.set(desired)
+                break
+
     def do_save_with_starter():
+        _prompt_update_starter_before_save()
         ok = do_save(win, ctx)
         if ok:
             _persist_starter_format_to_file()
@@ -1295,6 +1450,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         return ok
 
     def do_save_as_with_starter():
+        _prompt_update_starter_before_save()
         ok = do_save_as(win, ctx)
         if ok:
             _persist_starter_format_to_file()
@@ -1335,7 +1491,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             except Exception:
                 pass
         return {
-            "publication": product_entry.get().strip(),
+            "publication": normalize_publication_name(product_entry.get().strip()),
             "issue_date": issue_text,
             "color_pages": (ctx.get("color_pages_var", color_pages_var).get() or "").strip(),
             "plates": (ctx.get("plates_var", plates_var).get() or "").strip(),
@@ -1971,12 +2127,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             except Exception:
                 pass
         product_text = product_entry.get().strip()
-        imposition_text = imposition_var.get().strip()
         # Use product name as the prominent centered title and place Issue Date on the same row
         label_top = header_top
         _draw_centered_text(draw, (margin_x, label_top, img_w - margin_x, label_top + 60), product_text or title_base or ("Template Layout" if template_mode else "Press Layout"), title_font)
         draw.text((margin_x, label_top + 66), f"Issue Date: {issue_text}", fill="black", font=sections_print_font)
-        draw.text((img_w - margin_x - 420 - 300, label_top + 66), f"Imposition: {imposition_text}", fill="black", font=text_font)
         try:
             count = max(1, min(4, int(section_count_var.get())))
         except Exception:
@@ -2385,8 +2539,16 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     issue_entry.bind("<KeyRelease>", lambda e: update_imposition())
     issue_entry.bind("<Button-1>", _open_issue_date_picker)
 
-    product_entry.bind("<KeyRelease>", lambda e: update_imposition())
-    product_entry.bind("<FocusOut>", lambda e: update_imposition())
+    def _on_publication_key_release(event=None):
+        _normalize_publication_entry()
+        update_imposition()
+
+    def _on_publication_focus_out(event=None):
+        _normalize_publication_entry()
+        update_imposition()
+
+    product_entry.bind("<KeyRelease>", _on_publication_key_release)
+    product_entry.bind("<FocusOut>", _on_publication_focus_out)
 
     selector_busy = {"press": False, "format": False}
 
@@ -2742,6 +2904,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
 
     _capture_unit_section_assignments()
     # initial refreshes
+    _normalize_publication_entry()
     update_imposition()
     refresh_color_overlays()
 
@@ -3565,6 +3728,7 @@ def open_json_in_layout(
     cfg["section_count"] = data.get("section_count", 1)
     cfg["section_pages"] = data.get("section_pages", [min_pages_for_format(fmt)])
     cfg["template_mode"] = bool(template_mode)
+    cfg["regular_mode"] = (not bool(template_mode)) and bool(default_dir) and os.path.abspath(default_dir) == os.path.abspath(REGULAR_DIR)
     cfg["copy_blank_issue_product"] = bool(copy_blank_issue_product)
     cfg["copy_issue_date_tomorrow"] = bool(copy_issue_date_tomorrow)
     if default_dir:
@@ -3956,6 +4120,7 @@ def open_new_regular(parent):
     cfg["section_count"] = 1
     cfg["section_pages"] = [min_pages_for_format(fmt)]
     cfg["template_mode"] = False
+    cfg["regular_mode"] = True
     cfg["default_dir"] = REGULAR_DIR
     cfg["prompt_save_template"] = False
 
@@ -5881,7 +6046,7 @@ def build_main_launcher():
             except Exception as exc:
                 return f"{os.path.basename(path)}: {exc}"
 
-        def regen_all_previews_cleanup():
+        def _cleanup_jobs():
             jobs = []
             layout_rows, _changed = get_cached_layout_rows(force=False)
             for row in layout_rows:
@@ -5889,6 +6054,7 @@ def build_main_launcher():
                     "label": os.path.basename(row["path"]),
                     "path": row["path"],
                     "template_mode": False,
+                    "regular_mode": False,
                     "default_dir": None,
                     "prompt_save_template": None,
                 })
@@ -5897,6 +6063,7 @@ def build_main_launcher():
                     "label": os.path.basename(path),
                     "path": path,
                     "template_mode": True,
+                    "regular_mode": False,
                     "default_dir": None,
                     "prompt_save_template": None,
                 })
@@ -5905,9 +6072,14 @@ def build_main_launcher():
                     "label": os.path.basename(path),
                     "path": path,
                     "template_mode": False,
+                    "regular_mode": True,
                     "default_dir": REGULAR_DIR,
                     "prompt_save_template": False,
                 })
+            return jobs
+
+        def regen_all_previews_cleanup():
+            jobs = _cleanup_jobs()
             total = len(jobs)
             if total <= 0:
                 messagebox.showinfo("Regen ALL Previews", "No layout, template, or regular files were found.", parent=dialog)
@@ -5950,6 +6122,61 @@ def build_main_launcher():
                     parent=dialog,
                 )
 
+        def _touch_json_path(path, template_mode=False, regular_mode=False, default_dir=None, prompt_save_template=None):
+            error_text, _original_path, _final_path = touch_cleanup_json_path(
+                path,
+                template_mode=template_mode,
+                regular_mode=regular_mode,
+                default_dir=default_dir,
+                prompt_save_template=prompt_save_template,
+            )
+            return error_text
+
+        def touch_all_cleanup():
+            jobs = _cleanup_jobs()
+            total = len(jobs)
+            if total <= 0:
+                messagebox.showinfo("Touch ALL", "No layout, template, or regular files were found.", parent=dialog)
+                return
+            if not messagebox.askyesno(
+                "Touch ALL",
+                f"Open and save all {total} layouts, templates, and regular files?\n\nTemplates may be renamed to the corrected imposition filename.",
+                parent=dialog,
+            ):
+                return
+            close_preview()
+            errors = []
+            for idx, job in enumerate(jobs, start=1):
+                status_var.set(f"Touching {idx} of {total}: {job['label']}")
+                dialog.update_idletasks()
+                error_text = _touch_json_path(
+                    job["path"],
+                    template_mode=job["template_mode"],
+                    regular_mode=job["regular_mode"],
+                    default_dir=job["default_dir"],
+                    prompt_save_template=job["prompt_save_template"],
+                )
+                if error_text:
+                    errors.append(error_text)
+            _rebuild_template_cache()
+            _rebuild_regular_cache()
+            _rebuild_layout_cache()
+            refresh(preserve_state=False)
+            success_count = total - len(errors)
+            status_var.set(f"Finished touching {success_count} of {total} files.")
+            if errors:
+                messagebox.showerror(
+                    "Touch ALL",
+                    f"Touched {success_count} of {total} files.\n\nErrors:\n" + "\n".join(errors),
+                    parent=dialog,
+                )
+            else:
+                messagebox.showinfo(
+                    "Touch ALL",
+                    f"Successfully touched {total} files. Any template with a corrected imposition was renamed to its new filename.",
+                    parent=dialog,
+                )
+
         def delete_selected_cleanup():  
             to_delete = [path for path, checked in delete_state.items() if checked]  
             if not to_delete:  
@@ -5976,6 +6203,7 @@ def build_main_launcher():
                     parent=dialog,  
                 )  
             dialog.destroy()  
+        ttk.Button(btns, text="Touch ALL", command=touch_all_cleanup, width=12).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="Regen ALL Previews", command=regen_all_previews_cleanup, width=18).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="Delete", command=delete_selected_cleanup, width=12).pack(side="left", padx=(0, 8))  
         ttk.Button(btns, text="Cancel", command=dialog.destroy, width=12).pack(side="left")  

@@ -1,6 +1,113 @@
 {
-  "current_version": "1.1.8",
+  "current_version": "1.1.17",
   "versions": [
+    {
+      "version": "1.1.17",
+      "released": "6-12-2026",
+      "summary": "Cleanup Touch ALL now reapplies current imposition logic and renames corrected templates.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Updated Cleanup Touch ALL so existing layouts, regulars, and templates are re-saved using the current imposition logic, and templates are renamed to the corrected filename when the new imposition rule changes their name."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.16",
+      "released": "6-12-2026",
+      "summary": "Imposition and template naming now infer virtual top rows for operator-side dinkies.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Updated imposition, template filenames, and template names so operator-side dinky units sort using an inferred virtual top row between the surrounding former/web units instead of the bottom-row page numbers."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.15",
+      "released": "6-12-2026",
+      "summary": "Printed layouts no longer show the imposition line in either print render path.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Removed the Imposition line from the actual printed layout output and the headless print renderer used for generated previews."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.13",
+      "released": "6-12-2026",
+      "summary": "Regular save filenames now use press/publication/section-page naming and first saves no longer prompt for a filename.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Updated regular save and save-as filename suggestions to use P# Publication SectionPages naming, omitting empty sections and joining populated sections with hyphens.",
+            "Updated Save in template, layout, and regular editors so a first-time save writes directly to the suggested filename without opening a filename confirmation dialog."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.12",
+      "released": "6-12-2026",
+      "summary": "Save and Touch ALL now validate layouts, templates, and regulars with regular-mode issue date disabled.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added save and Touch ALL validation for required issue date rules, required publication name rules, numeric-only grid cells, and section assignments based on whether the file is a layout, regular, or template."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated regular mode in the layout editor so the Issue Date field is disabled like template mode while still allowing blank issue dates for regular saves.",
+            "Updated Touch ALL so each layout, template, and regular file is validated before it is saved, while leaving starter format verification behavior unchanged for manual save and save-as."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.10",
+      "released": "6-12-2026",
+      "summary": "Press unit grid fields now accept numbers only.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Updated all press unit grid cells so users can only type or paste numeric values, preventing letters and symbols from being entered."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.9",
+      "released": "6-12-2026",
+      "summary": "Uppercase publication entry with starter format prompts for USAT and NYT saves.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a save and save-as prompt that offers to switch Starter to USAT when the publication name contains USAT and the current starter format is different.",
+            "Added a save and save-as prompt that offers to switch Starter to NYT when the publication name contains NYT and the current starter format is different."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the publication name field in regular and layout editors to automatically convert text to all caps while typing and when loading saved layouts.",
+            "Updated starter sheet publication rendering, saved layout publication values, and layout filename suggestions to use uppercase publication names."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.1.8",
       "released": "6-12-2026",

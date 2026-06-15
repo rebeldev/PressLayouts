@@ -131,6 +131,8 @@ def sanitize_filename(name: str) -> str:
     for ch in bad:
         name = name.replace(ch, "_")
     return name.strip()
+def normalize_publication_name(value: str) -> str:
+    return str(value or "").strip().upper()
 def list_json_files(folder):
     """Return list of (display_name, full_path) for .json files in folder."""
     ensure_dir(folder)
@@ -322,14 +324,67 @@ def build_layout_rows():
         })
 
     return rows
+
 def build_layout_filename_suggestion(ctx) -> str:
     raw_date = ctx["issue_entry"].get().strip() if ctx.get("issue_entry") else ""
-    raw_product = ctx["product_entry"].get().strip() if ctx.get("product_entry") else ""
+    raw_product = normalize_publication_name(ctx["product_entry"].get()) if ctx.get("product_entry") else ""
 
     dt = parse_issue_date_flexible(raw_date)
     date_part = dt.strftime("%m%d%Y") if dt else "00000000"
     product_part = raw_product if raw_product else "Layout"
     return sanitize_filename(f"{date_part} - {product_part}.json").strip()
+
+
+def _section_name_for_filename(ctx, section_index: int) -> str:
+    try:
+        raw_name = (ctx.get("section_name_vars", [])[section_index - 1].get() or "").strip()
+    except Exception:
+        raw_name = ""
+    if raw_name:
+        return str(raw_name).upper()
+    if bool(ctx.get("template_mode", False)):
+        return f"S{section_index}"
+    return chr(ord("A") + section_index - 1)
+
+
+def build_regular_filename_suggestion(ctx) -> str:
+    press_name = ctx.get("press_name", "")
+    press_num = "1" if "1" in press_name else "2"
+    prefix = f"P{press_num}"
+    publication = normalize_publication_name(ctx["product_entry"].get()) if ctx.get("product_entry") else ""
+    publication = publication or "Publication"
+
+    try:
+        section_count = int(ctx["section_count_var"].get())
+    except Exception:
+        section_count = 1
+    section_count = max(1, min(4, section_count))
+
+    page_counts = compute_section_page_counts_from_ctx(ctx, section_count=section_count)
+    section_segments = []
+    for section_index in range(1, section_count + 1):
+        section_pages = page_counts[section_index - 1] if section_index - 1 < len(page_counts) else 0
+        if int(section_pages or 0) <= 0:
+            continue
+        section_name = _section_name_for_filename(ctx, section_index)
+        section_segments.append(f"{section_name}{int(section_pages)}")
+
+    filename_parts = [prefix, publication]
+    if section_segments:
+        filename_parts.append("-".join(section_segments))
+
+    name = sanitize_filename(" ".join(part for part in filename_parts if part).strip())
+    if not name.lower().endswith(".json"):
+        name += ".json"
+    return name
+
+
+def build_save_filename_suggestion(ctx) -> str:
+    if ctx.get("template_mode"):
+        return build_filename_suggestion(ctx)
+    if _ctx_is_regular_mode(ctx):
+        return build_regular_filename_suggestion(ctx)
+    return build_layout_filename_suggestion(ctx)
 def safe_int(value):
     try:
         return int(str(value).strip())
@@ -383,6 +438,112 @@ def unit_min_page_number(unit_dict):
             if mins is None or v < mins:
                 mins = v
     return mins
+
+
+def unit_row_numbers(unit_dict, row_index: int):
+    values = []
+    entries_2d = unit_dict.get("entries", [])
+    if row_index < 0 or row_index >= len(entries_2d):
+        return values
+    for cell in entries_2d[row_index]:
+        value = cell.get() if hasattr(cell, "get") else cell
+        parsed = safe_int(value)
+        if parsed is not None:
+            values.append(parsed)
+    return values
+
+
+def unit_top_row_numbers(unit_dict):
+    return unit_row_numbers(unit_dict, 0)
+
+
+def unit_bottom_row_numbers(unit_dict):
+    return unit_row_numbers(unit_dict, 1)
+
+
+def unit_top_row_min_page_number(unit_dict):
+    values = unit_top_row_numbers(unit_dict)
+    return min(values) if values else None
+
+
+def unit_top_row_max_page_number(unit_dict):
+    values = unit_top_row_numbers(unit_dict)
+    return max(values) if values else None
+
+
+def unit_bottom_row_min_page_number(unit_dict):
+    values = unit_bottom_row_numbers(unit_dict)
+    return min(values) if values else None
+
+
+def _section_units_in_imposition_walk_order(section_units, press_name):
+    preferred_labels = get_unit_order(section_units, press_name)
+    unit_map = {str(u.get("label") or ""): u for u in section_units}
+    ordered = [unit_map[label] for label in preferred_labels if label in unit_map]
+    seen_labels = set(preferred_labels)
+    extras = sorted(
+        [u for u in section_units if str(u.get("label") or "") not in seen_labels],
+        key=lambda u: str(u.get("label") or "")
+    )
+    ordered.extend(extras)
+    return ordered
+
+
+def unit_effective_imposition_sort_value(unit_dict, section_units, press_name):
+    """Return the page-like value used to sort units for imposition names.
+
+    Full units and DS dinkies sort by their real top-row minimum.
+    OS dinkies infer a virtual top row so they sort between the units that
+    physically surround them on the former/web walk order.
+    """
+    top_min = unit_top_row_min_page_number(unit_dict)
+    if top_min is not None:
+        return float(top_min)
+
+    if unit_dinky_suffix(unit_dict) == "os":
+        ordered_units = _section_units_in_imposition_walk_order(section_units, press_name)
+        try:
+            idx = ordered_units.index(unit_dict)
+        except ValueError:
+            idx = -1
+
+        prev_top_max = None
+        next_top_min = None
+
+        if idx >= 0:
+            for j in range(idx - 1, -1, -1):
+                val = unit_top_row_max_page_number(ordered_units[j])
+                if val is not None:
+                    prev_top_max = val
+                    break
+
+            for j in range(idx + 1, len(ordered_units)):
+                val = unit_top_row_min_page_number(ordered_units[j])
+                if val is not None:
+                    next_top_min = val
+                    break
+
+        if prev_top_max is not None and next_top_min is not None:
+            candidate = float(prev_top_max) + 0.1
+            if candidate < float(next_top_min):
+                return candidate
+            return (float(prev_top_max) + float(next_top_min)) / 2.0
+
+        if prev_top_max is not None:
+            return float(prev_top_max) + 0.1
+
+        if next_top_min is not None:
+            return float(next_top_min) - 0.1
+
+    bottom_min = unit_bottom_row_min_page_number(unit_dict)
+    if bottom_min is not None:
+        return float(bottom_min)
+
+    actual_min = unit_min_page_number(unit_dict)
+    if actual_min is not None:
+        return float(actual_min)
+
+    return float("inf")
 
 
 def unit_page_entry_count(unit_dict) -> int:
@@ -465,10 +626,16 @@ def build_filename_suggestion(ctx) -> str:
     for sec_idx in range(1, section_count + 1):
         sec_pages = pages[sec_idx - 1] if sec_idx - 1 < len(pages) else 0
         sec_units = units_by_section.get(sec_idx, [])
+        ordered_labels = get_unit_order(sec_units, press_name)
+        order_index = {label: idx for idx, label in enumerate(ordered_labels)}
 
         def sort_key(u):
-            m = unit_min_page_number(u)
-            return (m is None, m if m is not None else 10**9)
+            label = str(u.get("label") or "")
+            return (
+                unit_effective_imposition_sort_value(u, sec_units, press_name),
+                order_index.get(label, 10**6),
+                label,
+            )
 
         sec_units_sorted = sorted(sec_units, key=sort_key)
         units_part = "".join(
@@ -807,6 +974,12 @@ def apply_window_sizing(win, config):
         x = max(0, (scr_w - w) // 2)
         y = max(0, (scr_h - h) // 2)
         win.geometry(f"{w}x{h}+{x}+{y}")
+
+
+def _grid_entry_allows_only_numbers(proposed_value: str) -> bool:
+    proposed = str(proposed_value or "").strip()
+    return proposed == "" or proposed.isdigit()
+
 def create_press_unit(
     parent,
     unit_label,
@@ -895,7 +1068,15 @@ def create_press_unit(
             cell_container = ttk.Frame(box_frame)
             cell_container.grid(row=map_row(r), column=map_col(c), sticky="nsew", padx=cell_pad, pady=cell_pad)
 
-            cell_entry = ttk.Entry(cell_container, justify="center", font=cell_font, width=cell_width)
+            validate_numbers_cmd = unit_frame.register(_grid_entry_allows_only_numbers)
+            cell_entry = ttk.Entry(
+                cell_container,
+                justify="center",
+                font=cell_font,
+                width=cell_width,
+                validate="key",
+                validatecommand=(validate_numbers_cmd, "%P"),
+            )
             cell_entry._press_grid_cell = True
             cell_entry.pack(fill="both", expand=True)
 
@@ -1779,6 +1960,192 @@ def _validate_used_units_have_sections(ctx, parent=None) -> bool:
     return False
 
 
+def _ctx_is_regular_mode(ctx) -> bool:
+    if bool(ctx.get("regular_mode", False)):
+        return True
+    default_dir = str(ctx.get("default_dir") or "").strip()
+    if not default_dir:
+        return False
+    try:
+        return os.path.abspath(default_dir) == os.path.abspath(REGULAR_DIR)
+    except Exception:
+        return False
+
+
+def _ctx_file_type_name(ctx) -> str:
+    if bool(ctx.get("template_mode", False)):
+        return "template"
+    if _ctx_is_regular_mode(ctx):
+        return "regular"
+    return "layout"
+
+
+def _normalize_ctx_publication_entry(ctx):
+    product_entry = ctx.get("product_entry")
+    if not product_entry:
+        return ""
+    try:
+        raw_value = product_entry.get()
+    except Exception:
+        raw_value = ""
+    normalized = normalize_publication_name(raw_value)
+    try:
+        current_value = product_entry.get()
+    except Exception:
+        current_value = raw_value
+    if current_value != normalized:
+        try:
+            product_entry.state(["!disabled"])
+        except Exception:
+            pass
+        try:
+            product_entry.delete(0, "end")
+            product_entry.insert(0, normalized)
+        except Exception:
+            pass
+        if bool(ctx.get("template_mode", False)):
+            try:
+                product_entry.state(["disabled"])
+            except Exception:
+                pass
+    return normalized
+
+
+def _normalize_ctx_issue_date_entry(ctx):
+    issue_entry = ctx.get("issue_entry")
+    if not issue_entry:
+        return ""
+    try:
+        raw_value = (issue_entry.get() or "").strip()
+    except Exception:
+        raw_value = ""
+    if not raw_value:
+        return ""
+    dt = parse_issue_date_flexible(raw_value)
+    if not dt:
+        return raw_value
+    normalized = dt.strftime("%m/%d/%Y")
+    try:
+        current_value = (issue_entry.get() or "").strip()
+    except Exception:
+        current_value = raw_value
+    if current_value != normalized:
+        try:
+            issue_entry.state(["!disabled"])
+        except Exception:
+            pass
+        try:
+            issue_entry.delete(0, "end")
+            issue_entry.insert(0, normalized)
+        except Exception:
+            pass
+        if bool(ctx.get("template_mode", False)) or _ctx_is_regular_mode(ctx):
+            try:
+                issue_entry.state(["disabled"])
+            except Exception:
+                pass
+    return normalized
+
+
+def _invalid_grid_cells_from_data(data):
+    invalid = []
+    for unit in (data.get("units", []) or []):
+        label = str(unit.get("label") or "Unit")
+        grid = unit.get("grid", []) or []
+        for row_index, row in enumerate(grid, start=1):
+            row_values = row if isinstance(row, list) else []
+            for col_index, cell in enumerate(row_values, start=1):
+                value = str(cell or "").strip()
+                if value and (not value.isdigit()):
+                    invalid.append((label, row_index, col_index, value))
+    return invalid
+
+
+def _units_missing_sections_from_data(data):
+    offenders = []
+    for unit in (data.get("units", []) or []):
+        label = str(unit.get("label") or "Unit")
+        section_value = str(unit.get("section") or "").strip()
+        if section_value:
+            continue
+        has_values = False
+        for row in (unit.get("grid", []) or []):
+            row_values = row if isinstance(row, list) else []
+            for cell in row_values:
+                if str(cell or "").strip():
+                    has_values = True
+                    break
+            if has_values:
+                break
+        if has_values:
+            offenders.append(label)
+    return offenders
+
+
+def validate_layout_data_for_mode(data, template_mode=False, regular_mode=False):
+    if not isinstance(data, dict):
+        return ["Could not read layout data."]
+
+    errors = []
+    file_type = "template" if template_mode else ("regular" if regular_mode else "layout")
+
+    raw_issue = str(data.get("issue_date") or "").strip()
+    raw_product = str(data.get("product") or "").strip()
+
+    if not template_mode:
+        normalized_product = normalize_publication_name(raw_product)
+        data["product"] = normalized_product
+        if not normalized_product:
+            errors.append(f"{file_type.capitalize()}s require a publication name.")
+
+        if raw_issue:
+            dt = parse_issue_date_flexible(raw_issue)
+            if not dt:
+                errors.append("Issue Date must be a valid date.")
+            else:
+                data["issue_date"] = dt.strftime("%m/%d/%Y")
+        elif not regular_mode:
+            errors.append("Layouts require an issue date.")
+    else:
+        data["issue_date"] = raw_issue
+        data["product"] = normalize_publication_name(raw_product)
+
+    invalid_cells = _invalid_grid_cells_from_data(data)
+    if invalid_cells:
+        preview_items = [f"{label} r{row} c{col} ({value})" for label, row, col, value in invalid_cells[:12]]
+        suffix = "" if len(invalid_cells) <= 12 else f" and {len(invalid_cells) - 12} more"
+        errors.append("Grid cells may only contain numbers. Invalid cells: " + ", ".join(preview_items) + suffix + ".")
+
+    missing_sections = _units_missing_sections_from_data(data)
+    if missing_sections:
+        errors.append("All units with pages assigned must be assigned a section before saving. Units missing a section: " + ", ".join(missing_sections) + ".")
+
+    return errors
+
+
+def validate_layout_ctx_before_save(ctx, parent=None):
+    if not bool(ctx.get("template_mode", False)):
+        _normalize_ctx_publication_entry(ctx)
+    if not bool(ctx.get("template_mode", False)) and not _ctx_is_regular_mode(ctx):
+        _normalize_ctx_issue_date_entry(ctx)
+
+    data = collect_layout_data(ctx)
+    errors = validate_layout_data_for_mode(
+        data,
+        template_mode=bool(ctx.get("template_mode", False)),
+        regular_mode=_ctx_is_regular_mode(ctx),
+    )
+    if errors:
+        file_type = _ctx_file_type_name(ctx).capitalize()
+        messagebox.showerror(
+            f"Invalid {file_type}",
+            f"Please fix the following before saving the {file_type.lower()}:\n\n" + "\n".join(f"• {item}" for item in errors),
+            parent=parent,
+        )
+        return False, data
+    return True, data
+
+
 
 def collect_layout_data(ctx):
     now = datetime.now().isoformat(timespec="seconds")
@@ -1789,7 +2156,7 @@ def collect_layout_data(ctx):
         "format": ctx["format_name"],
         "saved_at": now,
         "issue_date": ctx["issue_entry"].get().strip() if ctx.get("issue_entry") else "",
-        "product": ctx["product_entry"].get().strip() if ctx.get("product_entry") else "",
+        "product": normalize_publication_name(ctx["product_entry"].get()) if ctx.get("product_entry") else "",
         "section_count": 1,
         "section_pages": [0],
         "section_names": [],
@@ -1826,17 +2193,18 @@ def collect_layout_data(ctx):
         ]
     return data
 def populate_layout_from_data(ctx, data):
+    regular_mode = _ctx_is_regular_mode(ctx)
     if ctx.get("issue_entry"):
         ctx["issue_entry"].state(["!disabled"])
         ctx["issue_entry"].delete(0, "end")
         ctx["issue_entry"].insert(0, data.get("issue_date", ""))
-        if ctx.get("template_mode"):
+        if ctx.get("template_mode") or regular_mode:
             ctx["issue_entry"].state(["disabled"])
 
     if ctx.get("product_entry"):
         ctx["product_entry"].state(["!disabled"])
         ctx["product_entry"].delete(0, "end")
-        ctx["product_entry"].insert(0, data.get("product", ""))
+        ctx["product_entry"].insert(0, normalize_publication_name(data.get("product", "")))
         if ctx.get("template_mode"):
             ctx["product_entry"].state(["disabled"])
 
@@ -1925,18 +2293,31 @@ def populate_layout_from_data(ctx, data):
                 ctx["color_cells"].add((unit, r, c))
             except Exception:
                 pass
+
 def do_save(win, ctx):
-    if not ctx.get("file_path"):
-        return do_save_as(win, ctx)
-    if not _validate_used_units_have_sections(ctx, parent=win):
+    default_dir = ctx.get("default_dir", LAYOUTS_DIR)
+    ensure_dir(default_dir)
+
+    prior_file_path = ctx.get("file_path")
+    if not prior_file_path:
+        suggested = build_save_filename_suggestion(ctx)
+        ctx["file_path"] = os.path.join(default_dir, suggested)
+
+    ok, data = validate_layout_ctx_before_save(ctx, parent=win)
+    if not ok:
+        if not prior_file_path:
+            ctx["file_path"] = ""
         return False
     try:
-        data = collect_layout_data(ctx)
         if ctx.get("template_mode", False):
             data = _normalize_template_data(data)
+        if not data.get("name"):
+            data["name"] = os.path.splitext(os.path.basename(ctx["file_path"]))[0]
         safe_write_json(ctx["file_path"], data)
         _save_preview_for_current_window(win, ctx["file_path"])
-        
+        ctx["layout_name"] = data["name"]
+        win.title(f"{ctx['title_base']}  —  {os.path.basename(ctx['file_path'])}")
+
         # If saving a layout (not template mode) and imposition doesn't match existing template, ask to save as template
         if (not ctx.get("template_mode", False)) and ctx.get("prompt_save_template", True):
             if not _template_exists_for_imposition(ctx):
@@ -1949,21 +2330,19 @@ def do_save(win, ctx):
                     parent=win
                 ):
                     save_template_from_layout(ctx)
-        
+
         return True
     except Exception as e:
         messagebox.showerror("Save Failed", str(e))
         return False
 def do_save_as(win, ctx):
-    if not _validate_used_units_have_sections(ctx, parent=win):
+    ok, data = validate_layout_ctx_before_save(ctx, parent=win)
+    if not ok:
         return False
     default_dir = ctx.get("default_dir", LAYOUTS_DIR)
     ensure_dir(default_dir)
 
-    if ctx.get("template_mode"):
-        suggested = build_filename_suggestion(ctx)
-    else:
-        suggested = build_layout_filename_suggestion(ctx)
+    suggested = build_save_filename_suggestion(ctx)
 
     path = filedialog.asksaveasfilename(
         parent=win,
@@ -1976,7 +2355,6 @@ def do_save_as(win, ctx):
         return False
 
     try:
-        data = collect_layout_data(ctx)
         if ctx.get("template_mode", False):
             data = _normalize_template_data(data)
         if not data.get("name"):
