@@ -1,5 +1,2756 @@
-"""Press Layout UI (final consolidated version)."""
+"""Press Layout application (single-file consolidated build).
 
+This standalone script combines:
+- press_layout_core.py
+- press_layout_ui.py
+- press_layout_entry.py
+"""
+
+# ===== BEGIN: original press_layout_core.py =====
+import os
+import json
+import glob
+import re
+import sys
+import getpass
+import subprocess
+import importlib
+import importlib.util
+from datetime import datetime
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+_RUNTIME_DEPENDENCY_CHECK_COMPLETE = False
+
+
+def _runtime_module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(str(module_name or "").strip()) is not None
+    except Exception:
+        return False
+
+
+
+def _collect_missing_runtime_dependencies():
+    missing = []
+    if not _runtime_module_available("PIL"):
+        missing.append({
+            "display": "Pillow",
+            "packages": ["Pillow"],
+        })
+    if not (_runtime_module_available("psycopg2") or _runtime_module_available("psycopg")):
+        missing.append({
+            "display": "PostgreSQL driver",
+            "packages": ["psycopg2-binary", "psycopg"],
+        })
+    return missing
+
+
+
+def _install_runtime_package(package_name: str):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+
+
+
+def ensure_runtime_dependencies(parent=None, force=False, prompt_user=True):
+    global _RUNTIME_DEPENDENCY_CHECK_COMPLETE
+    if _RUNTIME_DEPENDENCY_CHECK_COMPLETE and not force:
+        return True
+
+    missing = _collect_missing_runtime_dependencies()
+    if not missing:
+        _RUNTIME_DEPENDENCY_CHECK_COMPLETE = True
+        return True
+
+    if not prompt_user:
+        return False
+
+    missing_names = ", ".join(item.get("display") or "dependency" for item in missing)
+    try:
+        install_now = messagebox.askyesno(
+            "Install Required Dependencies",
+            (
+                "Press Layouts is missing required dependencies:\n\n"
+                + missing_names
+                + "\n\nWould you like Press Layouts to install them now?\n\n"
+                + "The program will continue loading or restarting after the install succeeds."
+            ),
+            parent=parent,
+        )
+    except Exception:
+        install_now = False
+
+    if not install_now:
+        try:
+            messagebox.showerror(
+                "Missing Dependencies",
+                "Press Layouts cannot continue without those dependencies.\n\n"
+                + "Please install them manually or allow the automatic install the next time the program starts.",
+                parent=parent,
+            )
+        except Exception:
+            pass
+        return False
+
+    failures = []
+    installed = []
+    for dependency in missing:
+        display_name = dependency.get("display") or "dependency"
+        success = False
+        last_error = None
+        for package_name in dependency.get("packages") or []:
+            try:
+                _install_runtime_package(package_name)
+                success = True
+                installed.append(display_name)
+                break
+            except Exception as exc:
+                last_error = exc
+        if not success:
+            failures.append((display_name, str(last_error or "Unknown install failure")))
+
+    try:
+        importlib.invalidate_caches()
+    except Exception:
+        pass
+
+    still_missing = _collect_missing_runtime_dependencies()
+    if failures or still_missing:
+        error_lines = [f"• {name}: {msg}" for name, msg in failures]
+        unresolved = [item.get("display") or "dependency" for item in still_missing]
+        if unresolved:
+            error_lines.append("• Still missing after install attempt: " + ", ".join(unresolved))
+        try:
+            messagebox.showerror(
+                "Dependency Install Failed",
+                "Press Layouts could not install all required dependencies.\n\n" + "\n".join(error_lines),
+                parent=parent,
+            )
+        except Exception:
+            pass
+        return False
+
+    _RUNTIME_DEPENDENCY_CHECK_COMPLETE = True
+    try:
+        messagebox.showinfo(
+            "Dependencies Installed",
+            "Press Layouts installed the required dependencies successfully.\n\nInstalled: " + ", ".join(dict.fromkeys(installed)),
+            parent=parent,
+        )
+    except Exception:
+        pass
+    return True
+
+# ===== BEGIN: config.py =====
+MAIN_DIR = os.path.dirname(os.path.abspath(__file__))
+LAYOUTS_DIR = "__DB_LAYOUTS__"
+TEMPLATE_DIR = "__DB_TEMPLATES__"
+REGULAR_DIR = "__DB_REGULAR__"
+FORMAT_MIN_PAGES = {
+    "Broadsheet": 2,
+    "Tab": 4,
+    "8 up": 8,
+}
+BASE_COMMON = {
+    "swatch_cols": 2,
+    "midline_thickness": 4,
+    "midline_color": "#444444",
+    "cell_pad": 0,
+    "unit_padding": (6, 6, 6, 6),
+    "unit_padx": 6,
+    "unit_pady": 6,
+    "folder_padx": 24,
+    "folder_padding": (8, 8, 8, 8),
+    "enable_hscroll": False,
+}
+PRESS_1_BASE = {
+    **BASE_COMMON,
+    "press_name": "Press 1",
+    "left_labels": ["E1", "D1", "C1", "B1-Lower", "B1-Upper", "A1"],
+    "right_labels": ["F1", "G1-Lower", "G1-Upper", "E2", "D2", "C2"],
+    "only_k_labels": {"E1", "B1-Lower", "B1-Upper", "G1-Lower", "G1-Upper", "E2"},
+    "folder_label": "Folder - 1",
+}
+PRESS_1_BROADSHEET = {
+    **PRESS_1_BASE,
+    "format_name": "Broadsheet",
+    "grid_rows": 2,
+    "grid_cols": 2,
+    "autosize": True,
+}
+PRESS_1_TAB = {
+    **PRESS_1_BASE,
+    "format_name": "Tab",
+    "grid_rows": 2,
+    "grid_cols": 4,
+    "autosize": True,
+    "unit_padding": (4, 4, 4, 4),
+    "unit_padx": 3,
+    "folder_padx": 10,
+    "cell_font": (None, 10),
+    "cell_width": 3,
+}
+PRESS_1_8UP = {
+    **PRESS_1_BASE,
+    "format_name": "8 up",
+    "grid_rows": 2,
+    "grid_cols": 8,
+    "enable_hscroll": True,
+    "full_width": True,
+    "scroll_height_hint": 360,
+}
+PRESS_2_BASE = {
+    **BASE_COMMON,
+    "press_name": "Press 2",
+    "left_labels": ["E2", "D2", "C2", "B2-Lower", "B2-Upper", "A2"],
+    "right_labels": ["F2", "G2-Lower", "G2-Upper"],
+    "only_k_labels": {"E2", "B2-Lower", "B2-Upper", "G2-Lower", "G2-Upper"},
+    "folder_label": "Folder - 2",
+}
+PRESS_2_BROADSHEET = {
+    **PRESS_2_BASE,
+    "format_name": "Broadsheet",
+    "grid_rows": 2,
+    "grid_cols": 2,
+    "autosize": True,
+}
+PRESS_2_TAB = {
+    **PRESS_2_BASE,
+    "format_name": "Tab",
+    "grid_rows": 2,
+    "grid_cols": 4,
+    "autosize": True,
+    "unit_padding": (4, 4, 4, 4),
+    "unit_padx": 3,
+    "folder_padx": 10,
+    "cell_font": (None, 10),
+    "cell_width": 3,
+}
+PRESS_2_8UP = {
+    **PRESS_2_BASE,
+    "format_name": "8 up",
+    "grid_rows": 2,
+    "grid_cols": 8,
+    "enable_hscroll": True,
+    "full_width": True,
+    "scroll_height_hint": 360,
+}
+CONFIG_MAP = {
+    ("Press 1", "Broadsheet"): PRESS_1_BROADSHEET,
+    ("Press 1", "Tab"): PRESS_1_TAB,
+    ("Press 1", "8 up"): PRESS_1_8UP,
+    ("Press 2", "Broadsheet"): PRESS_2_BROADSHEET,
+    ("Press 2", "Tab"): PRESS_2_TAB,
+    ("Press 2", "8 up"): PRESS_2_8UP,
+}
+
+# ===== END: config.py =====
+
+# ===== BEGIN: helpers.py =====
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
+def safe_read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+def safe_write_json(path, data):
+    ensure_dir(os.path.dirname(path))
+    to_write = data
+    if isinstance(data, dict) and _path_is_tracked_layout_json(path):
+        to_write = stamp_layout_change_metadata(data, path=path)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(to_write, f, indent=2)
+def sanitize_filename(name: str) -> str:
+    bad = '<>:"/\\|?*'
+    for ch in bad:
+        name = name.replace(ch, "_")
+    return name.strip()
+def normalize_publication_name(value: str) -> str:
+    return str(value or "").strip().upper()
+
+
+def _tracked_layout_roots():
+    return [
+        os.path.abspath(LAYOUTS_DIR),
+        os.path.abspath(TEMPLATE_DIR),
+        os.path.abspath(REGULAR_DIR),
+    ]
+
+
+def _path_is_tracked_layout_json(path: str) -> bool:
+    try:
+        abs_path = os.path.abspath(str(path or ""))
+    except Exception:
+        return False
+    if not abs_path.lower().endswith('.json'):
+        return False
+    for root in _tracked_layout_roots():
+        try:
+            common = os.path.commonpath([abs_path, root])
+        except Exception:
+            common = ""
+        if common == root:
+            return True
+    return False
+
+
+def get_windows_username() -> str:
+    """Best-effort current Windows/user login name for change stamping."""
+    candidates = [
+        os.environ.get('USERNAME'),
+        os.environ.get('USER'),
+    ]
+    try:
+        candidates.append(os.getlogin())
+    except Exception:
+        pass
+    try:
+        candidates.append(getpass.getuser())
+    except Exception:
+        pass
+    for value in candidates:
+        text = str(value or '').strip()
+        if text:
+            return text
+    return 'Unknown'
+
+def is_admin(username=None) -> bool:
+    """Return True when the effective login should see admin-only launcher actions."""
+    effective_username = username if username is not None else get_windows_username()
+    return str(effective_username or '').strip().lower() == 'mbradbury'
+
+def stamp_layout_change_metadata(data, path=None):
+    if not isinstance(data, dict):
+        return data
+    if path and not _path_is_tracked_layout_json(path):
+        return data
+    stamped = dict(data)
+    now = datetime.now().isoformat(timespec='seconds')
+    stamped['last_changed_by'] = get_windows_username()
+    stamped['saved_at'] = now
+    return stamped
+def list_json_files(folder):
+    """Return list of (display_name, full_path) for .json files in folder."""
+    ensure_dir(folder)
+    paths = sorted(glob.glob(os.path.join(folder, "*.json")))
+    results = []
+    for p in paths:
+        data = safe_read_json(p)
+        stem = os.path.splitext(os.path.basename(p))[0]
+        disp = stem
+        if data and isinstance(data, dict):
+            disp = data.get("name") or stem
+        results.append((disp, p))
+    return results
+def min_pages_for_format(fmt: str) -> int:
+    return FORMAT_MIN_PAGES.get(fmt, 1)
+def is_valid_page_count(value: str, multiple: int) -> bool:
+    try:
+        n = int(str(value).strip())
+        return n >= multiple and (n % multiple == 0)
+    except Exception:
+        return False
+def apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True):
+    """
+    Ensure enabled section page values are valid for the format.
+    - fill_only_blanks=True: only fills blanks/invalids
+    - fill_only_blanks=False: forces enabled sections to minimum
+    """
+    minimum = min_pages_for_format(format_name)
+
+    try:
+        count = int(section_count_var.get())
+    except Exception:
+        count = 1
+    count = max(1, min(4, count))
+    section_count_var.set(str(count))
+
+    for i in range(4):
+        if i < count:
+            current = section_page_vars[i].get().strip()
+            if fill_only_blanks:
+                if (current == "") or (not is_valid_page_count(current, minimum)):
+                    section_page_vars[i].set(str(minimum))
+            else:
+                section_page_vars[i].set(str(minimum))
+        else:
+            section_page_vars[i].set("")
+def parse_issue_date_flexible(text: str, today=None):
+    """
+    Parse many date inputs into datetime.
+    - Supports: MMDD, MDD, MMDDYY, MDDYY, MMDDYYYY
+    - Supports: M/D, M/D/YY, M/D/YYYY, M-D, M.D
+    - Supports: YYYY-MM-DD, YYYY/MM/DD
+    - Supports: Month names like "May 28", "May 28 26", "May 28 2026"
+    - If year missing: assumes current year
+    """
+    if not text:
+        return None
+    if today is None:
+        today = datetime.now()
+
+    t = text.strip()
+    if not t:
+        return None
+
+    default_year = today.year
+
+    # Month-name formats
+    if any(ch.isalpha() for ch in t):
+        cleaned = re.sub(r"[,\-]+", " ", t).strip()
+        has_year = re.search(r"\b(\d{4}|\d{2})\b", cleaned) is not None
+        candidates = [cleaned] if has_year else [f"{cleaned} {default_year}"]
+
+        patterns = [
+            "%b %d %Y", "%B %d %Y",
+            "%b %d %y", "%B %d %y",
+            "%d %b %Y", "%d %B %Y",
+            "%d %b %y", "%d %B %y",
+        ]
+        for s in candidates:
+            for fmt in patterns:
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    if dt.year < 1970:
+                        dt = dt.replace(year=dt.year + 100)
+                    return dt
+                except Exception:
+                    pass
+        return None
+
+    # digits-only / digits-extracted
+    digits = re.sub(r"\D", "", t)
+    if digits:
+        try:
+            if len(digits) == 4:  # MMDD
+                mm, dd = int(digits[0:2]), int(digits[2:4])
+                return datetime(default_year, mm, dd)
+            if len(digits) == 3:  # MDD
+                mm, dd = int(digits[0:1]), int(digits[1:3])
+                return datetime(default_year, mm, dd)
+            if len(digits) == 6:  # MMDDYY
+                mm, dd = int(digits[0:2]), int(digits[2:4])
+                yy = int(digits[4:6])
+                year = 2000 + yy if yy <= 69 else 1900 + yy
+                return datetime(year, mm, dd)
+            if len(digits) == 5:  # MDDYY
+                mm, dd = int(digits[0:1]), int(digits[1:3])
+                yy = int(digits[3:5])
+                year = 2000 + yy if yy <= 69 else 1900 + yy
+                return datetime(year, mm, dd)
+            if len(digits) == 8:  # MMDDYYYY
+                mm, dd, yyyy = int(digits[0:2]), int(digits[2:4]), int(digits[4:8])
+                return datetime(yyyy, mm, dd)
+        except Exception:
+            pass
+
+    # Separated numeric formats
+    parts = re.split(r"[\/\.\-\s]+", t)
+    parts = [p for p in parts if p]
+    try:
+        if len(parts) == 2:  # M/D (no year)
+            mm, dd = int(parts[0]), int(parts[1])
+            return datetime(default_year, mm, dd)
+        if len(parts) == 3:
+            if len(parts[0]) == 4:  # YYYY-MM-DD
+                yyyy, mm, dd = int(parts[0]), int(parts[1]), int(parts[2])
+                return datetime(yyyy, mm, dd)
+            mm, dd = int(parts[0]), int(parts[1])
+            y = parts[2]
+            if len(y) == 2:
+                yy = int(y)
+                yyyy = 2000 + yy if yy <= 69 else 1900 + yy
+            else:
+                yyyy = int(y)
+            return datetime(yyyy, mm, dd)
+    except Exception:
+        return None
+
+    return None
+def normalize_issue_date_mmddyyyy(text: str) -> str:
+    """Return mm/dd/yyyy if parseable, else original text."""
+    dt = parse_issue_date_flexible(text)
+    if not dt:
+        return text
+    return dt.strftime("%m/%d/%Y")
+
+def tomorrow_issue_date_mmddyyyy() -> str:
+    """Return tomorrow's date in mm/dd/YYYY format."""
+    from datetime import timedelta
+    return (datetime.now() + timedelta(days=1)).strftime("%m/%d/%Y")
+def parse_saved_at(text: str):
+    """Parse ISO saved_at into datetime."""
+    if not text:
+        return None
+    t = str(text).strip()
+    try:
+        return datetime.fromisoformat(t)
+    except Exception:
+        return None
+def fmt_dt_for_display(dt: datetime) -> str:
+    return dt.strftime("%m/%d/%Y %H:%M:%S") if dt else ""
+def fmt_issue_for_display(issue_text: str) -> str:
+    dt = parse_issue_date_flexible(issue_text)
+    return dt.strftime("%m/%d/%Y") if dt else (issue_text or "")
+def build_layout_rows():
+    ensure_dir(LAYOUTS_DIR)
+    rows = []
+
+    for path in sorted(glob.glob(os.path.join(LAYOUTS_DIR, "*.json"))):
+        data = safe_read_json(path) or {}
+
+        press = data.get("press", "") or ""
+        fmt = data.get("format", "") or ""
+        issue = data.get("issue_date", "") or ""
+        product = data.get("product", "") or ""
+        saved_at = data.get("saved_at", "") or ""
+
+        issue_dt = parse_issue_date_flexible(issue)
+        saved_dt = parse_saved_at(saved_at)
+
+        rows.append({
+            "path": path,
+            "issue_dt": issue_dt,
+            "issue_disp": fmt_issue_for_display(issue),
+            "product": product,
+            "press": press,
+            "format": fmt,
+            "saved_dt": saved_dt,
+            "saved_disp": fmt_dt_for_display(saved_dt),
+        })
+
+    return rows
+
+def build_layout_filename_suggestion(ctx) -> str:
+    raw_date = ctx["issue_entry"].get().strip() if ctx.get("issue_entry") else ""
+    raw_product = normalize_publication_name(ctx["product_entry"].get()) if ctx.get("product_entry") else ""
+
+    dt = parse_issue_date_flexible(raw_date)
+    date_part = dt.strftime("%m%d%Y") if dt else "00000000"
+    product_part = raw_product if raw_product else "Layout"
+    return sanitize_filename(f"{date_part} - {product_part}.json").strip()
+
+
+def _section_name_for_filename(ctx, section_index: int) -> str:
+    try:
+        raw_name = (ctx.get("section_name_vars", [])[section_index - 1].get() or "").strip()
+    except Exception:
+        raw_name = ""
+    if raw_name:
+        return str(raw_name).upper()
+    if bool(ctx.get("template_mode", False)):
+        return f"S{section_index}"
+    return chr(ord("A") + section_index - 1)
+
+
+def build_regular_filename_suggestion(ctx) -> str:
+    press_name = ctx.get("press_name", "")
+    press_num = "1" if "1" in press_name else "2"
+    prefix = f"P{press_num}"
+    publication = normalize_publication_name(ctx["product_entry"].get()) if ctx.get("product_entry") else ""
+    publication = publication or "Publication"
+
+    try:
+        section_count = int(ctx["section_count_var"].get())
+    except Exception:
+        section_count = 1
+    section_count = max(1, min(4, section_count))
+
+    page_counts = compute_section_page_counts_from_ctx(ctx, section_count=section_count)
+    section_segments = []
+    for section_index in range(1, section_count + 1):
+        section_pages = page_counts[section_index - 1] if section_index - 1 < len(page_counts) else 0
+        if int(section_pages or 0) <= 0:
+            continue
+        section_name = _section_name_for_filename(ctx, section_index)
+        section_segments.append(f"{section_name}{int(section_pages)}")
+
+    filename_parts = [prefix, publication]
+    if section_segments:
+        filename_parts.append("-".join(section_segments))
+
+    name = sanitize_filename(" ".join(part for part in filename_parts if part).strip())
+    if not name.lower().endswith(".json"):
+        name += ".json"
+    return name
+
+
+def build_save_filename_suggestion(ctx) -> str:
+    if ctx.get("template_mode"):
+        return build_filename_suggestion(ctx)
+    if _ctx_is_regular_mode(ctx):
+        return build_regular_filename_suggestion(ctx)
+    return build_layout_filename_suggestion(ctx)
+def safe_int(value):
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return None
+def unit_row_has_numbers(unit_dict, row_index: int) -> bool:
+    entries_2d = unit_dict["entries"]
+    if row_index < 0 or row_index >= len(entries_2d):
+        return False
+    for cell in entries_2d[row_index]:
+        if safe_int(cell.get()) is not None:
+            return True
+    return False
+def unit_dinky_suffix(unit_dict) -> str:
+    # ds if only TOP row has numbers; os if only BOTTOM row has numbers
+    top_has = unit_row_has_numbers(unit_dict, 0)
+    bottom_has = unit_row_has_numbers(unit_dict, 1)
+    if top_has and not bottom_has:
+        return "ds"
+    if bottom_has and not top_has:
+        return "os"
+    return ""
+def parse_section_id(text: str):
+    if text is None:
+        return None
+    t = text.strip().upper()
+    if not t:
+        return None
+    if t.startswith("S") and len(t) >= 2 and t[1:].isdigit():
+        n = int(t[1:])
+        return n if 1 <= n <= 4 else None
+    if t.isdigit():
+        n = int(t)
+        return n if 1 <= n <= 4 else None
+    if t in ("A", "B", "C", "D"):
+        return ord(t) - ord("A") + 1
+    return None
+def abbrev_unit_label(label: str) -> str:
+    if not label:
+        return ""
+    s = label.replace("-Lower", "L").replace("-Upper", "U")
+    s = s.replace("-", "").replace(" ", "")
+    return s
+def unit_min_page_number(unit_dict):
+    mins = None
+    for row in unit_dict["entries"]:
+        for cell in row:
+            v = safe_int(cell.get())
+            if v is None:
+                continue
+            if mins is None or v < mins:
+                mins = v
+    return mins
+
+
+def unit_row_numbers(unit_dict, row_index: int):
+    values = []
+    entries_2d = unit_dict.get("entries", [])
+    if row_index < 0 or row_index >= len(entries_2d):
+        return values
+    for cell in entries_2d[row_index]:
+        value = cell.get() if hasattr(cell, "get") else cell
+        parsed = safe_int(value)
+        if parsed is not None:
+            values.append(parsed)
+    return values
+
+
+def unit_top_row_numbers(unit_dict):
+    return unit_row_numbers(unit_dict, 0)
+
+
+def unit_bottom_row_numbers(unit_dict):
+    return unit_row_numbers(unit_dict, 1)
+
+
+def unit_top_row_min_page_number(unit_dict):
+    values = unit_top_row_numbers(unit_dict)
+    return min(values) if values else None
+
+
+def unit_top_row_max_page_number(unit_dict):
+    values = unit_top_row_numbers(unit_dict)
+    return max(values) if values else None
+
+
+def unit_bottom_row_min_page_number(unit_dict):
+    values = unit_bottom_row_numbers(unit_dict)
+    return min(values) if values else None
+
+
+def _section_units_in_imposition_walk_order(section_units, press_name):
+    preferred_labels = get_unit_order(section_units, press_name)
+    unit_map = {str(u.get("label") or ""): u for u in section_units}
+    ordered = [unit_map[label] for label in preferred_labels if label in unit_map]
+    seen_labels = set(preferred_labels)
+    extras = sorted(
+        [u for u in section_units if str(u.get("label") or "") not in seen_labels],
+        key=lambda u: str(u.get("label") or "")
+    )
+    ordered.extend(extras)
+    return ordered
+
+
+def unit_effective_imposition_sort_value(unit_dict, section_units, press_name):
+    """Return the page-like value used to sort units for imposition names.
+
+    Full units and DS dinkies sort by their real top-row minimum.
+    OS dinkies infer a virtual top row so they sort between the units that
+    physically surround them on the former/web walk order.
+    """
+    top_min = unit_top_row_min_page_number(unit_dict)
+    if top_min is not None:
+        return float(top_min)
+
+    if unit_dinky_suffix(unit_dict) == "os":
+        ordered_units = _section_units_in_imposition_walk_order(section_units, press_name)
+        try:
+            idx = ordered_units.index(unit_dict)
+        except ValueError:
+            idx = -1
+
+        prev_top_max = None
+        next_top_min = None
+
+        if idx >= 0:
+            for j in range(idx - 1, -1, -1):
+                val = unit_top_row_max_page_number(ordered_units[j])
+                if val is not None:
+                    prev_top_max = val
+                    break
+
+            for j in range(idx + 1, len(ordered_units)):
+                val = unit_top_row_min_page_number(ordered_units[j])
+                if val is not None:
+                    next_top_min = val
+                    break
+
+        if prev_top_max is not None and next_top_min is not None:
+            candidate = float(prev_top_max) + 0.1
+            if candidate < float(next_top_min):
+                return candidate
+            return (float(prev_top_max) + float(next_top_min)) / 2.0
+
+        if prev_top_max is not None:
+            return float(prev_top_max) + 0.1
+
+        if next_top_min is not None:
+            return float(next_top_min) - 0.1
+
+    bottom_min = unit_bottom_row_min_page_number(unit_dict)
+    if bottom_min is not None:
+        return float(bottom_min)
+
+    actual_min = unit_min_page_number(unit_dict)
+    if actual_min is not None:
+        return float(actual_min)
+
+    return float("inf")
+
+
+def unit_page_entry_count(unit_dict) -> int:
+    total = 0
+    for row in unit_dict.get("entries", []):
+        for cell in row:
+            value = cell.get() if hasattr(cell, "get") else cell
+            if safe_int(value) is not None:
+                total += 1
+    return total
+
+
+def resolve_unit_section_id_for_ctx(unit_dict, ctx, section_count=None):
+    if section_count is None:
+        try:
+            section_count = int(ctx.get("section_count_var").get())
+        except Exception:
+            section_count = 1
+    section_count = max(1, min(4, int(section_count)))
+
+    section_entry = unit_dict.get("section_entry")
+    sec_text = (section_entry.get() or "").strip().upper() if section_entry is not None else ""
+    sec_id = None
+
+    sn_vars = ctx.get("section_name_vars")
+    if sn_vars:
+        try:
+            for i in range(section_count):
+                name = (sn_vars[i].get() or "").strip().upper()
+                if name and sec_text == name:
+                    sec_id = i + 1
+                    break
+        except Exception:
+            sec_id = None
+
+    if sec_id is None:
+        sec_id = parse_section_id(sec_text)
+
+    if sec_id is None or not (1 <= sec_id <= section_count):
+        return None
+    return sec_id
+
+
+def compute_section_page_counts_from_ctx(ctx, section_count=None):
+    if section_count is None:
+        try:
+            section_count = int(ctx.get("section_count_var").get())
+        except Exception:
+            section_count = 1
+    section_count = max(1, min(4, int(section_count)))
+    counts = [0] * section_count
+
+    for unit_dict in ctx.get("units", []):
+        sec_id = resolve_unit_section_id_for_ctx(unit_dict, ctx, section_count=section_count)
+        if sec_id is None:
+            continue
+        counts[sec_id - 1] += unit_page_entry_count(unit_dict)
+    return counts
+
+def build_filename_suggestion(ctx) -> str:
+    press_name = ctx.get("press_name", "")
+    press_num = "1" if "1" in press_name else "2"
+    prefix = f"P{press_num}"
+
+    try:
+        section_count = int(ctx["section_count_var"].get())
+    except Exception:
+        section_count = 1
+    section_count = max(1, min(4, section_count))
+
+    pages = compute_section_page_counts_from_ctx(ctx, section_count=section_count)
+    units_by_section = {i: [] for i in range(1, section_count + 1)}
+    for u in ctx["units"]:
+        sec_id = resolve_unit_section_id_for_ctx(u, ctx, section_count=section_count)
+        if sec_id is None:
+            continue
+        units_by_section[sec_id].append(u)
+
+    segments = []
+    for sec_idx in range(1, section_count + 1):
+        sec_pages = pages[sec_idx - 1] if sec_idx - 1 < len(pages) else 0
+        sec_units = units_by_section.get(sec_idx, [])
+        ordered_labels = get_unit_order(sec_units, press_name)
+        order_index = {label: idx for idx, label in enumerate(ordered_labels)}
+
+        def sort_key(u):
+            label = str(u.get("label") or "")
+            return (
+                unit_effective_imposition_sort_value(u, sec_units, press_name),
+                order_index.get(label, 10**6),
+                label,
+            )
+
+        sec_units_sorted = sorted(sec_units, key=sort_key)
+        units_part = "".join(
+            f"{abbrev_unit_label(u['label'])}{unit_dinky_suffix(u)}"
+            for u in sec_units_sorted
+        )
+        segments.append(f"{sec_pages}{units_part}")
+
+    name = prefix + " " + " ".join(segments)
+    name = sanitize_filename(name).strip()
+    if not name.lower().endswith(".json"):
+        name += ".json"
+    return name
+def build_imposition_text(ctx) -> str:
+    return os.path.splitext(build_filename_suggestion(ctx))[0]
+def build_focus_order(issue_entry, product_entry, units, grid_rows, grid_cols, press_name, extra_widgets=None):
+    unit_map = {u["label"]: u for u in units}
+    press_num = "1" if "1" in press_name else "2"
+
+    preferred_labels = [
+        f"F{press_num}",
+        f"G{press_num}-Lower",
+        f"G{press_num}-Upper",
+        "E2", "D2", "C2",
+        "E1", "D1", "C1",
+        f"B{press_num}-Lower",
+        f"B{press_num}-Upper",
+        f"A{press_num}",
+    ]
+    unit_order = [lab for lab in preferred_labels if lab in unit_map]
+
+    focus_widgets = [issue_entry, product_entry]
+    if extra_widgets:
+        focus_widgets.extend(extra_widgets)
+
+    for lab in unit_order:
+        focus_widgets.append(unit_map[lab]["section_entry"])
+
+    # Grid cells tab left-to-right for every row so Tab always advances visually to the right.
+    for r in range(max(0, grid_rows)):
+        for lab in unit_order:
+            row_entries = unit_map[lab]["entries"][r]
+            for c in range(min(grid_cols, len(row_entries))):
+                focus_widgets.append(row_entries[c])
+
+    return focus_widgets
+
+
+def set_custom_tab_order(widgets):
+    widgets = [w for w in widgets if w is not None]
+    seen = set()
+    ordered = []
+    for w in widgets:
+        key = str(w)
+        if key not in seen:
+            ordered.append(w)
+            seen.add(key)
+    if not ordered:
+        return
+
+    n = len(ordered)
+    next_map = {ordered[i]: ordered[(i + 1) % n] for i in range(n)}
+    prev_map = {ordered[i]: ordered[(i - 1) % n] for i in range(n)}
+    grid_widgets = [w for w in ordered if getattr(w, "_press_grid_cell", False)]
+
+    def _goto(target):
+        target.focus_set()
+        try:
+            target.selection_range(0, "end")
+        except Exception:
+            pass
+        return "break"
+
+    def _ordered_grid_widgets():
+        widgets_in_order = []
+        for widget in grid_widgets:
+            try:
+                if not widget.winfo_exists() or not widget.winfo_viewable():
+                    continue
+                widgets_in_order.append(widget)
+            except Exception:
+                continue
+        widgets_in_order.sort(key=lambda widget: (int(widget.winfo_rooty()), int(widget.winfo_rootx()), str(widget)))
+        return widgets_in_order
+
+    def _grid_tab_target(current_widget, reverse=False):
+        widgets_in_order = _ordered_grid_widgets()
+        if len(widgets_in_order) < 2:
+            return None
+        try:
+            idx = widgets_in_order.index(current_widget)
+        except ValueError:
+            return None
+        if reverse:
+            return widgets_in_order[(idx - 1) % len(widgets_in_order)]
+        return widgets_in_order[(idx + 1) % len(widgets_in_order)]
+
+    def _on_tab(event, default_target, reverse=False):
+        widget = event.widget
+        if getattr(widget, "_press_grid_cell", False):
+            target = _grid_tab_target(widget, reverse=reverse)
+            if target is not None:
+                return _goto(target)
+        return _goto(default_target)
+
+    for w in ordered:
+        nxt = next_map[w]
+        prv = prev_map[w]
+        try:
+            w.configure(takefocus=True)
+        except Exception:
+            pass
+        w.bind("<Tab>", lambda e, _n=nxt: _on_tab(e, _n, reverse=False))
+        w.bind("<Shift-Tab>", lambda e, _p=prv: _on_tab(e, _p, reverse=True))
+        w.bind("<ISO_Left_Tab>", lambda e, _p=prv: _on_tab(e, _p, reverse=True))
+def get_unit_order(units, press_name):
+    unit_map = {u["label"]: u for u in units}
+    press_num = "1" if "1" in press_name else "2"
+    preferred_labels = [
+        f"F{press_num}",
+        f"G{press_num}-Lower",
+        f"G{press_num}-Upper",
+        "E2", "D2", "C2",
+        "E1", "D1", "C1",
+        f"B{press_num}-Lower",
+        f"B{press_num}-Upper",
+        f"A{press_num}",
+    ]
+    return [lab for lab in preferred_labels if lab in unit_map]
+def enable_arrow_navigation(focus_list, units, press_name):
+    focus_list = [w for w in focus_list if w is not None]
+    if len(focus_list) < 2:
+        return
+
+    n = len(focus_list)
+    next_map = {focus_list[i]: focus_list[(i + 1) % n] for i in range(n)}
+    prev_map = {focus_list[i]: focus_list[(i - 1) % n] for i in range(n)}
+
+    unit_order = get_unit_order(units, press_name)
+    unit_map = {u["label"]: u for u in units}
+    unit_index = {lab: i for i, lab in enumerate(unit_order)}
+
+    grid_lookup = {}
+    for u in units:
+        entries_2d = u["entries"]
+        for r, row in enumerate(entries_2d):
+            for c, cell in enumerate(row):
+                grid_lookup[cell] = (u["label"], entries_2d, r, c)
+
+    def _goto(w):
+        w.focus_set()
+        try:
+            w.selection_range(0, "end")
+        except Exception:
+            pass
+        return "break"
+
+    def grid_left(w):
+        lab, entries_2d, r, c = grid_lookup[w]
+        if c - 1 >= 0:
+            return _goto(entries_2d[r][c - 1])
+        if lab in unit_index and unit_order:
+            prev_lab = unit_order[(unit_index[lab] - 1) % len(unit_order)]
+            prev_entries = unit_map[prev_lab]["entries"]
+            return _goto(prev_entries[r][len(prev_entries[r]) - 1])
+        return _goto(prev_map[w])
+
+    def grid_right(w):
+        lab, entries_2d, r, c = grid_lookup[w]
+        if c + 1 < len(entries_2d[r]):
+            return _goto(entries_2d[r][c + 1])
+        if lab in unit_index and unit_order:
+            next_lab = unit_order[(unit_index[lab] + 1) % len(unit_order)]
+            next_entries = unit_map[next_lab]["entries"]
+            return _goto(next_entries[r][0])
+        return _goto(next_map[w])
+
+    def grid_up(w):
+        lab, entries_2d, r, c = grid_lookup[w]
+        rows = len(entries_2d)
+        target_r = (r - 1) % rows
+        if c < len(entries_2d[target_r]):
+            return _goto(entries_2d[target_r][c])
+        return _goto(prev_map[w])
+
+    def grid_down(w):
+        lab, entries_2d, r, c = grid_lookup[w]
+        rows = len(entries_2d)
+        target_r = (r + 1) % rows
+        if c < len(entries_2d[target_r]):
+            return _goto(entries_2d[target_r][c])
+        return _goto(next_map[w])
+
+    def on_left(event):
+        w = event.widget
+        if w in grid_lookup:
+            return grid_left(w)
+        return _goto(prev_map[w])
+
+    def on_right(event):
+        w = event.widget
+        if w in grid_lookup:
+            return grid_right(w)
+        return _goto(next_map[w])
+
+    def on_up(event):
+        w = event.widget
+        if w in grid_lookup:
+            return grid_up(w)
+        return _goto(prev_map[w])
+
+    def on_down(event):
+        w = event.widget
+        if w in grid_lookup:
+            return grid_down(w)
+        return _goto(next_map[w])
+
+    for w in focus_list:
+        try:
+            w.configure(takefocus=True)
+        except Exception:
+            pass
+        w.bind("<KeyPress-Left>", on_left)
+        w.bind("<KeyPress-Right>", on_right)
+        w.bind("<KeyPress-Up>", on_up)
+        w.bind("<KeyPress-Down>", on_down)
+        w.bind("<KP_Left>", on_left)
+        w.bind("<KP_Right>", on_right)
+        w.bind("<KP_Up>", on_up)
+        w.bind("<KP_Down>", on_down)
+def overlay_render_cell(overlay: tk.Canvas, text: str, circled: bool):
+    """Render the cell's text and optional red circle on top."""
+    overlay.delete("all")
+
+    overlay.update_idletasks()
+    w = overlay.winfo_width()
+    h = overlay.winfo_height()
+
+    # draw text in the middle
+    overlay.create_text(
+        w // 2,
+        h // 2,
+        text=text,
+        fill="black",
+        font=(None, 11),
+        tags=("txt",)
+    )
+
+    # draw red circle if selected
+    if circled:
+        pad = 3
+        overlay.create_oval(
+            pad, pad, max(pad + 1, w - pad), max(pad + 1, h - pad),
+            outline="red", width=2, tags=("circle",)
+        )
+def _contrast_text_color(hex_color: str) -> str:
+    hex_color = hex_color.lstrip("#")
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return "black" if luminance > 150 else "white"
+def overlay_show(overlay: tk.Canvas):
+    if not getattr(overlay, "_shown", False):
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay._shown = True
+def overlay_hide(overlay: tk.Canvas):
+    if getattr(overlay, "_shown", False):
+        overlay.place_forget()
+        overlay._shown = False
+def overlay_set_circle(overlay: tk.Canvas, on: bool):
+    overlay.delete("circle")
+    overlay._circle_id = None
+    if on:
+        overlay.update_idletasks()
+        w = overlay.winfo_width()
+        h = overlay.winfo_height()
+        pad = 3
+        overlay._circle_id = overlay.create_oval(
+            pad, pad, max(pad+1, w - pad), max(pad+1, h - pad),
+            outline="red", width=2, tags=("circle",)
+        )
+def make_press_area(parent, enable_hscroll=False, height_hint=320):
+    outer = ttk.Frame(parent)
+    outer.pack(fill="both", expand=True)
+
+    if not enable_hscroll:
+        inner = ttk.Frame(outer)
+        inner.pack(fill="both", expand=True)
+        return outer, inner, None
+
+    canvas = tk.Canvas(outer, highlightthickness=0, height=height_hint)
+    canvas.pack(side="top", fill="both", expand=True)
+
+    xscroll = ttk.Scrollbar(outer, orient="horizontal", command=canvas.xview)
+    xscroll.pack(side="bottom", fill="x")
+    canvas.configure(xscrollcommand=xscroll.set)
+
+    inner = ttk.Frame(canvas)
+    window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+    def _on_inner_configure(event):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def _on_canvas_configure(event):
+        canvas.itemconfigure(window_id, height=event.height)
+
+    inner.bind("<Configure>", _on_inner_configure)
+    canvas.bind("<Configure>", _on_canvas_configure)
+    return outer, inner, canvas
+def apply_window_sizing(win, config):
+    autosize = config.get("autosize", False)
+    full_width = config.get("full_width", False)
+
+    win.update_idletasks()
+    req_w = win.winfo_reqwidth()
+    req_h = win.winfo_reqheight()
+    scr_w = win.winfo_screenwidth()
+    scr_h = win.winfo_screenheight()
+
+    margin_w = config.get("screen_margin_w", 40)
+    margin_h = config.get("screen_margin_h", 120)
+
+    max_w = max(400, scr_w - margin_w)
+    max_h = max(300, scr_h - margin_h)
+
+    if full_width:
+        w = scr_w
+        h = min(req_h, max_h)
+        win.geometry(f"{w}x{h}+0+0")
+        return
+
+    if autosize:
+        w = min(req_w, max_w)
+        h = min(req_h, max_h)
+        x = max(0, (scr_w - w) // 2)
+        y = max(0, (scr_h - h) // 2)
+        win.geometry(f"{w}x{h}+{x}+{y}")
+
+
+def _grid_entry_allows_only_numbers(proposed_value: str) -> bool:
+    proposed = str(proposed_value or "").strip()
+    return proposed == "" or proposed.isdigit()
+
+def create_press_unit(
+    parent,
+    unit_label,
+    use_cmyk=True,
+    grid_rows=2,
+    grid_cols=2,
+    swatch_cols=2,
+    cell_pad=0,
+    midline_thickness=4,
+    midline_color="#444444",
+    unit_padding=(6, 6, 6, 6),
+    cell_font=None,
+    cell_width=None,
+    swatch_size=(4, 1),
+    section_choices=None,
+):
+    unit_frame = ttk.Frame(parent, style="Unit.TFrame", padding=unit_padding)
+
+    section_var = tk.StringVar()
+    section_entry = ttk.Combobox(
+        unit_frame,
+        width=8,
+        justify="center",
+        font=(None, 10),
+        textvariable=section_var,
+        values=section_choices or [""],
+        state="readonly",
+    )
+    section_entry.pack(pady=(0, 6))
+
+    box_frame = ttk.Frame(unit_frame, style="Box.TFrame")
+    box_frame.pack(fill="both", expand=True)
+
+    # Defaults
+    if cell_font is None or cell_width is None:
+        total_cells = grid_rows * grid_cols
+        if grid_cols >= 8:
+            default_font = (None, 9)
+            default_width = 2
+        elif grid_cols == 4:
+            default_font = (None, 11)
+            default_width = 4
+        elif total_cells >= 16:
+            default_font = (None, 9)
+            default_width = 3
+        else:
+            default_font = (None, 11)
+            default_width = 4
+        cell_font = cell_font or default_font
+        cell_width = cell_width or default_width
+
+    # Divider insertion logic
+    use_v_sep = (grid_cols % 2 == 0 and grid_cols > 1)
+    use_h_sep = (grid_rows % 2 == 0 and grid_rows > 1)
+    mid_col = grid_cols // 2
+    mid_row = grid_rows // 2
+    total_grid_cols = grid_cols + (1 if use_v_sep else 0)
+    total_grid_rows = grid_rows + (1 if use_h_sep else 0)
+
+    def map_col(c):
+        return c + 1 if (use_v_sep and c >= mid_col) else c
+
+    def map_row(r):
+        return r + 1 if (use_h_sep and r >= mid_row) else r
+
+    for r in range(total_grid_rows):
+        if use_h_sep and r == mid_row:
+            box_frame.rowconfigure(r, weight=0, minsize=midline_thickness)
+        else:
+            box_frame.rowconfigure(r, weight=1)
+
+    for c in range(total_grid_cols):
+        if use_v_sep and c == mid_col:
+            box_frame.columnconfigure(c, weight=0, minsize=midline_thickness)
+        else:
+            box_frame.columnconfigure(c, weight=1)
+
+    # ---- IMPORTANT: correct entries + overlays (aligned) ----
+    grid_entries = []
+    cell_overlays = []
+
+    for r in range(grid_rows):
+        row_entries = []
+        row_overlays = []
+        for c in range(grid_cols):
+            cell_container = ttk.Frame(box_frame)
+            cell_container.grid(row=map_row(r), column=map_col(c), sticky="nsew", padx=cell_pad, pady=cell_pad)
+
+            validate_numbers_cmd = unit_frame.register(_grid_entry_allows_only_numbers)
+            cell_entry = ttk.Entry(
+                cell_container,
+                justify="center",
+                font=cell_font,
+                width=cell_width,
+                validate="key",
+                validatecommand=(validate_numbers_cmd, "%P"),
+            )
+            cell_entry._press_grid_cell = True
+            cell_entry.pack(fill="both", expand=True)
+
+            overlay = tk.Canvas(cell_container, highlightthickness=0, bg="#ffffff", takefocus=False)
+            overlay.place_forget()
+            overlay._shown = False
+            overlay._circle_id = None
+
+            row_entries.append(cell_entry)
+            row_overlays.append(overlay)
+
+        grid_entries.append(row_entries)
+        cell_overlays.append(row_overlays)
+
+    # Divider visuals
+    if use_v_sep:
+        if use_h_sep:
+            tk.Frame(box_frame, bg=midline_color).grid(row=0, column=mid_col, rowspan=mid_row, sticky="nsew")
+            tk.Frame(box_frame, bg=midline_color).grid(
+                row=mid_row + 1, column=mid_col,
+                rowspan=total_grid_rows - (mid_row + 1),
+                sticky="nsew"
+            )
+        else:
+            tk.Frame(box_frame, bg=midline_color).grid(row=0, column=mid_col, rowspan=total_grid_rows, sticky="nsew")
+
+    if use_h_sep:
+        if use_v_sep:
+            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=0, columnspan=mid_col, sticky="nsew")
+            tk.Frame(box_frame, bg=midline_color).grid(
+                row=mid_row, column=mid_col + 1,
+                columnspan=total_grid_cols - (mid_col + 1),
+                sticky="nsew"
+            )
+            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=mid_col, sticky="nsew")
+        else:
+            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=0, columnspan=total_grid_cols, sticky="nsew")
+
+    ttk.Label(unit_frame, text=unit_label, font=(None, 10, "bold")).pack(pady=(6, 0))
+
+    # Color swatches
+    color_frame = ttk.Frame(unit_frame)
+    color_frame.pack(pady=(6, 0), fill="x")
+
+    if use_cmyk:
+        colors = [("K", "#7f7f7f"), ("Y", "#fff176"), ("M", "#f48fb1"), ("C", "#90caf9")]
+    else:
+        colors = [("K", "#7f7f7f")]
+
+    sw_w, sw_h = swatch_size
+    unit_bg = ttk.Style(unit_frame).lookup("Unit.TFrame", "background") or "#f0f0f0"
+
+    for key, color in colors:
+        row_frame = tk.Frame(color_frame, bg=unit_bg, height=24)
+        row_frame.pack(fill="x", pady=1)
+        row_frame.pack_propagate(False)
+
+        swatch_container = tk.Frame(row_frame, bg=unit_bg)
+        swatch_container.place(relx=0.5, rely=0.5, anchor="center")
+
+        text_color = _contrast_text_color(color)
+
+        for i in range(swatch_cols):
+            swatch = tk.Label(
+                swatch_container,
+                text=key,
+                fg=text_color,
+                bg=color,
+                font=(None, 9, "bold"),
+                relief="solid",
+                borderwidth=1,
+                width=sw_w,
+                height=sw_h,
+            )
+            swatch.pack(side="left")
+            if i != swatch_cols - 1:
+                tk.Frame(swatch_container, bg=midline_color, width=midline_thickness, height=18).pack(side="left", padx=1)
+
+    return unit_frame, section_entry, grid_entries, cell_overlays
+
+
+_PREVIEW_IMAGE_CACHE = {}
+
+
+def _preview_file_signature(path: str):
+    if not path:
+        return None
+    try:
+        stat = os.stat(path)
+    except Exception:
+        return None
+    return (
+        int(getattr(stat, "st_mtime_ns", int(float(getattr(stat, "st_mtime", 0.0)) * 1000000000))),
+        int(getattr(stat, "st_ctime_ns", int(float(getattr(stat, "st_ctime", 0.0)) * 1000000000))),
+        int(getattr(stat, "st_size", 0)),
+    )
+
+
+def _clear_preview_image_cache_entry(json_path: str):
+    path = preview_image_path_for_json(json_path)
+    if not path:
+        return
+    try:
+        _PREVIEW_IMAGE_CACHE.pop(path, None)
+    except Exception:
+        pass
+
+
+def _store_preview_image_in_cache(json_path: str, image):
+    path = preview_image_path_for_json(json_path)
+    if not path or image is None:
+        return
+    signature = _preview_file_signature(path)
+    if signature is None:
+        return
+    try:
+        cached_image = image.copy()
+    except Exception:
+        cached_image = image
+    _PREVIEW_IMAGE_CACHE[path] = {
+        "signature": signature,
+        "image": cached_image,
+    }
+
+
+def preview_image_path_for_json(json_path: str) -> str:
+    base, _ = os.path.splitext(str(json_path or ""))
+    return base + ".preview.png"
+
+
+def remove_preview_image_for_json(json_path: str):
+    path = preview_image_path_for_json(json_path)
+    _clear_preview_image_cache_entry(json_path)
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def load_preview_image_for_json(json_path: str):
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    path = preview_image_path_for_json(json_path)
+    if not path:
+        return None
+    signature = _preview_file_signature(path)
+    if signature is None:
+        _clear_preview_image_cache_entry(json_path)
+        return None
+    cached = _PREVIEW_IMAGE_CACHE.get(path)
+    if isinstance(cached, dict) and cached.get("signature") == signature and cached.get("image") is not None:
+        try:
+            return cached["image"].copy()
+        except Exception:
+            return cached.get("image")
+    try:
+        with Image.open(path) as img:
+            loaded = img.copy()
+        _PREVIEW_IMAGE_CACHE[path] = {
+            "signature": signature,
+            "image": loaded.copy(),
+        }
+        return loaded
+    except Exception:
+        _PREVIEW_IMAGE_CACHE.pop(path, None)
+        return None
+
+
+def _resize_preview_image_helper(image, scale=0.75):
+    try:
+        from PIL import Image
+    except Exception as e:
+        raise RuntimeError(f"Pillow is required for previews: {e}")
+    if image is None:
+        return None
+    try:
+        scale = float(scale)
+    except Exception:
+        scale = 0.75
+    scale = max(0.1, min(1.0, scale))
+    width, height = image.size
+    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    if new_size == image.size:
+        return image
+    return image.resize(new_size, Image.LANCZOS)
+
+
+def _capture_window_image_for_preview(win):
+    try:
+        from PIL import ImageGrab
+    except Exception as e:
+        raise RuntimeError(f"Pillow ImageGrab is required for previews: {e}")
+
+    try:
+        win.update_idletasks()
+        win.lift()
+        try:
+            win.attributes("-topmost", True)
+            win.update()
+            win.attributes("-topmost", False)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    try:
+        left = int(win.winfo_rootx())
+        top = int(win.winfo_rooty())
+        width = max(1, int(win.winfo_width()))
+        height = max(1, int(win.winfo_height()))
+    except Exception:
+        raise RuntimeError("Could not determine preview window bounds.")
+
+    bbox = (left, top, left + width, top + height)
+    image = None
+    try:
+        image = ImageGrab.grab(bbox=bbox, all_screens=True)
+    except Exception:
+        image = None
+
+    if image is None and os.name == 'nt':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            from PIL import Image
+
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+            hwnd = wintypes.HWND(int(win.winfo_id()))
+
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG), ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+            rect_raw = RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect_raw)):
+                raise RuntimeError("GetWindowRect failed")
+            width = max(1, rect_raw.right - rect_raw.left)
+            height = max(1, rect_raw.bottom - rect_raw.top)
+
+            hwnd_dc = user32.GetWindowDC(hwnd)
+            mem_dc = gdi32.CreateCompatibleDC(hwnd_dc)
+            bitmap = gdi32.CreateCompatibleBitmap(hwnd_dc, width, height)
+            old_obj = gdi32.SelectObject(mem_dc, bitmap)
+
+            PW_RENDERFULLCONTENT = 0x00000002
+            result = user32.PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT)
+            if result != 1:
+                result = user32.PrintWindow(hwnd, mem_dc, 0)
+            if result != 1:
+                raise RuntimeError("PrintWindow failed")
+
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", wintypes.DWORD),
+                    ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD),
+                ]
+
+            class BITMAPINFO(ctypes.Structure):
+                _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+
+            bmi = BITMAPINFO()
+            bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth = width
+            bmi.bmiHeader.biHeight = -height
+            bmi.bmiHeader.biPlanes = 1
+            bmi.bmiHeader.biBitCount = 32
+            bmi.bmiHeader.biCompression = 0
+
+            buffer_len = width * height * 4
+            buffer = ctypes.create_string_buffer(buffer_len)
+            rows = gdi32.GetDIBits(mem_dc, bitmap, 0, height, buffer, ctypes.byref(bmi), 0)
+            if rows == 0:
+                raise RuntimeError("GetDIBits failed")
+            image = Image.frombuffer("RGBA", (width, height), buffer, "raw", "BGRA", 0, 1).convert("RGB")
+
+            gdi32.SelectObject(mem_dc, old_obj)
+            gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(hwnd, hwnd_dc)
+        except Exception:
+            image = None
+
+    if image is None:
+        raise RuntimeError("Could not capture layout preview image.")
+    return image
+
+
+def save_window_preview_image(win, json_path: str, scale=0.75):
+    if not win or not json_path:
+        return None
+    image = None
+    try:
+        builder = getattr(win, "build_preview_image", None)
+        if callable(builder):
+            image = builder(scale=scale)
+    except Exception:
+        image = None
+    if image is None:
+        try:
+            print_builder = getattr(win, "build_print_image", None)
+            if callable(print_builder):
+                image = print_builder()
+                if image is not None:
+                    image = image.crop((0, 0, image.width, max(1, int(image.height * 0.5))))
+                    image = _resize_preview_image_helper(image, scale=scale)
+        except Exception:
+            image = None
+    if image is None:
+        image = _capture_window_image_for_preview(win)
+        image = _resize_preview_image_helper(image, scale=scale)
+    out_path = preview_image_path_for_json(json_path)
+    ensure_dir(os.path.dirname(out_path))
+    image.save(out_path, format="PNG")
+    try:
+        _store_preview_image_in_cache(json_path, image)
+    except Exception:
+        pass
+    return out_path
+
+
+WINDOW_STATE_DIRNAME = "Press Layout"
+WINDOW_STATE_FILENAME = "window_state.json"
+WINDOW_DEBUG_FILENAME = "window_state_debug.log"
+
+
+def user_config_dir() -> str:
+    base = (
+        os.environ.get("LOCALAPPDATA")
+        or os.environ.get("APPDATA")
+        or os.path.expanduser("~")
+    )
+    path = os.path.join(base, WINDOW_STATE_DIRNAME)
+    ensure_dir(path)
+    return path
+
+
+def window_state_file_path() -> str:
+    return os.path.join(user_config_dir(), WINDOW_STATE_FILENAME)
+
+
+def window_debug_file_path() -> str:
+    return os.path.join(user_config_dir(), WINDOW_DEBUG_FILENAME)
+
+
+def append_window_debug_log(event_type: str, state_key: str, payload=None):
+    try:
+        entry = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "event": str(event_type or ""),
+            "state_key": str(state_key or ""),
+            "payload": payload if isinstance(payload, dict) else {"value": payload},
+        }
+        ensure_dir(user_config_dir())
+        with open(window_debug_file_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+def load_window_state_map():
+    data = safe_read_json(window_state_file_path())
+    return data if isinstance(data, dict) else {}
+
+
+def save_window_state_map(state_map):
+    if not isinstance(state_map, dict):
+        return
+    safe_write_json(window_state_file_path(), state_map)
+
+
+def parse_geometry_string(geometry: str):
+    if not geometry:
+        return None
+    text = str(geometry).strip()
+    # Tk can report a negative X position as '+-1166+265' when a window is on
+    # a monitor left of the primary display. Normalize those forms first.
+    text = text.replace('+-', '-').replace('-+', '-').replace('++', '+')
+    m = re.match(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)$', text)
+    if not m:
+        return None
+    try:
+        return {
+            "width": int(m.group(1)),
+            "height": int(m.group(2)),
+            "x": int(m.group(3)),
+            "y": int(m.group(4)),
+        }
+    except Exception:
+        return None
+
+
+def _monitor_rects_win32():
+    if os.name != 'nt':
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        MONITORINFOF_PRIMARY = 1
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", RECT),
+                ("rcWork", RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        monitors = []
+        callback_type = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            wintypes.HMONITOR,
+            wintypes.HDC,
+            ctypes.POINTER(RECT),
+            wintypes.LPARAM,
+        )
+
+        def _callback(hmonitor, _hdc, _lprc, _lparam):
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+                work = info.rcWork
+                monitors.append({
+                    "left": int(work.left),
+                    "top": int(work.top),
+                    "right": int(work.right),
+                    "bottom": int(work.bottom),
+                    "primary": bool(info.dwFlags & MONITORINFOF_PRIMARY),
+                })
+            return 1
+
+        user32.EnumDisplayMonitors(0, 0, callback_type(_callback), 0)
+        return monitors
+    except Exception as exc:
+        append_window_debug_log("monitor_enum_error", "", {"error": str(exc)})
+        return []
+
+
+def _monitor_signature(monitor):
+    return {
+        "left": int(monitor["left"]),
+        "top": int(monitor["top"]),
+        "right": int(monitor["right"]),
+        "bottom": int(monitor["bottom"]),
+        "primary": bool(monitor.get("primary", False)),
+    }
+
+
+def _monitor_width(monitor):
+    return max(1, int(monitor["right"]) - int(monitor["left"]))
+
+
+def _monitor_height(monitor):
+    return max(1, int(monitor["bottom"]) - int(monitor["top"]))
+
+
+def _rect_intersection_area(a, b):
+    left = max(a["left"], b["left"])
+    top = max(a["top"], b["top"])
+    right = min(a["right"], b["right"])
+    bottom = min(a["bottom"], b["bottom"])
+    if right <= left or bottom <= top:
+        return 0
+    return (right - left) * (bottom - top)
+
+
+def _find_best_monitor_for_rect(rect, monitors):
+    if not monitors:
+        return None
+    best = None
+    best_area = -1
+    for monitor in monitors:
+        area = _rect_intersection_area(rect, monitor)
+        if area > best_area:
+            best_area = area
+            best = monitor
+    if best is not None and best_area > 0:
+        return best
+    center_x = (rect["left"] + rect["right"]) / 2.0
+    center_y = (rect["top"] + rect["bottom"]) / 2.0
+    best = monitors[0]
+    best_dist = None
+    for monitor in monitors:
+        mon_center_x = (monitor["left"] + monitor["right"]) / 2.0
+        mon_center_y = (monitor["top"] + monitor["bottom"]) / 2.0
+        dist = (center_x - mon_center_x) ** 2 + (center_y - mon_center_y) ** 2
+        if best_dist is None or dist < best_dist:
+            best = monitor
+            best_dist = dist
+    return best
+
+
+def _match_saved_monitor(saved_monitor, monitors):
+    if not saved_monitor or not monitors:
+        return None
+    for monitor in monitors:
+        if all(int(monitor.get(key, 0)) == int(saved_monitor.get(key, 0)) for key in ("left", "top", "right", "bottom")):
+            return monitor
+    saved_width = int(saved_monitor.get("right", 0)) - int(saved_monitor.get("left", 0))
+    saved_height = int(saved_monitor.get("bottom", 0)) - int(saved_monitor.get("top", 0))
+    same_shape = [m for m in monitors if _monitor_width(m) == saved_width and _monitor_height(m) == saved_height]
+    if same_shape:
+        saved_left = int(saved_monitor.get("left", 0))
+        saved_top = int(saved_monitor.get("top", 0))
+        same_shape.sort(key=lambda m: abs(int(m["left"]) - saved_left) + abs(int(m["top"]) - saved_top))
+        return same_shape[0]
+    primary = [m for m in monitors if bool(m.get("primary", False))]
+    return primary[0] if primary else monitors[0]
+
+
+def _capture_window_state(win):
+    parsed = parse_geometry_string(win.geometry())
+    if not parsed:
+        return None
+    state = dict(parsed)
+    monitors = _monitor_rects_win32()
+    if monitors:
+        rect = {
+            "left": parsed["x"],
+            "top": parsed["y"],
+            "right": parsed["x"] + parsed["width"],
+            "bottom": parsed["y"] + parsed["height"],
+        }
+        monitor = _find_best_monitor_for_rect(rect, monitors)
+        if monitor:
+            state["monitor"] = _monitor_signature(monitor)
+            state["rel_x"] = parsed["x"] - int(monitor["left"])
+            state["rel_y"] = parsed["y"] - int(monitor["top"])
+            state["rel_x_ratio"] = state["rel_x"] / max(1, _monitor_width(monitor) - parsed["width"])
+            state["rel_y_ratio"] = state["rel_y"] / max(1, _monitor_height(monitor) - parsed["height"])
+    return state
+
+
+def normalize_window_state_for_display(win, state):
+    if not isinstance(state, dict):
+        return None
+    try:
+        parsed = {
+            "width": max(160, int(state.get("width", 0))),
+            "height": max(120, int(state.get("height", 0))),
+            "x": int(state.get("x", 0)),
+            "y": int(state.get("y", 0)),
+        }
+    except Exception:
+        return None
+    monitors = _monitor_rects_win32()
+    if monitors:
+        saved_monitor = state.get("monitor") if isinstance(state.get("monitor"), dict) else None
+        target_monitor = _match_saved_monitor(saved_monitor, monitors)
+        if target_monitor is None:
+            rect = {
+                "left": parsed["x"],
+                "top": parsed["y"],
+                "right": parsed["x"] + parsed["width"],
+                "bottom": parsed["y"] + parsed["height"],
+            }
+            target_monitor = _find_best_monitor_for_rect(rect, monitors)
+        if target_monitor is None:
+            target_monitor = monitors[0]
+        parsed["width"] = min(parsed["width"], _monitor_width(target_monitor))
+        parsed["height"] = min(parsed["height"], _monitor_height(target_monitor))
+        available_x = max(0, _monitor_width(target_monitor) - parsed["width"])
+        available_y = max(0, _monitor_height(target_monitor) - parsed["height"])
+        rel_x = state.get("rel_x")
+        rel_y = state.get("rel_y")
+        rel_x_ratio = state.get("rel_x_ratio")
+        rel_y_ratio = state.get("rel_y_ratio")
+        if rel_x is None and rel_x_ratio is not None:
+            rel_x = int(round(float(rel_x_ratio) * available_x))
+        if rel_y is None and rel_y_ratio is not None:
+            rel_y = int(round(float(rel_y_ratio) * available_y))
+        if rel_x is None:
+            rel_x = parsed["x"] - int(target_monitor["left"])
+        if rel_y is None:
+            rel_y = parsed["y"] - int(target_monitor["top"])
+        rel_x = max(0, min(int(rel_x), available_x))
+        rel_y = max(0, min(int(rel_y), available_y))
+        parsed["x"] = int(target_monitor["left"]) + rel_x
+        parsed["y"] = int(target_monitor["top"]) + rel_y
+        return parsed
+    return parsed
+
+
+def restore_window_geometry(win, state_key: str, default_geometry=None, minsize=None):
+    if minsize:
+        try:
+            win.minsize(int(minsize[0]), int(minsize[1]))
+        except Exception:
+            pass
+
+    hidden_for_restore = False
+    try:
+        hidden_for_restore = str(win.state()) == "withdrawn"
+        if not hidden_for_restore:
+            win.withdraw()
+            hidden_for_restore = True
+    except Exception:
+        hidden_for_restore = False
+
+    if default_geometry:
+        try:
+            win.geometry(default_geometry)
+        except Exception:
+            pass
+
+    def _finish_show():
+        try:
+            win.update_idletasks()
+        except Exception:
+            pass
+        if hidden_for_restore:
+            try:
+                win.deiconify()
+            except Exception:
+                pass
+
+    def _apply_saved_geometry():
+        state_map = load_window_state_map()
+        saved = state_map.get(state_key)
+        if saved:
+            normalized = normalize_window_state_for_display(win, saved)
+            if normalized:
+                try:
+                    # Instead of forcing the saved width/height, keep the window
+                    # sized to its requested content size but position it at the
+                    # saved x,y so the last saved position is respected.
+                    try:
+                        win.update_idletasks()
+                    except Exception:
+                        pass
+                    req_w = win.winfo_reqwidth() if hasattr(win, 'winfo_reqwidth') else normalized["width"]
+                    req_h = win.winfo_reqheight() if hasattr(win, 'winfo_reqheight') else normalized["height"]
+                    # clamp to current screen size to avoid off-screen sizing
+                    try:
+                        screen_w = win.winfo_screenwidth()
+                        screen_h = win.winfo_screenheight()
+                    except Exception:
+                        screen_w = normalized.get("width", req_w)
+                        screen_h = normalized.get("height", req_h)
+                    w = min(req_w, max(100, screen_w))
+                    h = min(req_h, max(100, screen_h))
+                    win.geometry(f'{w}x{h}+{normalized["x"]}+{normalized["y"]}')
+                except Exception:
+                    pass
+        _finish_show()
+
+    try:
+        win.after_idle(_apply_saved_geometry)
+    except Exception:
+        _apply_saved_geometry()
+
+def track_window_geometry(win, state_key: str):
+    if getattr(win, "_window_state_tracking_key", None) == state_key:
+        return
+    win._window_state_tracking_key = state_key
+    pending = {"id": None}
+
+    def _save_now():
+        try:
+            if not win.winfo_exists() or str(win.state()) in ("iconic", "withdrawn"):
+                return
+            state = _capture_window_state(win)
+            append_window_debug_log("save_attempt", state_key, {"geometry": win.geometry(), "state": state, "monitors": _monitor_rects_win32()})
+            if not state:
+                append_window_debug_log("save_parse_failed", state_key, {"geometry": win.geometry()})
+                return
+            state_map = load_window_state_map()
+            state_map[state_key] = state
+            save_window_state_map(state_map)
+            append_window_debug_log("save_applied", state_key, {"state": state})
+        except Exception as exc:
+            append_window_debug_log("save_error", state_key, {"error": str(exc)})
+
+    def _commit():
+        pending["id"] = None
+        _save_now()
+
+    def _schedule(_event=None):
+        try:
+            if pending["id"] is not None:
+                win.after_cancel(pending["id"])
+            pending["id"] = win.after(250, _commit)
+        except Exception:
+            pass
+
+    def _on_destroy(event=None):
+        try:
+            if event is not None and event.widget is not win:
+                return
+        except Exception:
+            pass
+        _save_now()
+
+    try:
+        win.bind("<Configure>", _schedule, add="+")
+        win.bind("<Map>", _schedule, add="+")
+        win.bind("<Destroy>", _on_destroy, add="+")
+        win.after(300, _save_now)
+    except Exception:
+        pass
+
+
+def remember_window_geometry(win, state_key: str, default_geometry=None, minsize=None):
+    append_window_debug_log("remember_window_geometry", state_key, {"default_geometry": default_geometry, "minsize": list(minsize) if minsize else None})
+    restore_window_geometry(win, state_key, default_geometry=default_geometry, minsize=minsize)
+    track_window_geometry(win, state_key)
+    return state_key
+
+# ===== END: helpers.py =====
+
+# ===== BEGIN: persistence.py =====
+def _set_widget_value(widget, value):
+    """Set Entry/Combobox-like widget text safely."""
+    value = "" if value is None else str(value).strip()
+    try:
+        widget.set(value)
+        return
+    except Exception:
+        pass
+    try:
+        widget.delete(0, "end")
+        widget.insert(0, value)
+    except Exception:
+        pass
+
+def _normalize_template_data(data):
+    """Canonicalize template section names/assignments to S1..S4 style."""
+    if not isinstance(data, dict):
+        return data
+    normalized = dict(data)
+    try:
+        section_count = max(1, min(4, int(normalized.get("section_count", 1))))
+    except Exception:
+        section_count = 1
+    source_names = normalized.get("section_names") or []
+    canonical_names = [f"S{i+1}" for i in range(section_count)]
+    alias_to_canonical = {}
+    for i in range(section_count):
+        canonical = canonical_names[i]
+        alias_to_canonical[canonical.upper()] = canonical
+        alias_to_canonical[str(i + 1)] = canonical
+        alias_to_canonical[chr(ord('A') + i)] = canonical
+        try:
+            existing_name = (source_names[i] or "").strip().upper()
+        except Exception:
+            existing_name = ""
+        if existing_name:
+            alias_to_canonical[existing_name] = canonical
+    normalized["section_names"] = canonical_names
+    normalized_units = []
+    for unit in normalized.get("units", []):
+        if not isinstance(unit, dict):
+            normalized_units.append(unit)
+            continue
+        updated = dict(unit)
+        section_text = str(updated.get("section", "") or "").strip()
+        if section_text:
+            canonical = alias_to_canonical.get(section_text.upper())
+            if canonical is None:
+                section_id = parse_section_id(section_text)
+                if section_id is not None and 1 <= section_id <= section_count:
+                    canonical = f"S{section_id}"
+            updated["section"] = canonical or section_text
+        else:
+            updated["section"] = ""
+        normalized_units.append(updated)
+    normalized["units"] = normalized_units
+    return normalized
+
+def _save_preview_image_for_window(win, json_path, scale=0.75):
+    if not win or not json_path:
+        return
+    try:
+        win.update_idletasks()
+    except Exception:
+        pass
+    try:
+        builder = getattr(win, "build_preview_image", None)
+        if callable(builder):
+            image = builder(scale=scale)
+            if image is not None:
+                out_path = preview_image_path_for_json(json_path)
+                ensure_dir(os.path.dirname(out_path))
+                image.save(out_path, format="PNG")
+                return
+    except Exception:
+        pass
+    try:
+        save_window_preview_image(win, json_path, scale=scale)
+    except Exception:
+        pass
+
+
+def _save_preview_for_current_window(win, json_path):
+    _save_preview_image_for_window(win, json_path, scale=0.75)
+
+
+def _save_preview_for_saved_template(ctx, template_path):
+    if not template_path:
+        return
+    try:
+        data = safe_read_json(template_path)
+        if not isinstance(data, dict):
+            return
+        press = data.get("press") or ""
+        fmt = data.get("format") or ""
+        cfg = CONFIG_MAP.get((press, fmt))
+        if not cfg:
+            return
+        # single-file build: render_layout_preview_image_from_data is already in this module
+        image = render_layout_preview_image_from_data(
+            data,
+            dict(cfg),
+            scale=0.75,
+            title_base=f"{press} - {fmt}",
+            template_mode=True,
+        )
+        if image is None:
+            return
+        out_path = preview_image_path_for_json(template_path)
+        ensure_dir(os.path.dirname(out_path))
+        image.save(out_path, format="PNG")
+    except Exception:
+        pass
+
+
+def _unit_has_assigned_pages(unit_ctx) -> bool:
+    for row in unit_ctx.get("entries", []):
+        for cell in row:
+            try:
+                if (cell.get() or "").strip():
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _validate_used_units_have_sections(ctx, parent=None) -> bool:
+    offending_labels = []
+    for unit_ctx in ctx.get("units", []):
+        try:
+            section_value = (unit_ctx["section_entry"].get() or "").strip()
+        except Exception:
+            section_value = ""
+        if section_value:
+            continue
+        if _unit_has_assigned_pages(unit_ctx):
+            offending_labels.append(str(unit_ctx.get("label") or "Unit"))
+
+    if not offending_labels:
+        return True
+
+    labels_text = ", ".join(offending_labels)
+    messagebox.showerror(
+        "Missing Section Assignment",
+        "All units with pages assigned must be assigned a section before saving.\n\n"
+        f"Units missing a section: {labels_text}",
+        parent=parent,
+    )
+    return False
+
+
+def _ctx_is_regular_mode(ctx) -> bool:
+    if bool(ctx.get("regular_mode", False)):
+        return True
+    default_dir = str(ctx.get("default_dir") or "").strip()
+    if not default_dir:
+        return False
+    try:
+        return os.path.abspath(default_dir) == os.path.abspath(REGULAR_DIR)
+    except Exception:
+        return False
+
+
+def _ctx_file_type_name(ctx) -> str:
+    if bool(ctx.get("template_mode", False)):
+        return "template"
+    if _ctx_is_regular_mode(ctx):
+        return "regular"
+    return "layout"
+
+
+def _normalize_ctx_publication_entry(ctx):
+    product_entry = ctx.get("product_entry")
+    if not product_entry:
+        return ""
+    try:
+        raw_value = product_entry.get()
+    except Exception:
+        raw_value = ""
+    normalized = normalize_publication_name(raw_value)
+    try:
+        current_value = product_entry.get()
+    except Exception:
+        current_value = raw_value
+    if current_value != normalized:
+        try:
+            product_entry.state(["!disabled"])
+        except Exception:
+            pass
+        try:
+            product_entry.delete(0, "end")
+            product_entry.insert(0, normalized)
+        except Exception:
+            pass
+        if bool(ctx.get("template_mode", False)):
+            try:
+                product_entry.state(["disabled"])
+            except Exception:
+                pass
+    return normalized
+
+
+def _normalize_ctx_issue_date_entry(ctx):
+    issue_entry = ctx.get("issue_entry")
+    if not issue_entry:
+        return ""
+    try:
+        raw_value = (issue_entry.get() or "").strip()
+    except Exception:
+        raw_value = ""
+    if not raw_value:
+        return ""
+    dt = parse_issue_date_flexible(raw_value)
+    if not dt:
+        return raw_value
+    normalized = dt.strftime("%m/%d/%Y")
+    try:
+        current_value = (issue_entry.get() or "").strip()
+    except Exception:
+        current_value = raw_value
+    if current_value != normalized:
+        try:
+            issue_entry.state(["!disabled"])
+        except Exception:
+            pass
+        try:
+            issue_entry.delete(0, "end")
+            issue_entry.insert(0, normalized)
+        except Exception:
+            pass
+        if bool(ctx.get("template_mode", False)) or _ctx_is_regular_mode(ctx):
+            try:
+                issue_entry.state(["disabled"])
+            except Exception:
+                pass
+    return normalized
+
+
+def _invalid_grid_cells_from_data(data):
+    invalid = []
+    for unit in (data.get("units", []) or []):
+        label = str(unit.get("label") or "Unit")
+        grid = unit.get("grid", []) or []
+        for row_index, row in enumerate(grid, start=1):
+            row_values = row if isinstance(row, list) else []
+            for col_index, cell in enumerate(row_values, start=1):
+                value = str(cell or "").strip()
+                if value and (not value.isdigit()):
+                    invalid.append((label, row_index, col_index, value))
+    return invalid
+
+
+def _units_missing_sections_from_data(data):
+    offenders = []
+    for unit in (data.get("units", []) or []):
+        label = str(unit.get("label") or "Unit")
+        section_value = str(unit.get("section") or "").strip()
+        if section_value:
+            continue
+        has_values = False
+        for row in (unit.get("grid", []) or []):
+            row_values = row if isinstance(row, list) else []
+            for cell in row_values:
+                if str(cell or "").strip():
+                    has_values = True
+                    break
+            if has_values:
+                break
+        if has_values:
+            offenders.append(label)
+    return offenders
+
+
+def validate_layout_data_for_mode(data, template_mode=False, regular_mode=False):
+    if not isinstance(data, dict):
+        return ["Could not read layout data."]
+
+    errors = []
+    file_type = "template" if template_mode else ("regular" if regular_mode else "layout")
+
+    raw_issue = str(data.get("issue_date") or "").strip()
+    raw_product = str(data.get("product") or "").strip()
+
+    if not template_mode:
+        normalized_product = normalize_publication_name(raw_product)
+        data["product"] = normalized_product
+        if not normalized_product:
+            errors.append(f"{file_type.capitalize()}s require a publication name.")
+
+        if raw_issue:
+            dt = parse_issue_date_flexible(raw_issue)
+            if not dt:
+                errors.append("Issue Date must be a valid date.")
+            else:
+                data["issue_date"] = dt.strftime("%m/%d/%Y")
+        elif not regular_mode:
+            errors.append("Layouts require an issue date.")
+    else:
+        data["issue_date"] = raw_issue
+        data["product"] = normalize_publication_name(raw_product)
+
+    invalid_cells = _invalid_grid_cells_from_data(data)
+    if invalid_cells:
+        preview_items = [f"{label} r{row} c{col} ({value})" for label, row, col, value in invalid_cells[:12]]
+        suffix = "" if len(invalid_cells) <= 12 else f" and {len(invalid_cells) - 12} more"
+        errors.append("Grid cells may only contain numbers. Invalid cells: " + ", ".join(preview_items) + suffix + ".")
+
+    missing_sections = _units_missing_sections_from_data(data)
+    if missing_sections:
+        errors.append("All units with pages assigned must be assigned a section before saving. Units missing a section: " + ", ".join(missing_sections) + ".")
+
+    return errors
+
+
+def validate_layout_ctx_before_save(ctx, parent=None):
+    if not bool(ctx.get("template_mode", False)):
+        _normalize_ctx_publication_entry(ctx)
+    if not bool(ctx.get("template_mode", False)) and not _ctx_is_regular_mode(ctx):
+        _normalize_ctx_issue_date_entry(ctx)
+
+    data = collect_layout_data(ctx)
+    errors = validate_layout_data_for_mode(
+        data,
+        template_mode=bool(ctx.get("template_mode", False)),
+        regular_mode=_ctx_is_regular_mode(ctx),
+    )
+    if errors:
+        file_type = _ctx_file_type_name(ctx).capitalize()
+        messagebox.showerror(
+            f"Invalid {file_type}",
+            f"Please fix the following before saving the {file_type.lower()}:\n\n" + "\n".join(f"• {item}" for item in errors),
+            parent=parent,
+        )
+        return False, data
+    return True, data
+
+
+
+def collect_layout_data(ctx):
+    now = datetime.now().isoformat(timespec="seconds")
+    data = {
+        "version": 1,
+        "name": ctx.get("layout_name") or "",
+        "press": ctx["press_name"],
+        "format": ctx["format_name"],
+        "saved_at": now,
+        "last_changed_by": get_windows_username(),
+        "issue_date": ctx["issue_entry"].get().strip() if ctx.get("issue_entry") else "",
+        "product": normalize_publication_name(ctx["product_entry"].get()) if ctx.get("product_entry") else "",
+        "section_count": 1,
+        "section_pages": [0],
+        "section_names": [],
+        "units": []
+    }
+
+    if ctx.get("section_count_var"):
+        try:
+            section_count = int(ctx["section_count_var"].get())
+        except Exception:
+            section_count = 1
+        section_count = max(1, min(4, section_count))
+        data["section_count"] = section_count
+        data["section_pages"] = compute_section_page_counts_from_ctx(ctx, section_count=section_count)
+        names = []
+        for i in range(section_count):
+            try:
+                names.append((ctx.get("section_name_vars", [])[i].get() or "").strip())
+            except Exception:
+                names.append("")
+        data["section_names"] = names
+
+    for u in ctx["units"]:
+        section = u["section_entry"].get().strip()
+        grid = []
+        for row in u["entries"]:
+            grid.append([cell.get().strip() for cell in row])
+        data["units"].append({"label": u["label"], "section": section, "grid": grid})
+
+    if not ctx.get("template_mode", False):
+        try:
+            starter_format_var = ctx.get("starter_format_var")
+            starter_format = (starter_format_var.get() or "").strip() if starter_format_var else ""
+        except Exception:
+            starter_format = ""
+        if starter_format:
+            data["starter_format"] = starter_format
+        data["color_cells"] = [
+            {"unit": unit, "r": int(r), "c": int(c)}
+            for (unit, r, c) in sorted(ctx.get("color_cells", set()))
+        ]
+    return data
+def populate_layout_from_data(ctx, data):
+    regular_mode = _ctx_is_regular_mode(ctx)
+    if ctx.get("issue_entry"):
+        ctx["issue_entry"].state(["!disabled"])
+        ctx["issue_entry"].delete(0, "end")
+        ctx["issue_entry"].insert(0, data.get("issue_date", ""))
+        if ctx.get("template_mode") or regular_mode:
+            ctx["issue_entry"].state(["disabled"])
+
+    if ctx.get("product_entry"):
+        ctx["product_entry"].state(["!disabled"])
+        ctx["product_entry"].delete(0, "end")
+        ctx["product_entry"].insert(0, normalize_publication_name(data.get("product", "")))
+        if ctx.get("template_mode"):
+            ctx["product_entry"].state(["disabled"])
+
+    if ctx.get("section_count_var") and ctx.get("section_page_vars"):
+        section_count = data.get("section_count", 1)
+        try:
+            section_count = max(1, min(4, int(section_count)))
+        except Exception:
+            section_count = 1
+        ctx["section_count_var"].set(str(section_count))
+
+        section_pages = data.get("section_pages", [])
+        for i in range(4):
+            if i < section_count and i < len(section_pages):
+                ctx["section_page_vars"][i].set(str(max(1, int(section_pages[i]))))
+            elif i < section_count:
+                ctx["section_page_vars"][i].set(str(min_pages_for_format(ctx.get("format_name", ""))))
+            else:
+                ctx["section_page_vars"][i].set("")
+
+        if ctx.get("_update_section_page_states"):
+            ctx["_update_section_page_states"](section_count)
+
+    # Load section names (if present) and apply to header name fields
+    section_names = data.get("section_names") or []
+    if ctx.get("section_name_vars"):
+        try:
+            for i in range(4):
+                if i < section_count and i < len(section_names) and section_names[i] is not None:
+                    ctx["section_name_vars"][i].set(str(section_names[i]))
+                elif i < section_count:
+                    # defaults: template mode uses S1.., layout uses A..D
+                    if ctx.get("template_mode"):
+                        ctx["section_name_vars"][i].set(f"S{i+1}")
+                    else:
+                        ctx["section_name_vars"][i].set(chr(ord('A') + i))
+                else:
+                    ctx["section_name_vars"][i].set("")
+        except Exception:
+            pass
+
+    unit_map = {u["label"]: u for u in ctx["units"]}
+    for udata in data.get("units", []):
+        label = udata.get("label")
+        if label not in unit_map:
+            continue
+        u = unit_map[label]
+        _set_widget_value(u["section_entry"], udata.get("section", ""))
+
+        grid = udata.get("grid", [])
+        for r, row in enumerate(grid):
+            if r >= len(u["entries"]):
+                break
+            for c, val in enumerate(row):
+                if c >= len(u["entries"][r]):
+                    break
+                cell = u["entries"][r][c]
+                cell.delete(0, "end")
+                cell.insert(0, val)
+
+    if ctx.get("_capture_unit_section_assignments"):
+        try:
+            ctx["_capture_unit_section_assignments"]()
+        except Exception:
+            pass
+    if ctx.get("_refresh_unit_section_choices"):
+        try:
+            ctx["_refresh_unit_section_choices"]()
+        except Exception:
+            pass
+    if ctx.get("_refresh_section_page_counts"):
+        try:
+            ctx["_refresh_section_page_counts"]()
+        except Exception:
+            pass
+
+    # ---- load per-cell color selection (layouts only) ----
+    if not ctx.get("template_mode", False):
+        ctx["color_cells"] = set()
+        raw = data.get("color_cells", [])
+        for item in raw:
+            try:
+                unit = str(item.get("unit"))
+                r = int(item.get("r"))
+                c = int(item.get("c"))
+                ctx["color_cells"].add((unit, r, c))
+            except Exception:
+                pass
+
+def do_save(win, ctx):
+    default_dir = ctx.get("default_dir", LAYOUTS_DIR)
+    ensure_dir(default_dir)
+
+    prior_file_path = ctx.get("file_path")
+    if not prior_file_path:
+        suggested = build_save_filename_suggestion(ctx)
+        ctx["file_path"] = os.path.join(default_dir, suggested)
+
+    ok, data = validate_layout_ctx_before_save(ctx, parent=win)
+    if not ok:
+        if not prior_file_path:
+            ctx["file_path"] = ""
+        return False
+    try:
+        if ctx.get("template_mode", False):
+            data = _normalize_template_data(data)
+        if not data.get("name"):
+            data["name"] = os.path.splitext(os.path.basename(ctx["file_path"]))[0]
+        safe_write_json(ctx["file_path"], data)
+        _save_preview_for_current_window(win, ctx["file_path"])
+        ctx["layout_name"] = data["name"]
+        win.title(f"{ctx['title_base']}  —  {os.path.basename(ctx['file_path'])}")
+
+        # If saving a layout (not template mode) and imposition doesn't match existing template, ask to save as template
+        if (not ctx.get("template_mode", False)) and ctx.get("prompt_save_template", True):
+            if not _template_exists_for_imposition(ctx):
+                template_suggestion = build_filename_suggestion(ctx)
+                if messagebox.askyesno(
+                    "Save as Template",
+                    f"This layout has a new imposition that doesn't match any existing template.\n\n"
+                    f"Would you like to save it as a template?\n\n"
+                    f"Template name: {template_suggestion}",
+                    parent=win
+                ):
+                    save_template_from_layout(ctx)
+
+        return True
+    except Exception as e:
+        messagebox.showerror("Save Failed", str(e))
+        return False
+def do_save_as(win, ctx):
+    ok, data = validate_layout_ctx_before_save(ctx, parent=win)
+    if not ok:
+        return False
+    default_dir = ctx.get("default_dir", LAYOUTS_DIR)
+    ensure_dir(default_dir)
+
+    suggested = build_save_filename_suggestion(ctx)
+
+    path = filedialog.asksaveasfilename(
+        parent=win,
+        initialdir=default_dir,
+        initialfile=suggested,
+        defaultextension=".json",
+        filetypes=[("JSON files", "*.json")]
+    )
+    if not path:
+        return False
+
+    try:
+        if ctx.get("template_mode", False):
+            data = _normalize_template_data(data)
+        if not data.get("name"):
+            data["name"] = os.path.splitext(os.path.basename(path))[0]
+        safe_write_json(path, data)
+        _save_preview_for_current_window(win, path)
+        ctx["file_path"] = path
+        ctx["layout_name"] = data["name"]
+        win.title(f"{ctx['title_base']}  —  {os.path.basename(path)}")
+        
+        # If saving a layout (not template mode) and imposition doesn't match existing template, ask to save as template
+        if (not ctx.get("template_mode", False)) and ctx.get("prompt_save_template", True):
+            if not _template_exists_for_imposition(ctx):
+                template_suggestion = build_filename_suggestion(ctx)
+                if messagebox.askyesno(
+                    "Save as Template",
+                    f"This layout has a new imposition that doesn't match any existing template.\n\n"
+                    f"Would you like to save it as a template?\n\n"
+                    f"Template name: {template_suggestion}",
+                    parent=win
+                ):
+                    save_template_from_layout(ctx)
+        
+        return True
+    except Exception as e:
+        messagebox.showerror("Save As Failed", str(e))
+        return False
+
+def _normalize_imposition_name(value: str) -> str:
+    """Normalize template/imposition names for reliable comparisons."""
+    stem = os.path.splitext(str(value or "").strip())[0]
+    stem = re.sub(r"\s+", " ", stem).strip().lower()
+    return stem
+
+
+def _imposition_name_matches(existing_name: str, target_name: str) -> bool:
+    """Treat exact names and save_template_from_layout uniqueness suffixes as a match."""
+    existing = _normalize_imposition_name(existing_name)
+    target = _normalize_imposition_name(target_name)
+    if not existing or not target:
+        return False
+    if existing == target:
+        return True
+    return bool(re.fullmatch(rf"{re.escape(target)}_\d+", existing))
+
+
+def _template_exists_for_imposition(ctx) -> bool:
+    """Check if a template with the same imposition already exists.
+
+    The prompt shown to the user is about imposition matching, so the primary
+    comparison should be the generated imposition/template name. As a fallback,
+    we also do a structural match against the template JSON in case a template
+    was renamed manually.
+    """
+    ensure_dir(TEMPLATE_DIR)
+    press = ctx.get("press_name", "")
+    fmt = ctx.get("format_name", "")
+
+    current_data = _normalize_template_data(collect_layout_data(ctx))
+    current_data.pop("issue_date", None)
+    current_data.pop("product", None)
+    current_data.pop("color_cells", None)
+
+    target_imposition_name = build_imposition_text(ctx)
+    current_section_count = current_data.get("section_count")
+    current_section_pages = current_data.get("section_pages")
+    current_units_by_label = {
+        str(unit.get("label") or ""): unit.get("grid", [])
+        for unit in (current_data.get("units", []) or [])
+        if isinstance(unit, dict)
+    }
+
+    template_files = sorted(glob.glob(os.path.join(TEMPLATE_DIR, "*.json")))
+    for tmpl_path in template_files:
+        tmpl_data = safe_read_json(tmpl_path)
+        if not isinstance(tmpl_data, dict):
+            continue
+
+        if tmpl_data.get("press") != press or tmpl_data.get("format") != fmt:
+            continue
+
+        template_stem = os.path.splitext(os.path.basename(tmpl_path))[0]
+        template_name = tmpl_data.get("name") or template_stem
+        if _imposition_name_matches(template_name, target_imposition_name) or _imposition_name_matches(template_stem, target_imposition_name):
+            return True
+
+        normalized_template = _normalize_template_data(tmpl_data)
+        if normalized_template.get("section_count") != current_section_count:
+            continue
+        if normalized_template.get("section_pages") != current_section_pages:
+            continue
+
+        template_units_by_label = {
+            str(unit.get("label") or ""): unit.get("grid", [])
+            for unit in (normalized_template.get("units", []) or [])
+            if isinstance(unit, dict)
+        }
+        if template_units_by_label == current_units_by_label:
+            return True
+
+    return False
+def save_regular_from_layout(ctx, parent=None):
+    """Save the current layout as a regular using the regular suggested filename."""
+    try:
+        ensure_dir(REGULAR_DIR)
+
+        data = collect_layout_data(ctx)
+        data["issue_date"] = ""
+
+        errors = validate_layout_data_for_mode(
+            data,
+            template_mode=False,
+            regular_mode=True,
+        )
+        if errors:
+            messagebox.showerror(
+                "Save as Regular Failed",
+                "Please fix the following before saving as a regular:\n\n" + "\n".join(f"• {item}" for item in errors),
+                parent=parent,
+            )
+            return False, None
+
+        regular_filename = build_regular_filename_suggestion(ctx)
+        regular_path = os.path.join(REGULAR_DIR, regular_filename)
+
+        if os.path.exists(regular_path):
+            base, ext = os.path.splitext(regular_filename)
+            counter = 1
+            while os.path.exists(os.path.join(REGULAR_DIR, f"{base}_{counter}{ext}")):
+                counter += 1
+            regular_filename = f"{base}_{counter}{ext}"
+            regular_path = os.path.join(REGULAR_DIR, regular_filename)
+
+        data["name"] = os.path.splitext(regular_filename)[0]
+        safe_write_json(regular_path, data)
+        try:
+            if parent is not None:
+                _save_preview_for_current_window(parent, regular_path)
+        except Exception:
+            pass
+        messagebox.showinfo("Regular Saved", f"Regular saved as:\n{regular_filename}", parent=parent)
+        return True, regular_path
+    except Exception as e:
+        messagebox.showerror("Save as Regular Failed", f"Could not save regular:\n{str(e)}", parent=parent)
+        return False, None
+
+
+def save_template_from_layout(ctx):
+    """Save the current layout as a template (without issue_date, product, color_cells)."""
+    try:
+        ensure_dir(TEMPLATE_DIR)
+        
+        # Collect data but strip layout-specific fields
+        data = collect_layout_data(ctx)
+        data = _normalize_template_data(data)
+        
+        # Remove layout-specific fields
+        data.pop("issue_date", None)
+        data.pop("product", None)
+        data.pop("color_cells", None)
+        
+        # Generate template filename
+        template_filename = build_filename_suggestion(ctx)
+        template_path = os.path.join(TEMPLATE_DIR, template_filename)
+        
+        # Make filename unique if it exists
+        if os.path.exists(template_path):
+            base, ext = os.path.splitext(template_filename)
+            counter = 1
+            while os.path.exists(os.path.join(TEMPLATE_DIR, f"{base}_{counter}{ext}")):
+                counter += 1
+            template_filename = f"{base}_{counter}{ext}"
+            template_path = os.path.join(TEMPLATE_DIR, template_filename)
+        
+        # Use template filename as template name
+        data["name"] = os.path.splitext(template_filename)[0]
+        
+        safe_write_json(template_path, data)
+        _save_preview_for_saved_template(ctx, template_path)
+        messagebox.showinfo("Template Saved", f"Template saved as:\n{template_filename}")
+    except Exception as e:
+        messagebox.showerror("Save Template Failed", f"Could not save template:\n{str(e)}")
+
+# ===== END: persistence.py =====
+
+# Expose this single-file module under the original module name so intra-project imports keep working.
+import sys as _single_file_sys
+_single_file_sys.modules.setdefault('press_layout_core', _single_file_sys.modules[__name__])
+
+# ===== BEGIN: original press_layout_ui.py =====
 import os
 import glob
 import json
@@ -9,10 +2760,11 @@ import sys
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox
+ensure_runtime_dependencies(prompt_user=True)
 from PIL import Image
 
-import press_layout_core as helpers_mod
-from press_layout_core import *
+helpers_mod = sys.modules[__name__]
+# single-file build: core symbols are already in this module
 
 SORT_ASCENDING_INDICATOR = " ▲"
 SORT_DESCENDING_INDICATOR = " ▼"
@@ -23,6 +2775,11 @@ def _treeview_sort_heading_text(base_title, sort_state, col):
     if active_col != col:
         return base_title
     return f'{base_title}{SORT_DESCENDING_INDICATOR if sort_state.get("desc") else SORT_ASCENDING_INDICATOR}'
+
+
+def _last_changed_by_display(value):
+    text = str(value or "").strip()
+    return text if text else "Unknown"
 
 # ===== BEGIN: layout_builder.py =====
 def _shift_calendar_month(year, month, delta):
@@ -344,6 +3101,7 @@ def touch_cleanup_json_path(path, template_mode=False, regular_mode=False, defau
             default_dir=default_dir,
         )
         prepared_data["saved_at"] = datetime.now().isoformat(timespec="seconds")
+        prepared_data["last_changed_by"] = get_windows_username()
 
         original_path = path
         final_path = path
@@ -1312,6 +4070,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "prompt_save_template": bool(config.get("prompt_save_template", not template_mode)),
         "color_cells": set(),  # per-cell storage
     }
+    try:
+        win._press_layout_ctx = ctx
+    except Exception:
+        pass
 
     # Propagate section name changes to unit section entries.
     try:
@@ -3191,6 +5953,7 @@ def _clone_rows(rows):
     return [dict(row) for row in (rows or [])]
 
 
+
 def _rebuild_template_cache(entries=None):
     if entries is None:
         entries = _json_dir_entries(TEMPLATE_DIR)
@@ -3198,7 +5961,15 @@ def _rebuild_template_cache(entries=None):
     for item in entries:
         path = item.get("path") or ""
         stem = os.path.splitext(os.path.basename(path))[0]
-        data = safe_read_json(path)
+        db_row = item.get("db_row") if isinstance(item, dict) else None
+        data = (db_row or {}).get("data") if isinstance(db_row, dict) else None
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = None
+        if not isinstance(data, dict):
+            data = safe_read_json(path)
         valid = isinstance(data, dict)
         name = stem
         press = ""
@@ -3227,12 +5998,12 @@ def _rebuild_template_cache(entries=None):
             "section_pages": section_pages,
             "saved_dt": item.get("fs_saved_dt"),
             "saved_disp": item.get("fs_saved_disp") or "",
+            "last_changed_by": _last_changed_by_display(data.get("last_changed_by", "")) if valid else "Unknown",
             "valid": valid,
         })
     _TEMPLATE_CACHE["signature"] = _dir_signature(entries)
     _TEMPLATE_CACHE["rows"] = rows
     return _clone_rows(rows)
-
 
 def get_cached_templates(force=False):
     entries = _json_dir_entries(TEMPLATE_DIR)
@@ -3303,13 +6074,22 @@ def _format_section_pages_for_display(data):
 
 
 
+
 def _rebuild_regular_cache(entries=None):
     if entries is None:
         entries = _json_dir_entries(REGULAR_DIR)
     rows = []
     for item in entries:
         path = item.get("path") or ""
-        data = safe_read_json(path) or {}
+        db_row = item.get("db_row") if isinstance(item, dict) else None
+        data = (db_row or {}).get("data") if isinstance(db_row, dict) else None
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = None
+        if not isinstance(data, dict):
+            data = safe_read_json(path) or {}
         press = data.get("press", "") or ""
         fmt = data.get("format", "") or ""
         issue = data.get("issue_date", "") or ""
@@ -3336,11 +6116,11 @@ def _rebuild_regular_cache(entries=None):
             "saved_disp": fmt_dt_for_display(saved_dt),
             "color_pages": color_pages,
             "plates": plates,
+            "last_changed_by": _last_changed_by_display(data.get("last_changed_by", "")),
         })
     _REGULAR_CACHE["signature"] = _dir_signature(entries)
     _REGULAR_CACHE["rows"] = rows
     return _clone_rows(rows)
-
 
 def get_cached_regular_rows(force=False):
     entries = _json_dir_entries(REGULAR_DIR)
@@ -3354,13 +6134,22 @@ def list_matching_regular_layouts(press_name, format_name):
     rows, _changed = get_cached_regular_rows(force=False)
     return [row for row in rows if row.get("press") == press_name and row.get("format") == format_name]
 
+
 def _rebuild_layout_cache(entries=None):
     if entries is None:
         entries = _json_dir_entries(LAYOUTS_DIR)
     rows = []
     for item in entries:
         path = item.get("path") or ""
-        data = safe_read_json(path) or {}
+        db_row = item.get("db_row") if isinstance(item, dict) else None
+        data = (db_row or {}).get("data") if isinstance(db_row, dict) else None
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = None
+        if not isinstance(data, dict):
+            data = safe_read_json(path) or {}
         press = data.get("press", "") or ""
         fmt = data.get("format", "") or ""
         issue = data.get("issue_date", "") or ""
@@ -3386,11 +6175,11 @@ def _rebuild_layout_cache(entries=None):
             "saved_disp": fmt_dt_for_display(saved_dt),
             "color_pages": color_pages,
             "plates": plates,
+            "last_changed_by": _last_changed_by_display(data.get("last_changed_by", "")),
         })
     _LAYOUT_CACHE["signature"] = _dir_signature(entries)
     _LAYOUT_CACHE["rows"] = rows
     return _clone_rows(rows)
-
 
 def get_cached_layout_rows(force=False):
     entries = _json_dir_entries(LAYOUTS_DIR)
@@ -3920,8 +6709,8 @@ def build_new_layout_launcher(parent):
 
     mode_state = {"regular": False}
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
-    launcher_template_sort_state = {"col": None, "desc": False}
-    launcher_regular_sort_state = {"col": None, "desc": False}
+    launcher_template_sort_state = {"col": "name", "desc": False}
+    launcher_regular_sort_state = {"col": "product", "desc": False}
     template_rows_by_iid = {}
     regular_rows = {}
     launcher_template_group_by_iid = {}
@@ -3967,16 +6756,16 @@ def build_new_layout_launcher(parent):
     templates_frame.grid(row=2, column=0, sticky="nsew")
     templates_frame.rowconfigure(0, weight=1)
     templates_frame.columnconfigure(0, weight=1)
-    template_columns = ("sections", "pages", "saved")
+    template_columns = ("sections", "pages", "changed_by", "saved")
     templates_tree = ttk.Treeview(templates_frame, columns=template_columns, show="tree headings", selectmode="browse")
     templates_tree.grid(row=0, column=0, sticky="nsew")
     templates_scroll = ttk.Scrollbar(templates_frame, orient="vertical", command=templates_tree.yview)
     templates_scroll.grid(row=0, column=1, sticky="ns")
     templates_tree.configure(yscrollcommand=templates_scroll.set)
-    launcher_template_heading_titles = {"sections": "Sections", "pages": "Pages", "saved": "Last Saved"}
+    launcher_template_heading_titles = {"sections": "Sections", "pages": "Pages", "changed_by": "Last Changed By", "saved": "Last Saved"}
     templates_tree.heading("#0", text="Template Name")
     templates_tree.column("#0", width=300, anchor="w")
-    for key, title, width, anchor in [("sections", launcher_template_heading_titles["sections"], 80, "center"), ("pages", launcher_template_heading_titles["pages"], 130, "center"), ("saved", launcher_template_heading_titles["saved"], 170, "center")]:
+    for key, title, width, anchor in [("sections", launcher_template_heading_titles["sections"], 80, "center"), ("pages", launcher_template_heading_titles["pages"], 130, "center"), ("changed_by", launcher_template_heading_titles["changed_by"], 140, "center"), ("saved", launcher_template_heading_titles["saved"], 170, "center")]:
         templates_tree.heading(key, text=title)
         templates_tree.column(key, width=width, anchor=anchor)
     try:
@@ -3999,16 +6788,16 @@ def build_new_layout_launcher(parent):
     regular_frame.grid(row=2, column=0, sticky="nsew")
     regular_frame.rowconfigure(0, weight=1)
     regular_frame.columnconfigure(0, weight=1)
-    regular_columns = ("pages", "color_pages", "plates", "saved")
+    regular_columns = ("pages", "color_pages", "plates", "changed_by", "saved")
     regular_tree = ttk.Treeview(regular_frame, columns=regular_columns, show="tree headings", selectmode="browse")
     regular_tree.grid(row=0, column=0, sticky="nsew")
     regular_scroll = ttk.Scrollbar(regular_frame, orient="vertical", command=regular_tree.yview)
     regular_scroll.grid(row=0, column=1, sticky="ns")
     regular_tree.configure(yscrollcommand=regular_scroll.set)
-    launcher_regular_heading_titles = {"pages": "Pages", "color_pages": "Color Pages", "plates": "Plates", "saved": "Last Saved"}
+    launcher_regular_heading_titles = {"pages": "Pages", "color_pages": "Color Pages", "plates": "Plates", "changed_by": "Last Changed By", "saved": "Last Saved"}
     regular_tree.heading("#0", text="Product")
     regular_tree.column("#0", width=260, anchor="w")
-    for key, title, width, anchor in [("pages", launcher_regular_heading_titles["pages"], 120, "center"), ("color_pages", launcher_regular_heading_titles["color_pages"], 95, "center"), ("plates", launcher_regular_heading_titles["plates"], 70, "center"), ("saved", launcher_regular_heading_titles["saved"], 170, "center")]:
+    for key, title, width, anchor in [("pages", launcher_regular_heading_titles["pages"], 120, "center"), ("color_pages", launcher_regular_heading_titles["color_pages"], 95, "center"), ("plates", launcher_regular_heading_titles["plates"], 70, "center"), ("changed_by", launcher_regular_heading_titles["changed_by"], 140, "center"), ("saved", launcher_regular_heading_titles["saved"], 170, "center")]:
         regular_tree.heading(key, text=title)
         regular_tree.column(key, width=width, anchor=anchor)
     try:
@@ -4101,7 +6890,7 @@ def build_new_layout_launcher(parent):
         except Exception:
             return None
     def update_launcher_template_sort_headings():
-        templates_tree.heading("#0", text="Template Name")
+        templates_tree.heading("#0", text=_treeview_sort_heading_text("Template Name", launcher_template_sort_state, "name"), command=lambda: sort_launcher_templates_by("name"))
         for col in template_columns:
             templates_tree.heading(col, text=_treeview_sort_heading_text(launcher_template_heading_titles[col], launcher_template_sort_state, col), command=lambda _c=col: sort_launcher_templates_by(_c))
     def sort_launcher_template_rows(rows):
@@ -4113,6 +6902,8 @@ def build_new_layout_launcher(parent):
                 return (int(r.get("section_count") or 0), tuple(r.get("section_pages_sort", (0, 0, 0, 0))), (r.get("name") or "").lower())
             if col == "pages":
                 return (tuple(r.get("section_pages_sort", (0, 0, 0, 0))), int(r.get("section_count") or 0), (r.get("name") or "").lower())
+            if col == "changed_by":
+                return ((r.get("last_changed_by") or "").lower(), (r.get("name") or "").lower())
             if col == "saved":
                 return (r.get("saved_dt") or datetime.min, (r.get("name") or "").lower())
             return (r.get("name") or "").lower()
@@ -4122,18 +6913,22 @@ def build_new_layout_launcher(parent):
         if not col:
             return rows
         def keyfunc(r):
+            if col == "product":
+                return ((r.get("product") or "").lower(), tuple(r.get("section_pages_sort", (0, 0, 0, 0))), r.get("saved_dt") or datetime.min)
             if col == "pages":
                 return tuple(r.get("section_pages_sort", (0, 0, 0, 0)))
             if col == "color_pages":
                 return int(r.get("color_pages", 0) or 0)
             if col == "plates":
                 return int(r.get("plates", 0) or 0)
+            if col == "changed_by":
+                return ((r.get("last_changed_by") or "").lower(), (r.get("product") or "").lower())
             if col == "saved":
                 return r.get("saved_dt") or datetime.min
             return ((r.get("product") or "").lower(), tuple(r.get("section_pages_sort", (0, 0, 0, 0))), r.get("saved_dt") or datetime.min)
         return sorted(rows, key=keyfunc, reverse=launcher_regular_sort_state["desc"])
     def update_launcher_regular_sort_headings():
-        regular_tree.heading("#0", text="Product")
+        regular_tree.heading("#0", text=_treeview_sort_heading_text("Product", launcher_regular_sort_state, "product"), command=lambda: sort_launcher_regular_by("product"))
         for col in regular_columns:
             regular_tree.heading(col, text=_treeview_sort_heading_text(launcher_regular_heading_titles[col], launcher_regular_sort_state, col), command=lambda _c=col: sort_launcher_regular_by(_c))
     def sort_launcher_templates_by(col):
@@ -4156,7 +6951,15 @@ def build_new_layout_launcher(parent):
         format_filter = (format_var.get() or "All").strip()
         active_count = _active_section_count()
         if search_text:
-            searchable = " ".join([row.get("name", ""), row.get("press", ""), row.get("format", ""), str(row.get("section_count") or ""), row.get("pages_disp", ""), row.get("saved_disp", "")]).lower()
+            searchable = " ".join([
+                row.get("name", ""),
+                row.get("press", ""),
+                row.get("format", ""),
+                str(row.get("section_count") or ""),
+                row.get("pages_disp", ""),
+                row.get("last_changed_by", ""),
+                row.get("saved_disp", ""),
+            ]).lower()
             if search_text not in searchable:
                 return False
         if press_filter != "All" and row.get("press", "") != press_filter:
@@ -4191,7 +6994,7 @@ def build_new_layout_launcher(parent):
         for cached in cached_rows:
             if not bool(cached.get("valid", False)):
                 continue
-            row = {"path": cached.get("path"), "name": cached.get("name") or os.path.splitext(os.path.basename(cached.get("path") or ""))[0], "press": cached.get("press") or "", "format": cached.get("format") or "", "section_count": int(cached.get("section_count") or 0), "section_pages_sort": tuple(([int(v) for v in (cached.get("section_pages") or []) if str(v).strip() != "" and int(v) > 0] + [0, 0, 0, 0])[:4]), "pages_disp": _format_section_pages_for_display({"section_pages": cached.get("section_pages") or [], "section_count": cached.get("section_count") or 0}), "saved_dt": cached.get("saved_dt"), "saved_disp": cached.get("saved_disp") or ""}
+            row = {"path": cached.get("path"), "name": cached.get("name") or os.path.splitext(os.path.basename(cached.get("path") or ""))[0], "press": cached.get("press") or "", "format": cached.get("format") or "", "section_count": int(cached.get("section_count") or 0), "section_pages_sort": tuple(([int(v) for v in (cached.get("section_pages") or []) if str(v).strip() != "" and int(v) > 0] + [0, 0, 0, 0])[:4]), "pages_disp": _format_section_pages_for_display({"section_pages": cached.get("section_pages") or [], "section_count": cached.get("section_count") or 0}), "last_changed_by": cached.get("last_changed_by") or "Unknown", "saved_dt": cached.get("saved_dt"), "saved_disp": cached.get("saved_disp") or ""}
             if _matches_template_filters(row):
                 rows.append(row)
         rows = sort_launcher_template_rows(rows)
@@ -4212,17 +7015,17 @@ def build_new_layout_launcher(parent):
             press_iid = f"__new_layout_template_press__::{press_name}"
             format_groups = grouped.get(press_name, {})
             press_count = sum(len(items) for items in format_groups.values())
-            templates_tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", ""), open=True, tags=("group_row",))
+            templates_tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", ""), open=True, tags=("group_row",))
             launcher_template_group_by_iid[press_iid] = ("press", press_name)
             for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
                 format_iid = f"__new_layout_template_format__::{press_name}::{format_name}"
                 format_count = len(format_groups.get(format_name, []))
-                templates_tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", ""), open=True, tags=("subgroup_row",))
+                templates_tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", ""), open=True, tags=("subgroup_row",))
                 launcher_template_group_by_iid[format_iid] = ("format", press_name, format_name)
                 for row in format_groups.get(format_name, []):
                     iid = row["path"]
                     template_rows_by_iid[iid] = row
-                    templates_tree.insert(format_iid, "end", iid=iid, text=row.get("name", ""), values=(row.get("section_count", ""), row.get("pages_disp", ""), row.get("saved_disp", "")))
+                    templates_tree.insert(format_iid, "end", iid=iid, text=row.get("name", ""), values=(row.get("section_count", ""), row.get("pages_disp", ""), row.get("last_changed_by", "Unknown"), row.get("saved_disp", "")))
         update_launcher_template_sort_headings()
         if selected and selected in template_rows_by_iid:
             templates_tree.selection_set(selected)
@@ -4256,17 +7059,17 @@ def build_new_layout_launcher(parent):
             press_iid = f"__new_layout_regular_press__::{press_name}"
             format_groups = grouped.get(press_name, {})
             press_count = sum(len(items) for items in format_groups.values())
-            regular_tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", ""), open=True, tags=("group_row",))
+            regular_tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", ""), open=True, tags=("group_row",))
             launcher_regular_group_by_iid[press_iid] = ("press", press_name)
             for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
                 format_iid = f"__new_layout_regular_format__::{press_name}::{format_name}"
                 format_count = len(format_groups.get(format_name, []))
-                regular_tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", ""), open=True, tags=("subgroup_row",))
+                regular_tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", ""), open=True, tags=("subgroup_row",))
                 launcher_regular_group_by_iid[format_iid] = ("format", press_name, format_name)
                 for row in format_groups.get(format_name, []):
                     iid = row.get("path")
                     regular_rows[iid] = row
-                    regular_tree.insert(format_iid, "end", iid=iid, text=row.get("product", ""), values=(row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
+                    regular_tree.insert(format_iid, "end", iid=iid, text=row.get("product", ""), values=(row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("last_changed_by", "Unknown"), row.get("saved_disp", "")))
         update_launcher_regular_sort_headings()
         if selected and selected in regular_rows:
             regular_tree.selection_set(selected)
@@ -4410,6 +7213,7 @@ def build_template_editor_launcher(parent):
     root.minsize(820, 620)
     remember_window_geometry(root, "template_editor_launcher", default_geometry="900x700", minsize=(820, 620))
     _bind_window_size_memory(root, "template_editor_launcher")
+    allow_launcher_maintenance_actions = is_admin()
     paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
     paned.pack(fill="both", expand=True)
     frame = ttk.Frame(paned, padding=16)
@@ -4441,7 +7245,7 @@ def build_template_editor_launcher(parent):
     list_frame.rowconfigure(0, weight=1)
     list_frame.columnconfigure(0, weight=1)
 
-    columns = ("sections", "pages", "saved")
+    columns = ("sections", "pages", "changed_by", "saved")
     tree = ttk.Treeview(list_frame, columns=columns, show="tree headings", selectmode="browse")
     tree.grid(row=0, column=0, sticky="nsew")
     vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
@@ -4451,6 +7255,7 @@ def build_template_editor_launcher(parent):
     template_heading_titles = {
         "sections": "Sections",
         "pages": "Pages",
+        "changed_by": "Last Changed By",
         "saved": "Last Saved",
     }
     tree.heading("#0", text="Template Name")
@@ -4459,6 +7264,7 @@ def build_template_editor_launcher(parent):
     tree.column("#0", width=280, anchor="w")
     tree.column("sections", width=80, anchor="center")
     tree.column("pages", width=130, anchor="center")
+    tree.column("changed_by", width=140, anchor="center")
     tree.column("saved", width=170, anchor="center")
     try:
         tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
@@ -4469,7 +7275,7 @@ def build_template_editor_launcher(parent):
     template_rows = []
     row_by_iid = {}
     group_by_iid = {}
-    sort_state = {"col": None, "desc": False}
+    sort_state = {"col": "name", "desc": False}
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
@@ -4537,6 +7343,8 @@ def build_template_editor_launcher(parent):
                 return (tuple(r.get("section_pages_sort", (0, 0, 0, 0))), int(r.get("section_count") or 0), (r.get("name") or "").lower())
             if col == "saved":
                 return (r["saved_dt"] or datetime.min, (r.get("name") or "").lower())
+            if col == "changed_by":
+                return ((r.get("last_changed_by") or "").lower(), (r.get("name") or "").lower())
             return (r["name"] or "").lower()
 
         return sorted(rows, key=keyfunc, reverse=sort_state["desc"])
@@ -4567,16 +7375,16 @@ def build_template_editor_launcher(parent):
             press_iid = f"__template_press__::{press_name}"
             format_groups = press_groups.get(press_name, {})
             press_count = sum(len(items) for items in format_groups.values())
-            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", ""), open=True, tags=("group_row",))
+            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", ""), open=True, tags=("group_row",))
             group_by_iid[press_iid] = ("press", press_name)
             for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
                 format_iid = f"__template_format__::{press_name}::{format_name}"
                 format_count = len(format_groups.get(format_name, []))
-                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", ""), open=True, tags=("subgroup_row",))
+                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", ""), open=True, tags=("subgroup_row",))
                 group_by_iid[format_iid] = ("format", press_name, format_name)
                 for row in format_groups.get(format_name, []):
                     iid = row["path"]
-                    tree.insert(format_iid, "end", iid=iid, text=row.get("name", ""), values=(row.get("section_count", ""), row.get("pages_disp", ""), row.get("saved_disp", "")))
+                    tree.insert(format_iid, "end", iid=iid, text=row.get("name", ""), values=(row.get("section_count", ""), row.get("pages_disp", ""), row.get("last_changed_by", "Unknown"), row.get("saved_disp", "")))
                     row_by_iid[iid] = row
 
     def _matches_template_filter(row):
@@ -4584,7 +7392,7 @@ def build_template_editor_launcher(parent):
         press_filter = (press_var.get() or "All").strip()
         format_filter = (format_var.get() or "All").strip()
         if search_text:
-            searchable = " ".join([row.get("name", ""), row.get("press", ""), row.get("format", "")]).lower()
+            searchable = " ".join([row.get("name", ""), row.get("press", ""), row.get("format", ""), row.get("last_changed_by", "")]).lower()
             if search_text not in searchable:
                 return False
         if press_filter != "All" and row.get("press", "") != press_filter:
@@ -4594,9 +7402,10 @@ def build_template_editor_launcher(parent):
         return True
 
     def update_sort_headings():
-        tree.heading("#0", text="Template Name")
+        tree.heading("#0", text=_treeview_sort_heading_text("Template Name", sort_state, "name"), command=lambda: sort_by("name"))
         tree.heading("sections", text=_treeview_sort_heading_text(template_heading_titles["sections"], sort_state, "sections"), command=lambda: sort_by("sections"))
         tree.heading("pages", text=_treeview_sort_heading_text(template_heading_titles["pages"], sort_state, "pages"), command=lambda: sort_by("pages"))
+        tree.heading("changed_by", text=_treeview_sort_heading_text(template_heading_titles["changed_by"], sort_state, "changed_by"), command=lambda: sort_by("changed_by"))
         tree.heading("saved", text=_treeview_sort_heading_text(template_heading_titles["saved"], sort_state, "saved"), command=lambda: sort_by("saved"))
 
     def refresh():
@@ -4613,6 +7422,7 @@ def build_template_editor_launcher(parent):
                 "pages_disp": _format_section_pages_for_display({"section_pages": cached.get("section_pages") or [], "section_count": cached.get("section_count") or 0}),
                 "saved_dt": cached.get("saved_dt"),
                 "saved_disp": cached.get("saved_disp") or "",
+                "last_changed_by": cached.get("last_changed_by") or "Unknown",
             }
             if _matches_template_filter(row):
                 template_rows.append(row)
@@ -4713,7 +7523,6 @@ def build_template_editor_launcher(parent):
     ttk.Button(left_btns, text="Open Template", command=open_selected, width=14).pack(side="left", padx=(0, 8))
     ttk.Button(left_btns, text="Delete", command=delete_selected, width=10).pack(side="left", padx=(0, 8))
     ttk.Button(right_btns, text="Refresh", command=refresh, width=10).pack(side="right")
-    ttk.Button(right_btns, text="Regen Preview", command=regenerate_selected_preview, width=14).pack(side="right", padx=(0, 8))
     preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
     preview_box.columnconfigure(0, weight=1)
     preview_label = ttk.Label(preview_box, text="Select a template to preview", anchor="center", justify="center")
@@ -4800,6 +7609,7 @@ def build_regular_editor_launcher(parent):
     root.minsize(900, 640)
     remember_window_geometry(root, "regular_editor_launcher", default_geometry="980x720", minsize=(900, 640))
     _bind_window_size_memory(root, "regular_editor_launcher")
+    allow_launcher_maintenance_actions = is_admin()
 
     paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
     paned.pack(fill="both", expand=True)
@@ -4825,7 +7635,7 @@ def build_regular_editor_launcher(parent):
     list_frame.grid(row=1, column=0, sticky="nsew")
     list_frame.rowconfigure(0, weight=1)
     list_frame.columnconfigure(0, weight=1)
-    columns = ("pages", "color_pages", "plates", "saved")
+    columns = ("pages", "color_pages", "plates", "changed_by", "saved")
     tree = ttk.Treeview(list_frame, columns=columns, show="tree headings", selectmode="browse")
     tree.grid(row=0, column=0, sticky="nsew")
     vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
@@ -4835,6 +7645,7 @@ def build_regular_editor_launcher(parent):
         "pages": "Pages",
         "color_pages": "Color Pages",
         "plates": "Plates",
+        "changed_by": "Last Changed By",
         "saved": "Last Saved",
     }
     tree.heading("#0", text="Product")
@@ -4849,7 +7660,7 @@ def build_regular_editor_launcher(parent):
         pass
 
     group_by_iid = {}
-    sort_state = {"col": None, "desc": False}
+    sort_state = {"col": "product", "desc": False}
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
@@ -4903,12 +7714,14 @@ def build_regular_editor_launcher(parent):
                 return int(r.get("plates", 0) or 0)
             if col == "saved":
                 return r.get("saved_dt") or datetime.min
+            if col == "changed_by":
+                return (r.get("last_changed_by") or "").lower()
             return (r.get("product") or "").lower()
         return sorted(rows, key=keyfunc, reverse=sort_state["desc"])
     def matches(row):
         search_text = (search_var.get() or "").strip().lower()
         if search_text:
-            hay = " ".join([row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), str(row.get("color_pages", "")), str(row.get("plates", ""))]).lower()
+            hay = " ".join([row.get("product", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), str(row.get("color_pages", "")), str(row.get("plates", "")), row.get("last_changed_by", "")]).lower()
             if search_text not in hay:
                 return False
         if (press_var.get() or "All") != "All" and row.get("press") != press_var.get():
@@ -4917,7 +7730,7 @@ def build_regular_editor_launcher(parent):
             return False
         return True
     def update_sort_headings():
-        tree.heading("#0", text="Product")
+        tree.heading("#0", text=_treeview_sort_heading_text("Product", sort_state, "product"), command=lambda: sort_by("product"))
         for col in columns:
             tree.heading(col, text=_treeview_sort_heading_text(regular_heading_titles[col], sort_state, col), command=lambda _c=col: sort_by(_c))
 
@@ -4948,15 +7761,15 @@ def build_regular_editor_launcher(parent):
             press_iid = f"__regular_press__::{press_name}"
             format_groups = press_groups.get(press_name, {})
             press_count = sum(len(items) for items in format_groups.values())
-            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", ""), open=True, tags=("group_row",))
+            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", ""), open=True, tags=("group_row",))
             group_by_iid[press_iid] = ("press", press_name)
             for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
                 format_iid = f"__regular_format__::{press_name}::{format_name}"
                 format_count = len(format_groups.get(format_name, []))
-                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", ""), open=True, tags=("subgroup_row",))
+                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", ""), open=True, tags=("subgroup_row",))
                 group_by_iid[format_iid] = ("format", press_name, format_name)
                 for row in format_groups.get(format_name, []):
-                    tree.insert(format_iid, "end", iid=row["path"], text=row.get("product", ""), values=(row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("saved_disp", "")))
+                    tree.insert(format_iid, "end", iid=row["path"], text=row.get("product", ""), values=(row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("last_changed_by", "Unknown"), row.get("saved_disp", "")))
         update_sort_headings()
     def sort_by(col):
         if sort_state["col"] == col:
@@ -5041,7 +7854,6 @@ def build_regular_editor_launcher(parent):
     ttk.Button(left, text="Open Regular", command=open_selected, width=14).pack(side="left", padx=(0, 8))
     ttk.Button(left, text="Delete", command=delete_selected, width=10).pack(side="left", padx=(0, 8))
     ttk.Button(right, text="Refresh", command=refresh, width=10).pack(side="right")
-    ttk.Button(right, text="Regen Preview", command=regenerate_selected_preview, width=14).pack(side="right", padx=(0, 8))
     preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
     preview_box.columnconfigure(0, weight=1)
     preview_label = ttk.Label(preview_box, text="Select a regular layout to preview", anchor="center", justify="center")
@@ -5195,6 +8007,8 @@ def _get_changelog_current_version_value(changelog_data=None):
     return _normalize_version_text(entry.get("version"))
 
 def restart_press_layout_program(root=None):
+    if not ensure_runtime_dependencies(parent=root, force=True, prompt_user=True):
+        return
     python_executable = sys.executable or "python"
     if getattr(sys, "frozen", False):
         restart_args = [python_executable]
@@ -5603,7 +8417,10 @@ def build_main_launcher():
     root.minsize(980, 680)  
     remember_window_geometry(root, "main_launcher", default_geometry="1100x760", minsize=(980, 680))
     _bind_window_size_memory(root, "main_launcher")  
-    ttk.Style(root).configure("LauncherVersion.TLabel", foreground="#1a73e8")
+    allow_launcher_maintenance_actions = is_admin()
+    style = ttk.Style(root)
+    style.configure("LauncherVersion.TLabel", foreground="#1a73e8")
+    style.configure("AdminFlag.TLabel", foreground="#c62828", font=(None, 10, "bold"))
     paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
     paned.pack(fill="both", expand=True)
     frame = ttk.Frame(paned, padding=16)
@@ -5614,9 +8431,23 @@ def build_main_launcher():
     changelog_data = load_changelog_data()
     running_version = _get_changelog_current_version_value(changelog_data)
     version_check_job = {"id": None}
+    db_status_job = {"id": None}
+    db_status_pulse_job = {"id": None}
+    db_status_state = {"connected": False, "phase": 0, "error_text": None, "last_success": None}
+    launcher_username = get_windows_username()
+    status_frame = ttk.Frame(frame)
+    status_frame.grid(row=0, column=0, sticky="ne")
+    if allow_launcher_maintenance_actions:
+        ttk.Label(status_frame, text="(ADMIN)", style="AdminFlag.TLabel").grid(row=0, column=0, sticky="e", pady=(0, 2))
+    ttk.Label(status_frame, text=f"User: {launcher_username}", anchor="e", justify="right").grid(
+        row=1 if allow_launcher_maintenance_actions else 0,
+        column=0,
+        sticky="e",
+        pady=(0, 2),
+    )
     version_label_var = tk.StringVar(value=_format_version_label(running_version))
-    version_label = ttk.Label(frame, textvariable=version_label_var, style="LauncherVersion.TLabel", font=(None, 10))
-    version_label.grid(row=0, column=0, sticky="e")
+    version_label = ttk.Label(status_frame, textvariable=version_label_var, style="LauncherVersion.TLabel", font=(None, 10))
+    version_label.grid(row=2 if allow_launcher_maintenance_actions else 1, column=0, sticky="e")
     version_label.configure(cursor="hand2")
     version_label.bind("<Button-1>", lambda _event: show_changelog_dialog(root))
     filter_frame = ttk.Frame(frame)
@@ -5639,7 +8470,7 @@ def build_main_launcher():
     issue_date_combo = ttk.Combobox(filter_frame, textvariable=issue_date_var, values=["All"], state="readonly", width=16)
     issue_date_combo.grid(row=0, column=7, sticky="w", padx=(8, 0))
 
-    columns = ("press", "format", "pages", "color_pages", "plates", "saved")
+    columns = ("press", "format", "pages", "color_pages", "plates", "changed_by", "saved")
     tree = ttk.Treeview(frame, columns=columns, show="tree headings", selectmode="browse")
     tree.grid(row=2, column=0, sticky="nsew", pady=(0, 0))
     vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
@@ -5651,6 +8482,7 @@ def build_main_launcher():
         "pages": "Pages",
         "color_pages": "Color Pages",
         "plates": "Plates",
+        "changed_by": "Last Changed By",
         "saved": "Last Saved",
     }
     tree.heading("#0", text="Product")
@@ -5662,6 +8494,7 @@ def build_main_launcher():
     tree.column("pages", width=120, anchor="center")
     tree.column("color_pages", width=95, anchor="center")
     tree.column("plates", width=70, anchor="center")
+    tree.column("changed_by", width=140, anchor="center")
     tree.column("saved", width=170, anchor="center")
     try:
         tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
@@ -5669,7 +8502,7 @@ def build_main_launcher():
         pass
     row_by_iid = {}
     group_by_iid = {}
-    sort_state = {"col": None, "desc": False}  
+    sort_state = {"col": "product", "desc": False}  
     refresh_job = {"id": None}  
     auto_refresh_ms = 5000    
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
@@ -5812,6 +8645,7 @@ def build_main_launcher():
                     r.get("pages_disp", ""),
                     r.get("color_pages", 0),
                     r.get("plates", 0),
+                    r.get("last_changed_by", "Unknown"),
                     r["saved_disp"],
                 ))
                 row_by_iid[iid] = r
@@ -5840,6 +8674,7 @@ def build_main_launcher():
                 row.get("pages_disp", ""),
                 str(row.get("color_pages", "")),
                 str(row.get("plates", "")),
+                row.get("last_changed_by", ""),
             ]).lower()
             if search_text not in searchable:
                 return False
@@ -5864,6 +8699,7 @@ def build_main_launcher():
                 row.get("pages_disp", ""),
                 str(row.get("color_pages", "")),
                 str(row.get("plates", "")),
+                row.get("last_changed_by", ""),
             ]).lower()
             if search_text not in searchable:
                 return False
@@ -5874,7 +8710,7 @@ def build_main_launcher():
         return True
 
     def update_sort_headings():
-        tree.heading("#0", text="Product")
+        tree.heading("#0", text=_treeview_sort_heading_text("Product", sort_state, "product"), command=lambda: sort_by("product"))
         for col in columns:
             tree.heading(col, text=_treeview_sort_heading_text(recent_heading_titles[col], sort_state, col), command=lambda _c=col: sort_by(_c))
 
@@ -6241,6 +9077,329 @@ def build_main_launcher():
         ttk.Button(btns, text="Delete", command=delete_selected_cleanup, width=12).pack(side="left", padx=(0, 8))  
         ttk.Button(btns, text="Cancel", command=dialog.destroy, width=12).pack(side="left")  
 
+    def _find_postgres_client_tool(executable_name):
+        try:
+            import shutil
+        except Exception:
+            shutil = None
+        executable_name = str(executable_name or "").strip()
+        if not executable_name:
+            return None
+        candidates = []
+        if shutil is not None:
+            found = shutil.which(executable_name)
+            if found:
+                candidates.append(found)
+            if os.name == "nt" and not executable_name.lower().endswith(".exe"):
+                found = shutil.which(executable_name + ".exe")
+                if found:
+                    candidates.append(found)
+        base_dirs = []
+        preferred_sql_bin_dir = r"L:\SQL Server\PostgreSQL\bin"
+        if os.path.isdir(preferred_sql_bin_dir):
+            base_dirs.append(preferred_sql_bin_dir)
+        preferred_sql_dir = r"L:\SQL Server"
+        if os.path.isdir(preferred_sql_dir):
+            base_dirs.append(preferred_sql_dir)
+        for env_key in ("ProgramFiles", "ProgramFiles(x86)"):
+            env_base = os.environ.get(env_key)
+            if env_base:
+                postgres_dir = os.path.join(env_base, "PostgreSQL")
+                if os.path.isdir(postgres_dir):
+                    base_dirs.append(postgres_dir)
+        target_names = [executable_name]
+        if os.name == "nt" and not executable_name.lower().endswith(".exe"):
+            target_names.append(executable_name + ".exe")
+        seen = set()
+        for base_dir in base_dirs:
+            try:
+                for root_dir, _dirs, files in os.walk(base_dir):
+                    lower_files = {str(name).lower(): name for name in files}
+                    for target_name in target_names:
+                        match_name = lower_files.get(target_name.lower())
+                        if match_name:
+                            full_path = os.path.join(root_dir, match_name)
+                            if full_path not in seen:
+                                candidates.append(full_path)
+                                seen.add(full_path)
+            except Exception:
+                continue
+        return candidates[0] if candidates else None
+
+    def show_db_maintenance_dialog():
+        dialog = tk.Toplevel(root)
+        dialog.title("DB Maintenance")
+        dialog.transient(root)
+        dialog.geometry("720x520")
+        dialog.minsize(660, 460)
+        remember_window_geometry(dialog, "db_maintenance_dialog", default_geometry="720x520", minsize=(660, 460))
+        dialog.grab_set()
+
+        outer = ttk.Frame(dialog, padding=16)
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(3, weight=1)
+
+        ttk.Label(
+            outer,
+            text="Database Maintenance",
+            font=(None, 12, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            outer,
+            text=(
+                "Admin-only tools for PostgreSQL maintenance. Use cleanup for the existing layout cleanup workflow, "
+                "and use the other actions for health checks, backups, and optimization."
+            ),
+            wraplength=660,
+            justify="left",
+        ).grid(row=1, column=0, sticky="ew", pady=(6, 10))
+
+        action_row = ttk.Frame(outer)
+        action_row.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        for idx in range(3):
+            action_row.columnconfigure(idx, weight=1)
+
+        status_var = tk.StringVar(value="Choose a maintenance action.")
+        ttk.Label(outer, textvariable=status_var, font=(None, 10, "bold")).grid(row=4, column=0, sticky="w", pady=(10, 0))
+
+        output = tk.Text(outer, wrap="word", height=16)
+        output.grid(row=3, column=0, sticky="nsew")
+        output.configure(state="disabled")
+        output_scroll = ttk.Scrollbar(outer, orient="vertical", command=output.yview)
+        output_scroll.place(in_=output, relx=1.0, rely=0.0, relheight=1.0, x=0, y=0, anchor="ne")
+        output.configure(yscrollcommand=output_scroll.set)
+
+        def log_message(message_text, clear=False):
+            output.configure(state="normal")
+            if clear:
+                output.delete("1.0", "end")
+            output.insert("end", str(message_text or "") + "\n")
+            output.see("end")
+            output.configure(state="disabled")
+
+        def maintenance_cleanup():
+            status_var.set("Opening cleanup dialog...")
+            log_message("Opening the existing cleanup workflow.", clear=True)
+            cleanup_old_layouts()
+
+        def maintenance_health_check():
+            status_var.set("Running database health check...")
+            log_message("Running database health check...", clear=True)
+            try:
+                with _db_cursor() as (cur, config):
+                    schema = _db_pg_ident(config.get('schema'))
+                    cur.execute('SELECT current_database(), current_user, version()')
+                    row = cur.fetchone() or (None, None, None)
+                    cur.execute(f"SELECT record_type, COUNT(*) FROM {schema}.records GROUP BY record_type ORDER BY record_type")
+                    counts = dict(cur.fetchall() or [])
+                    cur.execute(f"SELECT COUNT(*) FROM {schema}.record_locks")
+                    lock_count = (cur.fetchone() or [0])[0]
+                    cur.execute('SELECT pg_size_pretty(pg_database_size(current_database()))')
+                    db_size = (cur.fetchone() or ['Unknown'])[0]
+                lines = [
+                    f"Database: {row[0] or 'Unknown'}",
+                    f"User: {row[1] or 'Unknown'}",
+                    f"Server: {str(row[2] or 'Unknown').splitlines()[0]}",
+                    f"Layouts: {int(counts.get('layout', 0) or 0)}",
+                    f"Templates: {int(counts.get('template', 0) or 0)}",
+                    f"Regulars: {int(counts.get('regular', 0) or 0)}",
+                    f"Open locks: {int(lock_count or 0)}",
+                    f"Database size: {db_size or 'Unknown'}",
+                ]
+                log_message("\n".join(lines), clear=True)
+                status_var.set("Database health check completed.")
+            except Exception as exc:
+                log_message(f"Health check failed: {exc}", clear=True)
+                status_var.set("Database health check failed.")
+                messagebox.showerror("DB Health Check", f"Could not run the health check:\n{exc}", parent=dialog)
+
+        def maintenance_backup():
+            try:
+                import shutil
+                import subprocess
+            except Exception as exc:
+                messagebox.showerror("DB Backup", f"Backup tools are unavailable:\n{exc}", parent=dialog)
+                return
+            backup_dir = r"L:\SQL Server\Backups"
+            try:
+                os.makedirs(backup_dir, exist_ok=True)
+            except Exception:
+                pass
+            backup_filename = datetime.now().strftime("press_layouts_backup_%Y%m%d_%H%M%S.sql")
+            backup_path = filedialog.asksaveasfilename(
+                parent=dialog,
+                title="Save Database Backup",
+                defaultextension=".sql",
+                filetypes=[("SQL Files", "*.sql"), ("All Files", "*.*")],
+                initialdir=backup_dir if os.path.isdir(backup_dir) else MAIN_DIR,
+                initialfile=backup_filename,
+            )
+            if not backup_path:
+                return
+            pg_dump_path = _find_postgres_client_tool("pg_dump")
+            if not pg_dump_path:
+                messagebox.showerror("DB Backup", "pg_dump was not found on this workstation. Press Layouts looked in PATH and under L:\\SQL Server. Please install PostgreSQL client tools first.", parent=dialog)
+                return
+            try:
+                config = _db_load_config()
+                env = os.environ.copy()
+                env["PGPASSWORD"] = str(config.get("password") or "")
+                status_var.set("Creating database backup...")
+                log_message(f"Creating backup: {backup_path}", clear=True)
+                result = subprocess.run(
+                    [
+                        pg_dump_path,
+                        "-h", str(config.get("host") or ""),
+                        "-p", str(config.get("port") or 5432),
+                        "-U", str(config.get("user") or ""),
+                        "-d", str(config.get("database") or ""),
+                        "-f", backup_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError((result.stderr or result.stdout or "pg_dump failed").strip())
+                log_message(f"Backup complete: {backup_path}", clear=True)
+                status_var.set("Database backup completed.")
+                messagebox.showinfo("DB Backup", f"Database backup created successfully:\n{backup_path}", parent=dialog)
+            except Exception as exc:
+                log_message(f"Backup failed: {exc}", clear=True)
+                status_var.set("Database backup failed.")
+                messagebox.showerror("DB Backup", f"Could not create the database backup:\n{exc}", parent=dialog)
+
+        def maintenance_restore():
+            try:
+                import subprocess
+                import tempfile
+            except Exception as exc:
+                messagebox.showerror("DB Restore", "Restore tools are unavailable:\n" + str(exc), parent=dialog)
+                return
+            restore_path = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select Database Restore File",
+                filetypes=[("SQL Files", "*.sql"), ("All Files", "*.*")],
+            )
+            if not restore_path:
+                return
+            psql_path = _find_postgres_client_tool("psql")
+            if not psql_path:
+                messagebox.showerror(
+                    "DB Restore",
+                    "psql was not found on this workstation. Press Layouts looked in PATH and under L:\\SQL Server\\PostgreSQL\\bin. Please install PostgreSQL client tools first.",
+                    parent=dialog,
+                )
+                return
+            confirm = messagebox.askyesno(
+                "Restore Database",
+                "This will replace the entire Press Layouts schema with the contents of the selected backup file.\n\n"
+                + f"Backup file: {restore_path}\n\n"
+                + "Make sure all users have saved their work before continuing.\n\nDo you want to proceed?",
+                parent=dialog,
+            )
+            if not confirm:
+                return
+            wrapper_path = None
+            try:
+                config = _db_load_config()
+                env = os.environ.copy()
+                env["PGPASSWORD"] = str(config.get("password") or "")
+                db_name = str(config.get("database") or "press_layouts")
+                schema_name = str(config.get("schema") or "press_layouts")
+                status_var.set("Restoring database...")
+                log_message(f"Preparing to restore backup: {restore_path}", clear=True)
+                log_message(f"Target database: {db_name} | schema: {schema_name}", clear=False)
+                with open(restore_path, "r", encoding="utf-8") as backup_file:
+                    backup_sql = backup_file.read()
+                wrapper_sql = (
+                    "SET client_min_messages TO WARNING;\n"
+                    + f"DROP SCHEMA IF EXISTS {_db_pg_ident(schema_name)} CASCADE;\n"
+                    + backup_sql
+                )
+                if not wrapper_sql.endswith("\n"):
+                    wrapper_sql += "\n"
+                with tempfile.NamedTemporaryFile("w", suffix="_press_layouts_restore.sql", delete=False, encoding="utf-8") as tf:
+                    tf.write(wrapper_sql)
+                    wrapper_path = tf.name
+                log_message("Transactional restore wrapper created. Importing backup with psql...", clear=False)
+                result = subprocess.run(
+                    [
+                        psql_path,
+                        "-h", str(config.get("host") or ""),
+                        "-p", str(config.get("port") or 5432),
+                        "-U", str(config.get("user") or ""),
+                        "-d", db_name,
+                        "-v", "ON_ERROR_STOP=1",
+                        "-1",
+                        "-f", wrapper_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError((result.stderr or result.stdout or "psql restore failed").strip())
+                _rebuild_template_cache()
+                _rebuild_regular_cache()
+                _rebuild_layout_cache()
+                refresh(preserve_state=False)
+                update_db_status_indicator()
+                log_message("Restore completed successfully.", clear=True)
+                status_var.set("Database restore completed.")
+                if messagebox.askyesno(
+                    "DB Restore Complete",
+                    "The database restore completed successfully.\n\nWould you like to restart Press Layouts now so every open window reconnects cleanly?",
+                    parent=dialog,
+                ):
+                    restart_press_layout_program(root)
+            except Exception as exc:
+                log_message("Restore failed: " + str(exc), clear=True)
+                status_var.set("Database restore failed.")
+                messagebox.showerror("DB Restore", "Could not restore the database:\n" + str(exc), parent=dialog)
+            finally:
+                if wrapper_path:
+                    try:
+                        os.remove(wrapper_path)
+                    except Exception:
+                        pass
+
+        def maintenance_optimize():
+            if not messagebox.askyesno(
+                "Optimize Database",
+                "Run VACUUM ANALYZE on the Press Layouts tables now?\n\n"
+                "This is usually safe, but it may take a little time on larger databases.",
+                parent=dialog,
+            ):
+                return
+            try:
+                status_var.set("Optimizing database...")
+                log_message("Running VACUUM ANALYZE on Press Layouts tables...", clear=True)
+                with _db_cursor() as (cur, config):
+                    schema = _db_pg_ident(config.get('schema'))
+                    cur.execute(f"VACUUM ANALYZE {schema}.records")
+                    cur.execute(f"VACUUM ANALYZE {schema}.record_locks")
+                log_message("VACUUM ANALYZE completed successfully.", clear=True)
+                status_var.set("Database optimization completed.")
+                messagebox.showinfo("Optimize Database", "VACUUM ANALYZE completed successfully.", parent=dialog)
+            except Exception as exc:
+                log_message(f"Optimization failed: {exc}", clear=True)
+                status_var.set("Database optimization failed.")
+                messagebox.showerror("Optimize Database", f"Could not optimize the database:\n{exc}", parent=dialog)
+
+        ttk.Button(action_row, text="Cleanup Layouts", command=maintenance_cleanup, width=20).grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 8))
+        ttk.Button(action_row, text="Health Check", command=maintenance_health_check, width=20).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(0, 8))
+        ttk.Button(action_row, text="Backup Database", command=maintenance_backup, width=20).grid(row=0, column=2, sticky="ew", pady=(0, 8))
+        ttk.Button(action_row, text="Restore Database", command=maintenance_restore, width=20).grid(row=1, column=0, sticky="ew", padx=(0, 8))
+        ttk.Button(action_row, text="Optimize Database", command=maintenance_optimize, width=20).grid(row=1, column=1, sticky="ew", padx=(0, 8))
+
+        footer = ttk.Frame(outer)
+        footer.grid(row=5, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(footer, text="Close", command=dialog.destroy, width=12).pack(side="right")
+
     def _on_main_tree_select(event=None):
         show_preview(selected_path())
 
@@ -6270,13 +9429,21 @@ def build_main_launcher():
     ttk.Button(right_btns, text="Regulars", command=regulars, width=12).pack(side="right", padx=(0, 8))
     ttk.Button(right_btns, text="Templates", command=templates, width=12).pack(side="right", padx=(0, 8))
     ttk.Button(right_btns, text="Delete", command=delete_selected, width=12).pack(side="right", padx=(0, 8))
-    ttk.Button(right_btns, text="Cleanup", command=cleanup_old_layouts, width=12).pack(side="right", padx=(0, 8))
-    ttk.Button(right_btns, text="Regen Preview", command=regenerate_selected_preview, width=14).pack(side="right", padx=(0, 8))
+    if allow_launcher_maintenance_actions:
+        ttk.Button(right_btns, text="DB Maintenance", command=show_db_maintenance_dialog, width=16).pack(side="right", padx=(0, 8))
     preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
     preview_box.columnconfigure(0, weight=1)
     preview_label = ttk.Label(preview_box, text="Select a layout to preview", anchor="center", justify="center")
     preview_label.grid(row=0, column=0, sticky="nsew")
     preview_box.rowconfigure(0, weight=1)
+    db_status_bar = ttk.Frame(preview_box, padding=(0, 8, 0, 0))
+    db_status_bar.grid(row=1, column=0, sticky="ew")
+    db_status_bar.columnconfigure(1, weight=1)
+    db_status_indicator = tk.Canvas(db_status_bar, width=16, height=16, highlightthickness=0, bd=0)
+    db_status_indicator.grid(row=0, column=0, sticky="nw", padx=(0, 8), pady=(2, 0))
+    db_status_indicator_oval = db_status_indicator.create_oval(2, 2, 14, 14, fill="#c62828", outline="#8e0000")
+    db_status_var = tk.StringVar(value="Database: checking connection...")
+    ttk.Label(db_status_bar, textvariable=db_status_var, anchor="w", justify="left", wraplength=460).grid(row=0, column=1, sticky="ew")
     preview_label.bind("<Configure>", lambda e: _render_preview_panel_image(preview_label, preview_state), add="+")
     paned.add(preview_box, minsize=160)
     _bind_preview_pane_memory(root, "main_launcher", paned, preview_box, default_height=240)
@@ -6322,10 +9489,136 @@ def build_main_launcher():
     ttk.Button(left_btns, text="Print Starter", command=_print_selected_starter, width=14).pack(side="left", padx=(8, 8))
     ttk.Button(left_btns, text="Print Layout", command=_print_selected_layout, width=12).pack(side="left", padx=(0, 8))
 
+    def _db_status_colors(connected, phase):
+        phase = int(phase or 0) % 2
+        if connected:
+            return ("#50c878", "#2e7d32") if phase == 0 else ("#2e7d32", "#1b5e20")
+        return ("#ff6f61", "#c62828") if phase == 0 else ("#c62828", "#8e0000")
+
+    def _db_status_last_success_text():
+        dt_value = db_status_state.get("last_success")
+        if not dt_value:
+            return "never"
+        try:
+            return dt_value.strftime("%m/%d/%Y %H:%M:%S")
+        except Exception:
+            return str(dt_value)
+
+    def update_db_status_pulse():
+        db_status_pulse_job["id"] = None
+        try:
+            connected = bool(db_status_state.get("connected"))
+            phase = (int(db_status_state.get("phase", 0)) + 1) % 2
+            db_status_state["phase"] = phase
+            fill_color, outline_color = _db_status_colors(connected, phase)
+            db_status_indicator.itemconfigure(db_status_indicator_oval, fill=fill_color, outline=outline_color)
+        except Exception:
+            pass
+        try:
+            if root.winfo_exists():
+                db_status_pulse_job["id"] = root.after(700, update_db_status_pulse)
+        except Exception:
+            db_status_pulse_job["id"] = None
+
+    def update_db_status_indicator():
+        try:
+            config = _db_load_config()
+            server_name = str(config.get("host") or "Unknown Server")
+            database_name = str(config.get("database") or "Unknown Database")
+        except Exception:
+            server_name = "Unknown Server"
+            database_name = "Unknown Database"
+        connected = False
+        error_text = None
+        try:
+            conn = _db_connect()
+            try:
+                cur = conn.cursor()
+                try:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                    connected = True
+                    db_status_state["last_success"] = datetime.now()
+                finally:
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            error_text = str(exc)
+            connected = False
+        db_status_state["connected"] = connected
+        db_status_state["error_text"] = error_text
+        try:
+            fill_color, outline_color = _db_status_colors(connected, db_status_state.get("phase", 0))
+            db_status_indicator.itemconfigure(db_status_indicator_oval, fill=fill_color, outline=outline_color)
+            last_success_text = _db_status_last_success_text()
+            if connected:
+                db_status_var.set(
+                    f"Database: {server_name} / {database_name}\nLast successful check: {last_success_text}"
+                )
+            else:
+                message = (
+                    f"Database: {server_name} / {database_name} (offline)\n"
+                    + f"Last successful check: {last_success_text}"
+                )
+                if error_text:
+                    message += "\nError: " + error_text
+                db_status_var.set(message)
+        except Exception:
+            pass
+
+    def schedule_db_status_check(delay_ms=15000):
+        try:
+            if db_status_job["id"] is not None:
+                root.after_cancel(db_status_job["id"])
+        except Exception:
+            pass
+        try:
+            db_status_job["id"] = root.after(int(delay_ms), run_db_status_check)
+        except Exception:
+            db_status_job["id"] = None
+
+    def run_db_status_check():
+        db_status_job["id"] = None
+        try:
+            update_db_status_indicator()
+        finally:
+            try:
+                if root.winfo_exists():
+                    schedule_db_status_check(15000)
+            except Exception:
+                pass
+
     def schedule_version_check(delay_ms=CHANGELOG_CHECK_INTERVAL_MS):
         try:
             if version_check_job["id"] is not None:
                 root.after_cancel(version_check_job["id"])
+        except Exception:
+            pass
+        try:
+            if db_status_job["id"] is not None:
+                root.after_cancel(db_status_job["id"])
+        except Exception:
+            pass
+        try:
+            if db_status_pulse_job["id"] is not None:
+                root.after_cancel(db_status_pulse_job["id"])
+        except Exception:
+            pass
+        try:
+            if db_status_job["id"] is not None:
+                root.after_cancel(db_status_job["id"])
+        except Exception:
+            pass
+        try:
+            if db_status_pulse_job["id"] is not None:
+                root.after_cancel(db_status_pulse_job["id"])
         except Exception:
             pass
         try:
@@ -6368,8 +9661,808 @@ def build_main_launcher():
     root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
     root.protocol("WM_DELETE_WINDOW", on_close)  
     refresh(preserve_state=False)  
+    update_db_status_indicator()
+    update_db_status_pulse()
     schedule_refresh()  
     schedule_version_check()
+    schedule_db_status_check(15000)
     root.mainloop()
 
 # ===== END: launchers.py =====
+
+# Expose this single-file module under the original UI module name for the original entry-point import.
+_single_file_sys.modules.setdefault('press_layout_ui', _single_file_sys.modules[__name__])
+
+
+# ===== BEGIN: PostgreSQL database conversion (v1.2.0) =====
+import io
+import socket
+import threading
+from contextlib import contextmanager
+from tkinter import simpledialog
+
+_DB_CONFIG_FILENAME = "press_layouts_db.json"
+_DB_COLLECTION_ROOTS = {
+    "layout": LAYOUTS_DIR,
+    "template": TEMPLATE_DIR,
+    "regular": REGULAR_DIR,
+}
+_DB_COLLECTION_BY_ROOT = {v: k for k, v in _DB_COLLECTION_ROOTS.items()}
+_DB_BOOTSTRAPPED = False
+_DB_BOOTSTRAP_LOCK = threading.Lock()
+_DB_DRIVER = None
+_DB_LOCK_DEFAULTS = {
+    "stale_minutes": 240,
+    "heartbeat_seconds": 30,
+}
+
+_FS_ensure_dir = ensure_dir
+_FS_safe_read_json = safe_read_json
+_FS_safe_write_json = safe_write_json
+_FS_list_json_files = list_json_files
+_FS_json_dir_entries = _json_dir_entries
+_FS_preview_image_path_for_json = preview_image_path_for_json
+_FS_load_preview_image_for_json = load_preview_image_for_json
+_FS_remove_preview_image_for_json = remove_preview_image_for_json
+_FS_save_preview_image_for_window = _save_preview_image_for_window
+_FS_save_preview_for_current_window = _save_preview_for_current_window
+_FS_save_preview_for_saved_template = _save_preview_for_saved_template
+_FS_regenerate_preview_image_for_json_path = regenerate_preview_image_for_json_path
+_FS_do_save = do_save
+_FS_build_press_layout = build_press_layout
+_FS_load_changelog_data = load_changelog_data
+_FS_os_path_exists = os.path.exists
+_FS_os_remove = os.remove
+
+
+def _db_is_virtual_dir(value):
+    return str(value or "").strip() in set(_DB_COLLECTION_ROOTS.values())
+
+
+def _db_parse_virtual_path(path):
+    raw = str(path or "").replace('\\', '/').strip()
+    if not raw:
+        return None
+    if raw in _DB_COLLECTION_BY_ROOT:
+        return {"record_type": _DB_COLLECTION_BY_ROOT[raw], "file_name": None, "root": raw}
+    for root, record_type in _DB_COLLECTION_BY_ROOT.items():
+        prefix = root.rstrip('/') + '/'
+        if raw.startswith(prefix):
+            return {"record_type": record_type, "file_name": raw[len(prefix):], "root": root}
+    return None
+
+
+def _db_make_virtual_path(record_type, file_name):
+    return f"{_DB_COLLECTION_ROOTS[str(record_type)]}/{file_name}"
+
+
+def ensure_dir(path: str):
+    if _db_is_virtual_dir(path):
+        return
+    _FS_ensure_dir(path)
+
+
+def _db_load_config():
+    config_path = os.path.join(MAIN_DIR, _DB_CONFIG_FILENAME)
+    data = _FS_safe_read_json(config_path)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Database configuration file is missing or invalid: {config_path}")
+    config = dict(data)
+    config.setdefault("host", "gghqsv-primasv")
+    config.setdefault("port", 5432)
+    config.setdefault("database", "press_layouts")
+    config.setdefault("schema", "press_layouts")
+    config.setdefault("user", "press_layouts")
+    config.setdefault("password", "press_layouts")
+    config.setdefault("maintenance_database", "postgres")
+    config.setdefault("sslmode", "prefer")
+    for key, value in _DB_LOCK_DEFAULTS.items():
+        config.setdefault(key, value)
+    return config
+
+
+def _db_import_driver():
+    global _DB_DRIVER
+    if _DB_DRIVER is not None:
+        return _DB_DRIVER
+    try:
+        driver = importlib.import_module("psycopg2")
+    except Exception:
+        try:
+            driver = importlib.import_module("psycopg")
+        except Exception:
+            if not ensure_runtime_dependencies(force=True, prompt_user=True):
+                raise RuntimeError("PostgreSQL driver is required to continue.")
+            try:
+                driver = importlib.import_module("psycopg2")
+            except Exception:
+                try:
+                    driver = importlib.import_module("psycopg")
+                except Exception as exc:
+                    raise RuntimeError("PostgreSQL driver not found after the install attempt.") from exc
+    _DB_DRIVER = driver
+    return driver
+
+
+def _db_pg_ident(value):
+    text = str(value or '').strip()
+    if not text:
+        raise RuntimeError('Database identifier cannot be empty.')
+    return '"' + text.replace('"', '""') + '"'
+
+
+def _db_connect(database=None, maintenance=False):
+    driver = _db_import_driver()
+    config = _db_load_config()
+    dbname = database or (config.get("maintenance_database") if maintenance else config.get("database"))
+    kwargs = {"host": config.get("host"), "port": int(config.get("port", 5432)), "user": config.get("user"), "password": config.get("password"), "dbname": dbname}
+    sslmode = config.get("sslmode")
+    if sslmode:
+        kwargs["sslmode"] = sslmode
+    conn = driver.connect(**kwargs)
+    try:
+        conn.autocommit = True
+    except Exception:
+        pass
+    try:
+        conn.set_session(autocommit=True)
+    except Exception:
+        pass
+    try:
+        import psycopg2.extensions as _psyco_ext
+        conn.set_isolation_level(_psyco_ext.ISOLATION_LEVEL_AUTOCOMMIT)
+    except Exception:
+        pass
+    return conn
+
+
+def _db_fetchone(cursor):
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    desc = getattr(cursor, 'description', None) or []
+    if isinstance(row, dict):
+        return row
+    return {str((getattr(column, 'name', None) or column[0])): row[idx] for idx, column in enumerate(desc)}
+
+
+def _db_fetchall(cursor):
+    desc = getattr(cursor, 'description', None) or []
+    names = [str((getattr(column, 'name', None) or column[0])) for column in desc]
+    rows = []
+    for row in cursor.fetchall():
+        if isinstance(row, dict):
+            rows.append(row)
+        else:
+            rows.append({names[idx]: row[idx] for idx in range(len(names))})
+    return rows
+
+
+def _db_bootstrap():
+    global _DB_BOOTSTRAPPED
+    if _DB_BOOTSTRAPPED:
+        return
+    with _DB_BOOTSTRAP_LOCK:
+        if _DB_BOOTSTRAPPED:
+            return
+        config = _db_load_config()
+        schema = _db_pg_ident(config.get('schema'))
+        dbname = str(config.get('database'))
+        conn = _db_connect(maintenance=True)
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute('SELECT 1 FROM pg_database WHERE datname = %s', (dbname,))
+                if cur.fetchone() is None:
+                    cur.execute(f'CREATE DATABASE {_db_pg_ident(dbname)}')
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+        conn = _db_connect()
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute(f'CREATE SCHEMA IF NOT EXISTS {schema}')
+                cur.execute(f'''CREATE TABLE IF NOT EXISTS {schema}.records (
+                    id BIGSERIAL PRIMARY KEY,
+                    record_type TEXT NOT NULL CHECK (record_type IN ('layout', 'template', 'regular')),
+                    file_name TEXT NOT NULL,
+                    file_stem TEXT NOT NULL,
+                    name TEXT,
+                    press TEXT,
+                    format TEXT,
+                    issue_date TEXT,
+                    product TEXT,
+                    section_count INTEGER,
+                    section_pages JSONB,
+                    saved_at TIMESTAMPTZ,
+                    last_changed_by TEXT,
+                    data JSONB NOT NULL,
+                    preview_png BYTEA,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (record_type, file_name)
+                )''')
+                cur.execute(f'CREATE INDEX IF NOT EXISTS records_lookup_idx ON {schema}.records (record_type, file_name)')
+                cur.execute(f'CREATE INDEX IF NOT EXISTS records_name_idx ON {schema}.records (record_type, name)')
+                cur.execute(f'''CREATE TABLE IF NOT EXISTS {schema}.record_locks (
+                    record_type TEXT NOT NULL CHECK (record_type IN ('layout', 'template', 'regular')),
+                    record_id BIGINT NOT NULL REFERENCES {schema}.records(id) ON DELETE CASCADE,
+                    opened_by TEXT NOT NULL,
+                    hostname TEXT,
+                    process_id INTEGER,
+                    opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (record_type, record_id)
+                )''')
+                cur.execute(f'CREATE INDEX IF NOT EXISTS record_locks_heartbeat_idx ON {schema}.record_locks (heartbeat_at)')
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+        _DB_BOOTSTRAPPED = True
+
+
+@contextmanager
+def _db_cursor():
+    _db_bootstrap()
+    conn = _db_connect()
+    try:
+        cur = conn.cursor()
+        try:
+            yield cur, _db_load_config()
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
+def _db_parse_saved_at(value):
+    dt = parse_saved_at(value) if value else None
+    return dt or datetime.now()
+
+
+def _db_normalize_file_name(file_name):
+    value = str(file_name or '').strip()
+    if not value:
+        raise RuntimeError('A record name is required.')
+    if not value.lower().endswith('.json'):
+        value += '.json'
+    return sanitize_filename(value)
+
+
+def _db_row_to_virtual_item(row):
+    record_type = str(row.get('record_type') or '')
+    file_name = str(row.get('file_name') or '')
+    updated_dt = row.get('updated_at') if not isinstance(row.get('updated_at'), str) else parse_saved_at(row.get('updated_at'))
+    updated_dt = updated_dt or datetime.now()
+    return {
+        'name': file_name,
+        'path': _db_make_virtual_path(record_type, file_name),
+        'mtime_ns': int(updated_dt.timestamp() * 1000000000),
+        'ctime_ns': int(updated_dt.timestamp() * 1000000000),
+        'size': len(json.dumps(row.get('data') or {}, default=str)),
+        'fs_saved_dt': updated_dt,
+        'fs_saved_disp': fmt_dt_for_display(updated_dt),
+        'db_row': row,
+    }
+
+
+
+def _db_list_rows(record_type):
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(
+            f'''SELECT id, record_type, file_name, file_stem, name, press, format, issue_date, product, section_count, section_pages, saved_at, last_changed_by, data, created_at, updated_at FROM {schema}.records WHERE record_type = %s ORDER BY COALESCE(name, file_stem, file_name), file_name''',
+            (record_type,),
+        )
+        return _db_fetchall(cur)
+
+
+def _db_read_record(record_type, file_name):
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(
+            f'''SELECT id, record_type, file_name, file_stem, name, press, format, issue_date, product, section_count, section_pages, saved_at, last_changed_by, data, created_at, updated_at FROM {schema}.records WHERE record_type = %s AND file_name = %s''',
+            (record_type, file_name),
+        )
+        return _db_fetchone(cur)
+
+def _db_record_exists(path):
+    parsed = _db_parse_virtual_path(path)
+    return bool(parsed and parsed.get('file_name') and _db_read_record(parsed['record_type'], parsed['file_name']))
+
+
+def _db_upsert_record(path, data, preview_png=None, clear_preview=False):
+    parsed = _db_parse_virtual_path(path)
+    if not parsed or not parsed.get('file_name'):
+        raise RuntimeError(f'Invalid database record path: {path}')
+    record_type = parsed['record_type']
+    file_name = _db_normalize_file_name(parsed['file_name'])
+    payload = json.loads(json.dumps(data if isinstance(data, dict) else {}, default=str))
+    payload.setdefault('version', 1)
+    payload['saved_at'] = payload.get('saved_at') or datetime.now().isoformat(timespec='seconds')
+    payload['last_changed_by'] = payload.get('last_changed_by') or get_windows_username()
+    payload['name'] = payload.get('name') or os.path.splitext(file_name)[0]
+    section_pages = payload.get('section_pages') if isinstance(payload.get('section_pages'), list) else []
+    saved_at_dt = _db_parse_saved_at(payload.get('saved_at'))
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(f'''INSERT INTO {schema}.records (
+            record_type, file_name, file_stem, name, press, format, issue_date, product,
+            section_count, section_pages, saved_at, last_changed_by, data, preview_png,
+            created_at, updated_at
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s::jsonb, %s, %s, %s::jsonb, %s, NOW(), NOW()
+        )
+        ON CONFLICT (record_type, file_name) DO UPDATE SET
+            file_stem = EXCLUDED.file_stem,
+            name = EXCLUDED.name,
+            press = EXCLUDED.press,
+            format = EXCLUDED.format,
+            issue_date = EXCLUDED.issue_date,
+            product = EXCLUDED.product,
+            section_count = EXCLUDED.section_count,
+            section_pages = EXCLUDED.section_pages,
+            saved_at = EXCLUDED.saved_at,
+            last_changed_by = EXCLUDED.last_changed_by,
+            data = EXCLUDED.data,
+            preview_png = CASE WHEN %s THEN NULL WHEN %s IS NOT NULL THEN %s ELSE {schema}.records.preview_png END,
+            updated_at = NOW()
+        RETURNING id, record_type, file_name, file_stem, name, press, format, issue_date, product, section_count, section_pages, saved_at, last_changed_by, data, preview_png, created_at, updated_at''', (
+            record_type, file_name, os.path.splitext(file_name)[0], payload.get('name'), payload.get('press'), payload.get('format'), payload.get('issue_date'), payload.get('product'), int(payload.get('section_count', 1) or 1), json.dumps(section_pages, default=str), saved_at_dt, payload.get('last_changed_by'), json.dumps(payload, default=str), preview_png, bool(clear_preview), preview_png, preview_png))
+        return _db_fetchone(cur)
+
+
+def _db_delete_record(path):
+    parsed = _db_parse_virtual_path(path)
+    if not parsed or not parsed.get('file_name'):
+        raise FileNotFoundError(path)
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(f'DELETE FROM {schema}.records WHERE record_type = %s AND file_name = %s RETURNING id', (parsed['record_type'], parsed['file_name']))
+        if cur.fetchone() is None:
+            raise FileNotFoundError(path)
+
+
+def _db_store_preview(path, image):
+    if image is None:
+        return
+    buffer = io.BytesIO()
+    image.save(buffer, format='PNG')
+    _db_upsert_record(path, safe_read_json(path) or {}, preview_png=buffer.getvalue())
+
+
+
+def _db_load_preview_bytes(path):
+    parsed = _db_parse_virtual_path(path)
+    if not parsed or not parsed.get('file_name'):
+        return None
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(
+            f'''SELECT preview_png FROM {schema}.records WHERE record_type = %s AND file_name = %s''',
+            (parsed['record_type'], parsed['file_name']),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return row[0] if not isinstance(row, dict) else row.get('preview_png')
+
+def _db_clear_preview(path):
+    parsed = _db_parse_virtual_path(path)
+    if not parsed or not parsed.get('file_name'):
+        return
+    row = _db_read_record(parsed['record_type'], parsed['file_name'])
+    if row:
+        _db_upsert_record(path, row.get('data') or {}, preview_png=None, clear_preview=True)
+
+
+def safe_read_json(path):
+    parsed = _db_parse_virtual_path(path)
+    if not parsed or not parsed.get('file_name'):
+        return _FS_safe_read_json(path)
+    row = _db_read_record(parsed['record_type'], parsed['file_name'])
+    if not row:
+        return None
+    data = row.get('data') or {}
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = {}
+    data = json.loads(json.dumps(data, default=str))
+    data['_db_record_id'] = row.get('id')
+    data['_db_record_type'] = row.get('record_type')
+    data['_file_path'] = _db_make_virtual_path(row.get('record_type'), row.get('file_name'))
+    data['_layout_name'] = data.get('name') or row.get('name') or row.get('file_stem')
+    return data
+
+
+def safe_write_json(path, data):
+    parsed = _db_parse_virtual_path(path)
+    if not parsed or not parsed.get('file_name'):
+        return _FS_safe_write_json(path, data)
+    to_write = stamp_layout_change_metadata(data, path=path) if isinstance(data, dict) else data
+    _db_upsert_record(path, to_write)
+
+
+def list_json_files(folder):
+    parsed = _db_parse_virtual_path(folder)
+    if not parsed or parsed.get('file_name'):
+        return _FS_list_json_files(folder)
+    return [((row.get('name') or row.get('file_stem') or row.get('file_name')), _db_make_virtual_path(parsed['record_type'], row.get('file_name'))) for row in _db_list_rows(parsed['record_type'])]
+
+
+def _json_dir_entries(folder):
+    parsed = _db_parse_virtual_path(folder)
+    return _FS_json_dir_entries(folder) if not parsed else [_db_row_to_virtual_item(row) for row in _db_list_rows(parsed['record_type'])]
+
+
+def preview_image_path_for_json(json_path: str) -> str:
+    return f"{json_path}.preview.png" if _db_parse_virtual_path(json_path) else _FS_preview_image_path_for_json(json_path)
+
+
+def remove_preview_image_for_json(json_path: str):
+    if _db_parse_virtual_path(json_path):
+        _db_clear_preview(json_path)
+    else:
+        _FS_remove_preview_image_for_json(json_path)
+
+
+def load_preview_image_for_json(json_path: str):
+    if not _db_parse_virtual_path(json_path):
+        return _FS_load_preview_image_for_json(json_path)
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    payload = _db_load_preview_bytes(json_path)
+    if not payload:
+        return None
+    try:
+        with Image.open(io.BytesIO(payload)) as img:
+            return img.copy()
+    except Exception:
+        return None
+
+
+def _save_preview_image_for_window(win, json_path, scale=0.75):
+    if not _db_parse_virtual_path(json_path):
+        return _FS_save_preview_image_for_window(win, json_path, scale=scale)
+    if not win or not json_path:
+        return
+    try:
+        win.update_idletasks()
+    except Exception:
+        pass
+    image = None
+    try:
+        builder = getattr(win, 'build_preview_image', None)
+        if callable(builder):
+            image = builder(scale=scale)
+    except Exception:
+        image = None
+    if image is None:
+        try:
+            image = _capture_window_image_for_preview(win)
+            image = _resize_preview_image_helper(image, scale=scale)
+        except Exception:
+            image = None
+    if image is not None:
+        _db_store_preview(json_path, image)
+
+
+def _save_preview_for_current_window(win, json_path):
+    _save_preview_image_for_window(win, json_path, scale=0.75)
+
+
+def _save_preview_for_saved_template(ctx, template_path):
+    if not template_path:
+        return
+    data = safe_read_json(template_path)
+    if not isinstance(data, dict):
+        return
+    press = data.get('press') or ''
+    fmt = data.get('format') or ''
+    cfg = CONFIG_MAP.get((press, fmt))
+    if not cfg:
+        return
+    image = render_layout_preview_image_from_data(data, dict(cfg), scale=0.75, title_base=f"{press} - {fmt}", template_mode=True)
+    if image is not None:
+        _db_store_preview(template_path, image)
+
+
+def regenerate_preview_image_for_json_path(json_path, template_mode=False, default_dir=None, prompt_save_template=None, scale=0.75):
+    if not _db_parse_virtual_path(json_path):
+        return _FS_regenerate_preview_image_for_json_path(json_path, template_mode=template_mode, default_dir=default_dir, prompt_save_template=prompt_save_template, scale=scale)
+    data = safe_read_json(json_path)
+    if not data:
+        raise RuntimeError(f"Could not read: {json_path}")
+    press = data.get('press')
+    fmt = data.get('format')
+    if not press or not fmt:
+        raise RuntimeError("JSON missing 'press' or 'format'.")
+    base_cfg = CONFIG_MAP.get((press, fmt))
+    if not base_cfg:
+        raise RuntimeError(f"No config found for {press} - {fmt}")
+    image = render_layout_preview_image_from_data(data, dict(base_cfg), scale=scale, title_base=f"{press} - {fmt}", template_mode=bool(template_mode))
+    if image is None:
+        raise RuntimeError(f"Could not build preview for: {json_path}")
+    _db_store_preview(json_path, image)
+    return preview_image_path_for_json(json_path)
+
+
+def _db_unique_virtual_path(record_type, requested_file_name, current_path=None):
+    requested_file_name = _db_normalize_file_name(requested_file_name)
+    desired_path = _db_make_virtual_path(record_type, requested_file_name)
+    if current_path and os.path.normcase(str(current_path)) == os.path.normcase(str(desired_path)):
+        return desired_path
+    if not _db_record_exists(desired_path):
+        return desired_path
+    base, ext = os.path.splitext(requested_file_name)
+    counter = 1
+    while True:
+        candidate = _db_make_virtual_path(record_type, f"{base}_{counter}{ext}")
+        if current_path and os.path.normcase(str(current_path)) == os.path.normcase(str(candidate)):
+            return candidate
+        if not _db_record_exists(candidate):
+            return candidate
+        counter += 1
+
+
+def save_regular_from_layout(ctx, parent=None):
+    try:
+        data = collect_layout_data(ctx)
+        data['issue_date'] = ''
+        errors = validate_layout_data_for_mode(data, template_mode=False, regular_mode=True)
+        if errors:
+            messagebox.showerror('Save as Regular Failed', 'Please fix the following before saving as a regular:\n\n' + '\n'.join(f'• {item}' for item in errors), parent=parent)
+            return False, None
+        regular_path = _db_unique_virtual_path('regular', build_regular_filename_suggestion(ctx))
+        data['name'] = os.path.splitext(os.path.basename(regular_path))[0]
+        safe_write_json(regular_path, data)
+        if parent is not None:
+            try:
+                _save_preview_for_current_window(parent, regular_path)
+            except Exception:
+                pass
+        messagebox.showinfo('Regular Saved', f"Regular saved as:\n{os.path.basename(regular_path)}", parent=parent)
+        return True, regular_path
+    except Exception as e:
+        messagebox.showerror('Save as Regular Failed', f"Could not save regular:\n{str(e)}", parent=parent)
+        return False, None
+
+
+def save_template_from_layout(ctx):
+    try:
+        data = collect_layout_data(ctx)
+        data = _normalize_template_data(data)
+        data.pop('issue_date', None)
+        data.pop('product', None)
+        data.pop('color_cells', None)
+        template_path = _db_unique_virtual_path('template', build_filename_suggestion(ctx))
+        data['name'] = os.path.splitext(os.path.basename(template_path))[0]
+        safe_write_json(template_path, data)
+        _save_preview_for_saved_template(ctx, template_path)
+        messagebox.showinfo('Template Saved', f"Template saved as:\n{os.path.basename(template_path)}")
+    except Exception as e:
+        messagebox.showerror('Save Template Failed', f"Could not save template:\n{str(e)}")
+
+
+def _db_prompt_save_name(parent, title, initial_name):
+    suggested = _db_normalize_file_name(initial_name)
+    value = simpledialog.askstring(title, 'Record name (.json will be added automatically if omitted):', initialvalue=suggested, parent=parent)
+    if value is None:
+        return None
+    return _db_normalize_file_name(value)
+
+
+def _db_lock_context():
+    return {'opened_by': get_windows_username(), 'hostname': socket.gethostname(), 'process_id': os.getpid()}
+
+
+def _db_cleanup_stale_locks(cur, schema, stale_minutes):
+    cur.execute(f"DELETE FROM {schema}.record_locks WHERE heartbeat_at < (NOW() - (%s * INTERVAL '1 minute'))", (int(stale_minutes),))
+
+
+def _db_lock_status_for_path(path):
+    parsed = _db_parse_virtual_path(path)
+    if not parsed or not parsed.get('file_name'):
+        return {'record_exists': False, 'conflict': False}
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        stale_minutes = int(config.get('stale_minutes', _DB_LOCK_DEFAULTS['stale_minutes']))
+        _db_cleanup_stale_locks(cur, schema, stale_minutes)
+        cur.execute(f'''SELECT r.id AS record_id, r.file_name, l.opened_by, l.hostname, l.process_id FROM {schema}.records r LEFT JOIN {schema}.record_locks l ON l.record_type = r.record_type AND l.record_id = r.id WHERE r.record_type = %s AND r.file_name = %s''', (parsed['record_type'], parsed['file_name']))
+        row = _db_fetchone(cur)
+        if not row:
+            return {'record_exists': False, 'conflict': False}
+        context = _db_lock_context()
+        conflict = bool(row.get('opened_by')) and (str(row.get('opened_by') or '').strip().lower() != str(context['opened_by']).strip().lower() or str(row.get('hostname') or '').strip().lower() != str(context['hostname']).strip().lower() or int(row.get('process_id') or 0) != int(context['process_id']))
+        return {'record_exists': True, 'conflict': conflict, 'opened_by': row.get('opened_by'), 'hostname': row.get('hostname'), 'process_id': row.get('process_id'), 'record_id': row.get('record_id'), 'record_type': parsed['record_type'], 'file_name': parsed['file_name']}
+
+
+def _db_acquire_lock(path):
+    status = _db_lock_status_for_path(path)
+    if not status.get('record_exists') or status.get('conflict'):
+        return status
+    parsed = _db_parse_virtual_path(path)
+    context = _db_lock_context()
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        stale_minutes = int(config.get('stale_minutes', _DB_LOCK_DEFAULTS['stale_minutes']))
+        _db_cleanup_stale_locks(cur, schema, stale_minutes)
+        cur.execute(f'''INSERT INTO {schema}.record_locks (record_type, record_id, opened_by, hostname, process_id, opened_at, heartbeat_at) SELECT r.record_type, r.id, %s, %s, %s, NOW(), NOW() FROM {schema}.records r WHERE r.record_type = %s AND r.file_name = %s ON CONFLICT (record_type, record_id) DO UPDATE SET opened_by = EXCLUDED.opened_by, hostname = EXCLUDED.hostname, process_id = EXCLUDED.process_id, heartbeat_at = NOW()''', (context['opened_by'], context['hostname'], context['process_id'], parsed['record_type'], parsed['file_name']))
+    status['conflict'] = False
+    return status
+
+
+def _db_release_lock(path):
+    parsed = _db_parse_virtual_path(path)
+    if not parsed or not parsed.get('file_name'):
+        return
+    context = _db_lock_context()
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(f'''DELETE FROM {schema}.record_locks l USING {schema}.records r WHERE l.record_type = r.record_type AND l.record_id = r.id AND r.record_type = %s AND r.file_name = %s AND l.opened_by = %s AND COALESCE(l.hostname, '') = %s AND COALESCE(l.process_id, 0) = %s''', (parsed['record_type'], parsed['file_name'], context['opened_by'], context['hostname'], context['process_id']))
+
+
+def _db_heartbeat_lock(path):
+    parsed = _db_parse_virtual_path(path)
+    if not parsed or not parsed.get('file_name'):
+        return
+    context = _db_lock_context()
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(f'''UPDATE {schema}.record_locks l SET heartbeat_at = NOW() FROM {schema}.records r WHERE l.record_type = r.record_type AND l.record_id = r.id AND r.record_type = %s AND r.file_name = %s AND l.opened_by = %s AND COALESCE(l.hostname, '') = %s AND COALESCE(l.process_id, 0) = %s''', (parsed['record_type'], parsed['file_name'], context['opened_by'], context['hostname'], context['process_id']))
+
+
+def _db_warn_if_locked(path, parent=None, title='Record Already Open'):
+    status = _db_lock_status_for_path(path)
+    if status.get('conflict'):
+        messagebox.showwarning(title, f"{os.path.basename(path)} is currently open by {status.get('opened_by') or 'another user'} on {status.get('hostname') or 'another workstation'}.\n\nYou can continue, but another user may be editing the same record.", parent=parent)
+    return status
+
+
+def _db_attach_window_lock(win, ctx, warn_on_conflict=False):
+    path = ctx.get('file_path') if isinstance(ctx, dict) else None
+    if not path or not _db_parse_virtual_path(path):
+        return
+    status = _db_warn_if_locked(path, parent=win) if warn_on_conflict else _db_lock_status_for_path(path)
+    if not status.get('conflict'):
+        _db_acquire_lock(path)
+        win._db_locked_path = path
+    else:
+        win._db_locked_path = None
+    heartbeat_ms = max(5000, int(_db_load_config().get('heartbeat_seconds', 30)) * 1000)
+    prior_job = getattr(win, '_db_lock_heartbeat_job', None)
+    if prior_job is not None:
+        try:
+            win.after_cancel(prior_job)
+        except Exception:
+            pass
+    def _heartbeat():
+        try:
+            current_path = getattr(win, '_db_locked_path', None)
+            if current_path:
+                _db_heartbeat_lock(current_path)
+            if win.winfo_exists():
+                win._db_lock_heartbeat_job = win.after(heartbeat_ms, _heartbeat)
+        except Exception:
+            win._db_lock_heartbeat_job = None
+    try:
+        win._db_lock_heartbeat_job = win.after(heartbeat_ms, _heartbeat)
+    except Exception:
+        win._db_lock_heartbeat_job = None
+    if not getattr(win, '_db_lock_destroy_bound', False):
+        def _on_destroy(event):
+            try:
+                if event.widget is not win:
+                    return
+            except Exception:
+                pass
+            current_path = getattr(win, '_db_locked_path', None)
+            if current_path:
+                try:
+                    _db_release_lock(current_path)
+                except Exception:
+                    pass
+                win._db_locked_path = None
+        try:
+            win.bind('<Destroy>', _on_destroy, add='+')
+            win._db_lock_destroy_bound = True
+        except Exception:
+            pass
+
+
+def do_save(win, ctx):
+    path = ctx.get('file_path') if isinstance(ctx, dict) else None
+    if path:
+        status = _db_warn_if_locked(path, parent=win, title='Save Warning')
+        if status.get('conflict') and not messagebox.askyesno('Continue Saving?', 'Another user currently has this record open.\n\nDo you still want to save your changes?', parent=win):
+            return False
+    ok = _FS_do_save(win, ctx)
+    if ok:
+        _db_attach_window_lock(win, ctx, warn_on_conflict=False)
+    return ok
+
+
+def do_save_as(win, ctx):
+    ok, data = validate_layout_ctx_before_save(ctx, parent=win)
+    if not ok:
+        return False
+    record_type = 'template' if ctx.get('template_mode', False) else ('regular' if _ctx_is_regular_mode(ctx) else 'layout')
+    title = 'Save Template As' if record_type == 'template' else ('Save Regular Layout As' if record_type == 'regular' else 'Save Layout As')
+    file_name = _db_prompt_save_name(win, title, build_save_filename_suggestion(ctx))
+    if not file_name:
+        return False
+    path = _db_make_virtual_path(record_type, file_name)
+    status = _db_warn_if_locked(path, parent=win, title='Save Warning')
+    if status.get('conflict') and not messagebox.askyesno('Continue Saving?', 'Another user currently has this record open.\n\nDo you still want to save your changes?', parent=win):
+        return False
+    try:
+        if ctx.get('template_mode', False):
+            data = _normalize_template_data(data)
+        if not data.get('name'):
+            data['name'] = os.path.splitext(os.path.basename(path))[0]
+        safe_write_json(path, data)
+        _save_preview_for_current_window(win, path)
+        ctx['file_path'] = path
+        ctx['layout_name'] = data['name']
+        win.title(f"{ctx['title_base']}  —  {os.path.basename(path)}")
+        if (not ctx.get('template_mode', False)) and ctx.get('prompt_save_template', True) and not _template_exists_for_imposition(ctx):
+            template_suggestion = build_filename_suggestion(ctx)
+            if messagebox.askyesno('Save as Template', f"This layout has a new imposition that doesn't match any existing template.\n\nWould you like to save it as a template?\n\nTemplate name: {template_suggestion}", parent=win):
+                save_template_from_layout(ctx)
+        _db_attach_window_lock(win, ctx, warn_on_conflict=False)
+        return True
+    except Exception as e:
+        messagebox.showerror('Save Failed', str(e), parent=win)
+        return False
+
+
+def build_press_layout(win, title='Press Layout', config=None, load_path=None, load_as_copy=False, initial_data=None):
+    units = _FS_build_press_layout(win, title=title, config=config, load_path=load_path, load_as_copy=load_as_copy, initial_data=initial_data)
+    ctx = getattr(win, '_press_layout_ctx', None)
+    if isinstance(ctx, dict) and ctx.get('file_path'):
+        _db_attach_window_lock(win, ctx, warn_on_conflict=True)
+    return units
+
+
+def load_changelog_data():
+    data = _FS_load_changelog_data()
+    if isinstance(data, dict):
+        return data
+    return json.loads(json.dumps(DEFAULT_CHANGELOG_DATA))
+
+
+def _db_os_path_exists(path):
+    parsed = _db_parse_virtual_path(path)
+    return _db_record_exists(path) if parsed and parsed.get('file_name') else _FS_os_path_exists(path)
+
+
+def _db_os_remove(path):
+    parsed = _db_parse_virtual_path(path)
+    if parsed and parsed.get('file_name'):
+        _db_delete_record(path)
+        return
+    return _FS_os_remove(path)
+
+
+os.path.exists = _db_os_path_exists
+os.remove = _db_os_remove
+
+
+def main():
+    if not ensure_runtime_dependencies(force=True, prompt_user=True):
+        return
+    _db_bootstrap()
+    build_main_launcher()
+
+# ===== END: PostgreSQL database conversion (v1.2.0) =====
+
+if __name__ == '__main__':
+    main()

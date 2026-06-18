@@ -1,0 +1,12 @@
+{
+  "host": "gghqsv-primasv",
+  "port": 5432,
+  "database": "press_layouts_test",
+  "schema": "press_layouts",
+  "user": "postgres",
+  "password": "postgres",
+  "maintenance_database": "postgres",
+  "sslmode": "prefer",
+  "stale_minutes": 240,
+  "heartbeat_seconds": 30
+}

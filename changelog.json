@@ -1,6 +1,233 @@
 {
-  "current_version": "1.1.31",
+  "current_version": "1.2.11",
   "versions": [
+    {
+      "version": "1.2.11",
+      "released": "6-18-2026",
+      "summary": "Adds the current username to the top-right launcher status area.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a username label in the top right corner of the main launcher above the version label."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.10",
+      "released": "6-18-2026",
+      "summary": "Fixes restore backup reading so transactional restore no longer depends on pathlib.Path being imported.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed database restore to read the selected SQL backup file with standard file I/O instead of pathlib.Path so restore no longer fails with \"name \"Path\" is not defined\".",
+            "Added target database and schema details to restore logging to make future restore troubleshooting faster."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.9",
+      "released": "6-18-2026",
+      "summary": "Fixes restore failures caused by mapped-drive backup paths in the transactional wrapper.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Changed database restore so the temporary transactional wrapper now embeds the selected backup SQL directly instead of referencing it with a psql include path.",
+            "Fixed restore failures that could occur when backups were stored on mapped drives such as L:\\SQL Server\\Backups."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.8",
+      "released": "6-18-2026",
+      "summary": "Adds last-success DB timing, makes restore transactional, and reduces psycopg editor warnings.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Added the last successful database check time to the launcher status area.",
+            "Changed database restore to use a transactional psql wrapper so a restore failure does not leave the Press Layouts schema dropped or half-restored.",
+            "Updated restore and maintenance messaging to point to L:\\SQL Server\\PostgreSQL\\bin for psql and pg_dump.",
+            "Switched PostgreSQL driver loading to importlib-based imports in Press Layouts and the import helper script to reduce unresolved psycopg warnings in editors such as VS Code / Pylance."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.7",
+      "released": "6-18-2026",
+      "summary": "Moves the launcher DB status below the preview, adds pulsing status, and expands maintenance tool discovery.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Moved the main launcher database status bar below the preview area.",
+            "Updated the launcher database status indicator to pulse green when connected and pulse red when offline.",
+            "Expanded the offline database status text to include the last connection error message when one is available.",
+            "Updated PostgreSQL maintenance tool discovery to prefer binaries under L:\\SQL Server\\PostgreSQL\\bin."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.6",
+      "released": "6-18-2026",
+      "summary": "Adds a launcher database status bar and improves backup defaults.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Updated DB Maintenance backups to default to L:\\SQL Server\\Backups with a timestamped SQL filename.",
+            "Added a main launcher database status bar that shows the configured server and database name.",
+            "Added a green or red database status indicator that reflects whether Press Layouts can currently connect to the configured PostgreSQL server and database."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.5",
+      "released": "6-18-2026",
+      "summary": "Removes the reclaim placeholder and expands DB Maintenance backup and restore support.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Removed the Compress / Reclaim placeholder action from DB Maintenance.",
+            "Updated PostgreSQL client tool discovery so backup and restore look in PATH and under L:\\SQL Server for pg_dump and psql.",
+            "Implemented database restore so it now resets the Press Layouts schema, imports the selected SQL backup with psql, refreshes launcher caches, and offers to restart the application afterward."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.4",
+      "released": "6-18-2026",
+      "summary": "Moves admin maintenance actions into a dedicated DB Maintenance dialog and removes launcher regen buttons.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Removed the Regen Preview button from the main launcher, Template Editor, and Regular Editor.",
+            "Removed the Cleanup button from the main launcher and replaced the admin-only maintenance area with a new DB Maintenance button.",
+            "Added a DB Maintenance dialog for admins that includes the existing cleanup workflow plus database health check, backup, restore guidance, optimization, and compress/reclaim-space guidance actions."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.3",
+      "released": "6-18-2026",
+      "summary": "Adds user-approved dependency installation prompts for startup and restart.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added startup dependency checks for required packages such as Pillow and a PostgreSQL driver.",
+            "Added an Install prompt that lets users approve one-click dependency installation before the application continues loading.",
+            "Added the same dependency check and install prompt to the changelog-based restart flow."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated startup and restart handling so the application stops cleanly when required dependencies are missing and the user declines installation."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.2",
+      "released": "6-18-2026",
+      "summary": "Default first-column sorting now shows correctly on initial treeview load.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Set the main launcher, New Layout, Template Editor, and Regular Editor treeviews to default-sort by their first column on initial load.",
+            "Fixed the initial sort indicator display so the first column now shows its ascending indicator immediately instead of waiting for the first click."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.1",
+      "released": "6-18-2026",
+      "summary": "Fixed first-column sorting across the main and editor treeviews.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed first-column sorting in the main launcher treeview so clicking Product now sorts correctly.",
+            "Fixed first-column sorting in the New Layout window so Template Name and Product sort correctly in the template and regular pickers.",
+            "Fixed first-column sorting in the Template Editor and Regular Editor treeviews.",
+            "Updated first-column headings to show the same ascending and descending sort indicators used by the other sortable columns."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.0",
+      "released": "6-18-2026",
+      "summary": "Migrates layouts, templates, regulars, and previews to PostgreSQL with multi-user edit awareness.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added PostgreSQL-backed storage for layouts, templates, regulars, and preview images.",
+            "Added automatic database and schema bootstrap using the configured PostgreSQL connection settings.",
+            "Added multi-user record-open awareness that warns when another user already has a record open and keeps a heartbeat while the record is being edited.",
+            "Added a one-time import path to move existing flat-file layouts, templates, regulars, and previews into PostgreSQL."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the application to load and save all layout data directly from PostgreSQL instead of the Layouts, Regular, and Templates flat-file folders.",
+            "Changed Save As behavior so users provide a database record name instead of browsing a flat-file folder.",
+            "Updated preview storage so preview images are stored and retrieved from PostgreSQL alongside each record."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.33",
+      "released": "6-16-2026",
+      "summary": "Fixed New Layout templates so Last Changed By shows cached template attribution instead of Unknown.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the New Layout template picker so template rows now carry forward cached last_changed_by values instead of dropping them and displaying Unknown.",
+            "Fixed New Layout template search and sorting so the Last Changed By column participates correctly."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.1.32",
+      "released": "6-16-2026",
+      "summary": "Added per-user last-changed tracking for layouts, regulars, and templates, and surfaced it in treeviews.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added best-effort logged-in Windows username capture for layout, regular, and template saves.",
+            "Added a Last Changed By column to the main launcher, New Layout picker, Template Editor, and Regular Editor treeviews."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Tracked JSON saves in Layouts, Regular, and Templates now stamp last_changed_by and refresh saved_at when the file is written, including Touch ALL and preview-related metadata writes."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.1.31",
       "released": "6-15-2026",
