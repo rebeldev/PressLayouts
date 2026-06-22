@@ -43,12 +43,31 @@ def _collect_missing_runtime_dependencies():
             "display": "PostgreSQL driver",
             "packages": ["psycopg2-binary", "psycopg"],
         })
+    if os.name == 'nt':
+        pywin32_modules = ("win32print", "win32ui", "win32con")
+        if not all(_runtime_module_available(name) for name in pywin32_modules):
+            missing.append({
+                "display": "Windows printing support",
+                "packages": ["pywin32"],
+            })
     return missing
 
 
 
 def _install_runtime_package(package_name: str):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+    install_commands = [
+        [sys.executable, "-m", "pip", "install", package_name],
+    ]
+    if os.name == 'nt':
+        install_commands.insert(0, [sys.executable, "-m", "pip", "install", "--user", package_name])
+    last_error = None
+    for command in install_commands:
+        try:
+            subprocess.check_call(command)
+            return
+        except Exception as exc:
+            last_error = exc
+    raise last_error if last_error is not None else RuntimeError(f"Failed to install package: {package_name}")
 
 
 
@@ -1657,6 +1676,214 @@ def save_window_state_map(state_map):
     safe_write_json(window_state_file_path(), state_map)
 
 
+def load_treeview_state(state_key: str, tree_key: str):
+    state_map = load_window_state_map()
+    window_state = state_map.get(state_key)
+    if not isinstance(window_state, dict):
+        return None
+    treeview_state = window_state.get("treeview_state")
+    if not isinstance(treeview_state, dict):
+        return None
+    state = treeview_state.get(tree_key)
+    return dict(state) if isinstance(state, dict) else None
+
+
+def save_treeview_state(state_key: str, tree_key: str, updates=None, replace=False):
+    updates = updates if isinstance(updates, dict) else {}
+    state_map = load_window_state_map()
+    window_state = state_map.get(state_key)
+    if not isinstance(window_state, dict):
+        window_state = {}
+    treeview_state = window_state.get("treeview_state")
+    if not isinstance(treeview_state, dict):
+        treeview_state = {}
+    existing = treeview_state.get(tree_key)
+    merged = {} if replace or not isinstance(existing, dict) else dict(existing)
+    merged.update(updates)
+    treeview_state[tree_key] = merged
+    window_state["treeview_state"] = treeview_state
+    state_map[state_key] = window_state
+    save_window_state_map(state_map)
+    return merged
+
+
+def capture_treeview_group_state(tree):
+    open_iids = set()
+
+    def _walk(parent=""):
+        try:
+            children = tree.get_children(parent)
+        except Exception:
+            children = ()
+        for iid in children:
+            try:
+                child_ids = tree.get_children(iid)
+            except Exception:
+                child_ids = ()
+            if child_ids:
+                try:
+                    if bool(tree.item(iid, "open")):
+                        open_iids.add(str(iid))
+                except Exception:
+                    pass
+                _walk(iid)
+
+    _walk("")
+    return sorted(open_iids)
+
+
+def capture_treeview_column_widths(tree, columns=None):
+    widths = {}
+    for col in tuple(columns or ()):
+        try:
+            widths[str(col)] = int(tree.column(col, "width"))
+        except Exception:
+            continue
+    return widths
+
+
+def capture_treeview_runtime_state(tree, columns=None):
+    state = {
+        "open_iids": capture_treeview_group_state(tree),
+        "selected_iids": [str(iid) for iid in tree.selection()],
+        "focus_iid": str(tree.focus() or "").strip() or None,
+    }
+    try:
+        state["yview"] = [float(value) for value in tree.yview()]
+    except Exception:
+        pass
+    widths = capture_treeview_column_widths(tree, columns=columns)
+    if widths:
+        state["column_widths"] = widths
+    return state
+
+
+def get_treeview_reload_state(tree, state_key: str, tree_key: str, columns=None):
+    try:
+        has_runtime_items = bool(tree.get_children(""))
+    except Exception:
+        has_runtime_items = False
+    if has_runtime_items:
+        return capture_treeview_runtime_state(tree, columns=columns), True
+    saved_state = load_treeview_state(state_key, tree_key)
+    if isinstance(saved_state, dict):
+        return dict(saved_state), True
+    return {}, False
+
+
+def apply_treeview_column_width_state(tree, columns, state_key: str, tree_key: str):
+    state = load_treeview_state(state_key, tree_key)
+    column_widths = state.get("column_widths") if isinstance(state, dict) else None
+    if not isinstance(column_widths, dict):
+        return
+    for col in tuple(columns or ()):
+        if str(col) not in column_widths:
+            continue
+        try:
+            width = int(column_widths.get(str(col), 0) or 0)
+        except Exception:
+            width = 0
+        if width <= 0:
+            continue
+        try:
+            tree.column(col, width=width)
+        except Exception:
+            pass
+
+
+def load_treeview_sort_state(state_key: str, tree_key: str, default_col: str):
+    state = load_treeview_state(state_key, tree_key)
+    saved = state.get("sort") if isinstance(state, dict) else None
+    if not isinstance(saved, dict):
+        return {"col": default_col, "desc": False}
+    col = str(saved.get("col") or default_col).strip() or default_col
+    desc = bool(saved.get("desc", False))
+    return {"col": col, "desc": desc}
+
+
+def save_treeview_sort_state(state_key: str, tree_key: str, sort_state):
+    if not isinstance(sort_state, dict):
+        return
+    save_treeview_state(
+        state_key,
+        tree_key,
+        {
+            "sort": {
+                "col": str(sort_state.get("col") or "").strip(),
+                "desc": bool(sort_state.get("desc", False)),
+            }
+        },
+    )
+
+
+def open_treeview_item_ancestors(tree, iid):
+    current = str(iid or "").strip()
+    while current:
+        try:
+            parent = tree.parent(current)
+        except Exception:
+            break
+        if not parent:
+            break
+        try:
+            tree.item(parent, open=True)
+        except Exception:
+            pass
+        current = parent
+
+
+def bind_treeview_state_memory(win, state_key: str, tree_key: str, tree, columns=None):
+    bound_key = f"{state_key}::{tree_key}"
+    if getattr(tree, "_treeview_state_memory_key", None) == bound_key:
+        return
+    tree._treeview_state_memory_key = bound_key
+    pending = {"id": None}
+    columns = tuple(columns or ())
+
+    def _save_now():
+        try:
+            if not tree.winfo_exists():
+                return
+        except Exception:
+            return
+        save_treeview_state(
+            state_key,
+            tree_key,
+            capture_treeview_runtime_state(tree, columns=columns),
+        )
+
+    def _commit():
+        pending["id"] = None
+        _save_now()
+
+    def _schedule(_event=None):
+        try:
+            if pending["id"] is not None:
+                tree.after_cancel(pending["id"])
+            pending["id"] = tree.after(150, _commit)
+        except Exception:
+            pass
+
+    def _on_destroy(event=None):
+        try:
+            if event is not None and event.widget is not tree:
+                return
+        except Exception:
+            pass
+        _save_now()
+
+    try:
+        tree.bind("<<TreeviewSelect>>", _schedule, add="+")
+        tree.bind("<<TreeviewOpen>>", _schedule, add="+")
+        tree.bind("<<TreeviewClose>>", _schedule, add="+")
+        tree.bind("<ButtonRelease-1>", _schedule, add="+")
+        tree.bind("<KeyRelease>", _schedule, add="+")
+        tree.bind("<Destroy>", _on_destroy, add="+")
+    except Exception:
+        pass
+    return _save_now
+
+
 def parse_geometry_string(geometry: str):
     if not geometry:
         return None
@@ -1963,7 +2190,10 @@ def track_window_geometry(win, state_key: str):
                 append_window_debug_log("save_parse_failed", state_key, {"geometry": win.geometry()})
                 return
             state_map = load_window_state_map()
-            state_map[state_key] = state
+            existing_state = state_map.get(state_key)
+            merged_state = dict(existing_state) if isinstance(existing_state, dict) else {}
+            merged_state.update(state)
+            state_map[state_key] = merged_state
             save_window_state_map(state_map)
             append_window_debug_log("save_applied", state_key, {"state": state})
         except Exception as exc:
@@ -2610,10 +2840,11 @@ def _imposition_name_matches(existing_name: str, target_name: str) -> bool:
 def _template_exists_for_imposition(ctx) -> bool:
     """Check if a template with the same imposition already exists.
 
-    The prompt shown to the user is about imposition matching, so the primary
-    comparison should be the generated imposition/template name. As a fallback,
-    we also do a structural match against the template JSON in case a template
-    was renamed manually.
+    This needs to work for both the legacy filesystem-backed template folder and
+    the PostgreSQL-backed virtual template collection. The prompt shown to the
+    user is about imposition matching, so the primary comparison is the
+    generated imposition/template name. As a fallback, we also do a structural
+    match against the template JSON in case a template was renamed manually.
     """
     ensure_dir(TEMPLATE_DIR)
     press = ctx.get("press_name", "")
@@ -2633,8 +2864,38 @@ def _template_exists_for_imposition(ctx) -> bool:
         if isinstance(unit, dict)
     }
 
-    template_files = sorted(glob.glob(os.path.join(TEMPLATE_DIR, "*.json")))
-    for tmpl_path in template_files:
+    template_candidates = []
+    try:
+        cached_rows, _changed = get_cached_templates(force=False)
+    except Exception:
+        cached_rows = []
+    for row in cached_rows or []:
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path") or "").strip()
+        if not path:
+            continue
+        row_press = str(row.get("press") or "")
+        row_fmt = str(row.get("format") or "")
+        if row_press and row_press != press:
+            continue
+        if row_fmt and row_fmt != fmt:
+            continue
+        template_candidates.append({
+            "path": path,
+            "name": str(row.get("name") or "").strip(),
+        })
+
+    if not template_candidates:
+        import glob
+        for tmpl_path in sorted(glob.glob(os.path.join(TEMPLATE_DIR, "*.json"))):
+            template_candidates.append({
+                "path": tmpl_path,
+                "name": os.path.splitext(os.path.basename(tmpl_path))[0],
+            })
+
+    for candidate in template_candidates:
+        tmpl_path = candidate.get("path") or ""
         tmpl_data = safe_read_json(tmpl_path)
         if not isinstance(tmpl_data, dict):
             continue
@@ -2643,7 +2904,7 @@ def _template_exists_for_imposition(ctx) -> bool:
             continue
 
         template_stem = os.path.splitext(os.path.basename(tmpl_path))[0]
-        template_name = tmpl_data.get("name") or template_stem
+        template_name = tmpl_data.get("name") or candidate.get("name") or template_stem
         if _imposition_name_matches(template_name, target_imposition_name) or _imposition_name_matches(template_stem, target_imposition_name):
             return True
 
@@ -3561,6 +3822,489 @@ def render_layout_preview_image_from_data(data, config, scale=0.75, title_base='
     return preview_img
 
 
+
+
+def _starter_sheet_fields_from_layout_data(data):
+    data = data if isinstance(data, dict) else {}
+    raw_issue = str(data.get("issue_date") or "").strip()
+    dt = parse_issue_date_flexible(raw_issue)
+    issue_text = dt.strftime("%m/%d/%Y") if dt else raw_issue
+    total_pages = 0
+    raw_pages = data.get("section_pages") or []
+    if isinstance(raw_pages, list):
+        for value in raw_pages[:4]:
+            try:
+                total_pages += int(str(value or '').strip())
+            except Exception:
+                pass
+    try:
+        color_pages, plates = _layout_color_and_plate_counts_from_data(data)
+    except Exception:
+        color_pages, plates = 0, 0
+    return {
+        "publication": normalize_publication_name(data.get("product") or ""),
+        "issue_date": issue_text,
+        "color_pages": str(color_pages or "").strip(),
+        "plates": str(plates or "").strip(),
+        "total_pages": str(total_pages),
+    }
+
+
+def make_starter_sheet_image_from_data(data, format_name=None):
+    data = data if isinstance(data, dict) else {}
+    fields = _starter_sheet_fields_from_layout_data(data)
+    if not format_name:
+        format_name = (
+            str(data.get('starter_format') or '').strip()
+            or _desired_starter_format_for_publication(data.get('product'))
+            or 'Standard'
+        )
+    try:
+        from PIL import Image, ImageDraw
+    except Exception:
+        raise RuntimeError("Pillow is required for starter sheet printing. Please install pillow (pip install pillow).")
+
+    publication = str(fields.get("publication", "") or "").strip()
+    issue_date = str(fields.get("issue_date", "") or "").strip()
+    color_pages = str(fields.get("color_pages", "") or "").strip()
+    plates = str(fields.get("plates", "") or "").strip()
+    total_pages = str(fields.get("total_pages", "") or "").strip()
+    fmt_key = (format_name or "Standard").strip().upper()
+    if fmt_key not in {"STANDARD", "USAT", "NYT"}:
+        fmt_key = "STANDARD"
+
+    # Render exactly for 8.5 x 11 landscape at 300 DPI.
+    page_w, page_h = 3300, 2550
+    margin = 110
+    gap = 36
+    img = Image.new("RGB", (page_w, page_h), "white")
+    draw = ImageDraw.Draw(img)
+
+    common_fields = [
+        {"label": "Issue Date", "value": issue_date, "handwritten": False},
+        {"label": "Color Pages", "value": color_pages, "handwritten": False},
+        {"label": "Number of Plates", "value": plates, "handwritten": False},
+        {"label": "Total Pages", "value": total_pages, "handwritten": False},
+        {"label": "Last Image", "value": "", "handwritten": True},
+        {"label": "Last Plate", "value": "", "handwritten": True},
+    ]
+    color_change_fields = [
+        {"label": "Color Addition", "value": "", "handwritten": True},
+        {"label": "Color Drop", "value": "", "handwritten": True},
+    ]
+    extra_fields_map = {
+        "STANDARD": [],
+        "USAT": [
+            {"label": "First Image", "value": "", "handwritten": True},
+        ],
+        "NYT": [
+            {"label": "Kills", "value": "", "handwritten": True},
+            {"label": "PS (Postscripts)", "value": "", "handwritten": True},
+            {"label": "Closed", "value": "", "handwritten": True},
+        ],
+    }
+    extra_fields = extra_fields_map.get(fmt_key, [])
+
+    def _measure(draw_obj, text, font):
+        content = text or ""
+        try:
+            left, top, right, bottom = draw_obj.textbbox((0, 0), content, font=font)
+            return max(0, right - left), max(0, bottom - top)
+        except Exception:
+            return draw_obj.textsize(content, font=font)
+
+    def _wrap_lines(text, font, max_width, max_lines=2):
+        content = str(text or "").strip()
+        if not content:
+            return [""]
+        words = content.split()
+        if len(words) <= 1:
+            return [content]
+        lines = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            if _measure(draw, candidate, font)[0] <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        while len(lines) > max_lines:
+            lines[-2] = f"{lines[-2]} {lines[-1]}".strip()
+            lines.pop()
+        return lines
+
+    def _fit_text_lines(text, max_width, max_height, max_size, min_size=28, bold=False, max_lines=2):
+        content = str(text or "").strip()
+        if not content:
+            return [""], _render_load_starter_font(max_size, bold=bold)
+        for size in range(int(max_size), int(min_size) - 1, -2):
+            font = _render_load_starter_font(size, bold=bold)
+            lines = _wrap_lines(content, font, max_width, max_lines=max_lines)
+            sizes = [_measure(draw, line, font) for line in lines]
+            widths = [w for w, _h in sizes] or [0]
+            heights = [h for _w, h in sizes] or [0]
+            line_gap = max(10, int(size * 0.18))
+            total_h = sum(heights) + line_gap * max(0, len(lines) - 1)
+            if max(widths) <= max_width and total_h <= max_height:
+                return lines, font
+        font = _render_load_starter_font(min_size, bold=bold)
+        return _wrap_lines(content, font, max_width, max_lines=max_lines), font
+
+    def _draw_centered_lines(lines, font, box, fill="black"):
+        x0, y0, x1, y1 = [int(v) for v in box]
+        lines = list(lines or [""])
+        sizes = [_measure(draw, line, font) for line in lines]
+        heights = [h for _w, h in sizes] or [0]
+        font_size = getattr(font, "size", 48)
+        line_gap = max(10, int(font_size * 0.18))
+        total_h = sum(heights) + line_gap * max(0, len(lines) - 1)
+        y = y0 + max(0, int(((y1 - y0) - total_h) / 2))
+        for line, (width, height) in zip(lines, sizes):
+            x = x0 + max(0, int(((x1 - x0) - width) / 2))
+            draw.text((x, y), line or "", fill=fill, font=font)
+            y += height + line_gap
+
+    def _draw_field_block(box, label, value="", handwritten=False, label_max_size=56, value_max_size=88):
+        x0, y0, x1, y1 = [int(v) for v in box]
+        radius = 26
+        border = 6
+        label_band_h = max(104, int((y1 - y0) * 0.28))
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, outline="black", width=border)
+        draw.rounded_rectangle((x0 + border, y0 + border, x1 - border, y0 + label_band_h), radius=max(8, radius - 8), fill="#f2f2f2")
+        draw.line((x0 + border, y0 + label_band_h, x1 - border, y0 + label_band_h), fill="black", width=4)
+
+        label_lines, label_font = _fit_text_lines(
+            label,
+            max_width=max(100, (x1 - x0) - 70),
+            max_height=max(40, label_band_h - 26),
+            max_size=label_max_size,
+            min_size=26,
+            bold=True,
+            max_lines=2,
+        )
+        _draw_centered_lines(label_lines, label_font, (x0 + 24, y0 + 10, x1 - 24, y0 + label_band_h - 10))
+
+        content_box = (x0 + 34, y0 + label_band_h + 18, x1 - 34, y1 - 30)
+        if handwritten:
+            line_y = y1 - 78
+            draw.line((content_box[0] + 8, line_y, content_box[2] - 8, line_y), fill="black", width=5)
+        else:
+            value_lines, value_font = _fit_text_lines(
+                value,
+                max_width=max(100, content_box[2] - content_box[0]),
+                max_height=max(40, content_box[3] - content_box[1]),
+                max_size=value_max_size,
+                min_size=32,
+                bold=True,
+                max_lines=2,
+            )
+            _draw_centered_lines(value_lines, value_font, content_box)
+
+    publication_box = (margin, 70, page_w - margin, 310)
+    _draw_field_block(
+        publication_box,
+        "Publication",
+        publication,
+        handwritten=False,
+        label_max_size=62,
+        value_max_size=116,
+    )
+
+    common_top = 360
+    common_field_h = 300
+    common_rows = 3
+    common_cols = 2
+    common_field_w = int((page_w - (2 * margin) - gap) / common_cols)
+    common_fields_for_draw = list(common_fields)
+    for index, field in enumerate(common_fields_for_draw):
+        row = index // common_cols
+        col = index % common_cols
+        x0 = margin + col * (common_field_w + gap)
+        y0 = common_top + row * (common_field_h + gap)
+        x1 = x0 + common_field_w
+        y1 = y0 + common_field_h
+        _draw_field_block(
+            (x0, y0, x1, y1),
+            field.get("label", ""),
+            field.get("value", ""),
+            handwritten=bool(field.get("handwritten")),
+            label_max_size=58,
+            value_max_size=88,
+        )
+
+    color_change_top = common_top + common_rows * (common_field_h + gap)
+    for index, field in enumerate(color_change_fields):
+        col = index % common_cols
+        x0 = margin + col * (common_field_w + gap)
+        y0 = color_change_top
+        x1 = x0 + common_field_w
+        y1 = y0 + common_field_h
+        _draw_field_block(
+            (x0, y0, x1, y1),
+            field.get("label", ""),
+            field.get("value", ""),
+            handwritten=True,
+            label_max_size=58,
+            value_max_size=88,
+        )
+
+    extras_top = color_change_top + common_field_h + gap + 10
+    if fmt_key == "USAT" and extra_fields:
+        field = extra_fields[0]
+        extra_box = (margin, extras_top, margin + common_field_w, extras_top + common_field_h)
+        _draw_field_block(
+            extra_box,
+            field.get("label", ""),
+            field.get("value", ""),
+            handwritten=True,
+            label_max_size=58,
+            value_max_size=88,
+        )
+    elif fmt_key == "NYT" and extra_fields:
+        draw.line((margin, extras_top + 78, page_w - margin, extras_top + 78), fill="black", width=4)
+        nyt_top = extras_top + 110
+        nyt_row1_y0 = nyt_top
+        nyt_row1_y1 = nyt_row1_y0 + common_field_h
+        nyt_row2_y0 = nyt_row1_y1 + gap
+        nyt_row2_y1 = nyt_row2_y0 + common_field_h
+        nyt_positions = [
+            (margin, nyt_row1_y0, margin + common_field_w, nyt_row1_y1),
+            (margin + common_field_w + gap, nyt_row1_y0, page_w - margin, nyt_row1_y1),
+            (margin, nyt_row2_y0, page_w - margin, nyt_row2_y1),
+        ]
+        nyt_label_sizes = [46, 46, 50]
+        nyt_value_sizes = [80, 80, 84]
+        for field, box, label_size, value_size in zip(extra_fields, nyt_positions, nyt_label_sizes, nyt_value_sizes):
+            _draw_field_block(
+                box,
+                field.get("label", ""),
+                field.get("value", ""),
+                handwritten=True,
+                label_max_size=label_size,
+                value_max_size=value_size,
+            )
+
+    return img
+
+
+
+def get_default_printer_name():
+    try:
+        import win32print
+    except Exception as e:
+        raise RuntimeError(f"Missing win32print dependency: {e}")
+    try:
+        printer_name = win32print.GetDefaultPrinter()
+    except Exception as e:
+        raise RuntimeError(f"Could not get the default printer: {e}")
+    printer_name = str(printer_name or '').strip()
+    if not printer_name:
+        raise RuntimeError("No default printer is configured on this system.")
+    return printer_name
+
+
+def direct_print_image_file(img_path, printer_name=None, copies=1, orientation="Landscape", margins_inches=None, align_top=False):
+    printer_name = str(printer_name or '').strip() or get_default_printer_name()
+    try:
+        import win32ui
+        import win32con
+        import win32print
+        from PIL import Image, ImageWin, ImageChops
+        import traceback
+    except Exception as e:
+        raise RuntimeError(f"Missing dependency: {e}. If win32print/win32ui/win32con are missing, install pywin32.")
+
+    dc = None
+    printer_handle = None
+    try:
+        img = Image.open(img_path)
+        img.load()
+        if img.mode == 'RGBA' or (hasattr(img, 'getbands') and 'A' in img.getbands()):
+            rgba = img.convert('RGBA')
+            white_bg = Image.new('RGB', rgba.size, 'white')
+            white_bg.paste(rgba, mask=rgba.getchannel('A'))
+            img = white_bg
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        # Trim white outer padding so the print fills the page more tightly
+        # while still respecting the requested printer margins.
+        try:
+            bg = Image.new('RGB', img.size, 'white')
+            diff = ImageChops.difference(img, bg)
+            bbox = diff.getbbox()
+            if bbox:
+                pad = 4
+                left = max(0, int(bbox[0]) - pad)
+                top = max(0, int(bbox[1]) - pad)
+                right = min(int(img.size[0]), int(bbox[2]) + pad)
+                bottom = min(int(img.size[1]), int(bbox[3]) + pad)
+                if right > left and bottom > top:
+                    img = img.crop((left, top, right, bottom))
+        except Exception:
+            pass
+
+        orientation_text = str(orientation or 'Landscape').strip().title()
+        if orientation_text not in ('Landscape', 'Portrait'):
+            orientation_text = 'Landscape'
+
+        # Force every landscape print job to rotate 90 degrees so the
+        # physical print comes out in landscape on this pressroom setup.
+        if orientation_text == 'Landscape':
+            img = img.transpose(Image.ROTATE_90)
+        elif orientation_text == 'Portrait' and img.width > img.height:
+            img = img.transpose(Image.ROTATE_90)
+
+        margins_inches = margins_inches or {"left": 0.15, "top": 0.15, "right": 0.15, "bottom": 0.15}
+
+        # Force the printer DEVMODE orientation to match the requested output.
+        devmode = None
+        try:
+            printer_handle = win32print.OpenPrinter(printer_name)
+            printer_info = win32print.GetPrinter(printer_handle, 2)
+            if isinstance(printer_info, dict):
+                devmode = printer_info.get('pDevMode')
+            if devmode is not None:
+                requested_orientation = 1 if orientation_text == 'Landscape' else 2
+                for attr in ('Orientation', 'dmOrientation'):
+                    try:
+                        setattr(devmode, attr, requested_orientation)
+                        break
+                    except Exception:
+                        pass
+                for attr in ('Fields', 'dmFields'):
+                    try:
+                        setattr(devmode, attr, int(getattr(devmode, attr)) | int(win32con.DM_ORIENTATION))
+                        break
+                    except Exception:
+                        pass
+        except Exception:
+            devmode = None
+
+        dc = win32ui.CreateDC()
+        created_dc = False
+        if devmode is not None:
+            for create_args in (
+                ("WINSPOOL", printer_name, None, devmode),
+                (None, printer_name, None, devmode),
+            ):
+                try:
+                    dc.CreateDC(*create_args)
+                    created_dc = True
+                    break
+                except Exception:
+                    continue
+        if not created_dc:
+            dc.CreatePrinterDC(printer_name)
+
+        printable_area = (dc.GetDeviceCaps(win32con.HORZRES), dc.GetDeviceCaps(win32con.VERTRES))
+        offset_x = dc.GetDeviceCaps(win32con.PHYSICALOFFSETX)
+        offset_y = dc.GetDeviceCaps(win32con.PHYSICALOFFSETY)
+        dpi_x = max(1, dc.GetDeviceCaps(win32con.LOGPIXELSX))
+        dpi_y = max(1, dc.GetDeviceCaps(win32con.LOGPIXELSY))
+
+        # Keep the already-rotated image orientation stable.
+        if orientation_text == 'Portrait' and printable_area[0] > printable_area[1] and img.width > img.height:
+            img = img.transpose(Image.ROTATE_90)
+
+        left_margin = max(0, int(round(float(margins_inches.get("left", 0.15)) * dpi_x)))
+        top_margin = max(0, int(round(float(margins_inches.get("top", 0.15)) * dpi_y)))
+        right_margin = max(0, int(round(float(margins_inches.get("right", 0.15)) * dpi_x)))
+        bottom_margin = max(0, int(round(float(margins_inches.get("bottom", 0.15)) * dpi_y)))
+        safe_w = max(1, printable_area[0] - left_margin - right_margin)
+        safe_h = max(1, printable_area[1] - top_margin - bottom_margin)
+        scale = min(safe_w / float(img.size[0]), safe_h / float(img.size[1]))
+        scaled = img.resize((max(1, int(img.size[0] * scale)), max(1, int(img.size[1] * scale))), Image.LANCZOS)
+        dib = ImageWin.Dib(scaled)
+        # On this landscape print path the image is rotated before printing,
+        # so a "top-aligned" starter sheet needs to anchor on the leading edge
+        # after rotation. That means using the X position for landscape starter
+        # alignment instead of only changing Y.
+        if align_top and orientation_text == 'Landscape':
+            x = int(offset_x + left_margin)
+            y = int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
+        else:
+            x = int(offset_x + left_margin + ((safe_w - scaled.size[0]) / 2))
+            y = int(offset_y + top_margin) if align_top else int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
+
+        dc.StartDoc(img_path)
+        for _ in range(max(1, int(copies or 1))):
+            dc.StartPage()
+            dib.draw(dc.GetHandleOutput(), (x, y, x + scaled.size[0], y + scaled.size[1]))
+            dc.EndPage()
+        dc.EndDoc()
+        return True
+    except Exception as e:
+        try:
+            err = traceback.format_exc()
+        except Exception:
+            err = str(e)
+        raise RuntimeError(err)
+    finally:
+        try:
+            if dc is not None:
+                dc.DeleteDC()
+        except Exception:
+            pass
+        try:
+            if printer_handle is not None:
+                win32print.ClosePrinter(printer_handle)
+        except Exception:
+            pass
+
+
+def _print_layout_data_to_default_printer(data, copies=5):
+    data = data if isinstance(data, dict) else {}
+    press_name = data.get('press') or ''
+    format_name = data.get('format') or ''
+    cfg = CONFIG_MAP.get((press_name, format_name))
+    if not isinstance(cfg, dict):
+        raise RuntimeError(f"No config found for {press_name} - {format_name}.")
+    img = render_layout_print_image_from_data(data, dict(cfg), title_base=f"{press_name} - {format_name}", template_mode=False)
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.png')
+    os.close(fd)
+    try:
+        img.save(path, format='PNG', dpi=(300, 300))
+        return direct_print_image_file(path, copies=max(1, int(copies or 1)), orientation='Landscape', align_top=False)
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+
+def _print_starter_sheet_data_to_default_printer(data, copies=1):
+    data = data if isinstance(data, dict) else {}
+    img = make_starter_sheet_image_from_data(data)
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.png')
+    os.close(fd)
+    try:
+        img.save(path, format='PNG', dpi=(300, 300))
+        return direct_print_image_file(path, copies=max(1, int(copies or 1)), orientation='Landscape', align_top=True)
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+
+def print_layout_json_to_default_printer(json_path, copies=5):
+    data = safe_read_json(json_path)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Could not read layout data from {json_path}.")
+    return _print_layout_data_to_default_printer(data, copies=copies)
+
+
+def print_starter_sheet_json_to_default_printer(json_path, copies=1):
+    data = safe_read_json(json_path)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Could not read layout data from {json_path}.")
+    return _print_starter_sheet_data_to_default_printer(data, copies=copies)
+
 def build_press_layout(win, title="Press Layout", config=None, load_path=None, load_as_copy=False, initial_data=None):
     config = config or {}
 
@@ -4307,7 +5051,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             "total_pages": str(total_pages),
         }
 
-    def _load_starter_font(size, bold=False):
+    def _render_load_starter_font(size, bold=False):
         try:
             from PIL import ImageFont
         except Exception:
@@ -4422,9 +5166,9 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         def _fit_text_lines(text, max_width, max_height, max_size, min_size=28, bold=False, max_lines=2):
             content = str(text or "").strip()
             if not content:
-                return [""], _load_starter_font(max_size, bold=bold)
+                return [""], _render_load_starter_font(max_size, bold=bold)
             for size in range(int(max_size), int(min_size) - 1, -2):
-                font = _load_starter_font(size, bold=bold)
+                font = _render_load_starter_font(size, bold=bold)
                 lines = _wrap_lines(content, font, max_width, max_lines=max_lines)
                 sizes = [_measure(draw, line, font) for line in lines]
                 widths = [w for w, _h in sizes] or [0]
@@ -4433,7 +5177,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 total_h = sum(heights) + line_gap * max(0, len(lines) - 1)
                 if max(widths) <= max_width and total_h <= max_height:
                     return lines, font
-            font = _load_starter_font(min_size, bold=bold)
+            font = _render_load_starter_font(min_size, bold=bold)
             return _wrap_lines(content, font, max_width, max_lines=max_lines), font
 
         def _draw_centered_lines(lines, font, box, fill="black"):
@@ -6707,14 +7451,38 @@ def build_new_layout_launcher(parent):
     frame.columnconfigure(1, weight=1)
     frame.rowconfigure(4, weight=1)
 
-    mode_state = {"regular": False}
+    new_layout_saved_state = load_window_state_map().get("new_layout_launcher")
+    if not isinstance(new_layout_saved_state, dict):
+        new_layout_saved_state = {}
+    saved_mode_value = str(new_layout_saved_state.get("mode") or "").strip().lower()
+    if saved_mode_value in {"regular", "from_regular", "from regular", "regulars"}:
+        initial_regular_mode = True
+    elif saved_mode_value in {"standard", "guided", "template", "templates"}:
+        initial_regular_mode = False
+    else:
+        initial_regular_mode = bool(new_layout_saved_state.get("regular_mode", False))
+
+    mode_state = {"regular": initial_regular_mode}
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
-    launcher_template_sort_state = {"col": "name", "desc": False}
-    launcher_regular_sort_state = {"col": "product", "desc": False}
+    launcher_template_sort_state = load_treeview_sort_state("new_layout_launcher", "templates_tree", "name")
+    launcher_regular_sort_state = load_treeview_sort_state("new_layout_launcher", "regular_tree", "product")
     template_rows_by_iid = {}
     regular_rows = {}
     launcher_template_group_by_iid = {}
     launcher_regular_group_by_iid = {}
+
+    def save_new_layout_mode_preference():
+        try:
+            state_map = load_window_state_map()
+            window_state = state_map.get("new_layout_launcher")
+            if not isinstance(window_state, dict):
+                window_state = {}
+            window_state["mode"] = "regular" if mode_state.get("regular") else "standard"
+            window_state["regular_mode"] = bool(mode_state.get("regular"))
+            state_map["new_layout_launcher"] = window_state
+            save_window_state_map(state_map)
+        except Exception:
+            pass
 
     mode_bar = ttk.Frame(frame)
     mode_bar.grid(row=0, column=0, columnspan=12, sticky="ew", pady=(0, 8))
@@ -6773,6 +7541,8 @@ def build_new_layout_launcher(parent):
         templates_tree.tag_configure("subgroup_row", font=(None, 10, "bold"), foreground="#444444")
     except Exception:
         pass
+    apply_treeview_column_width_state(templates_tree, ("#0",) + tuple(template_columns), "new_layout_launcher", "templates_tree")
+    bind_treeview_state_memory(root, "new_layout_launcher", "templates_tree", templates_tree, columns=("#0",) + tuple(template_columns))
 
     regular_container = ttk.Frame(frame)
     regular_container.columnconfigure(0, weight=1)
@@ -6805,6 +7575,8 @@ def build_new_layout_launcher(parent):
         regular_tree.tag_configure("subgroup_row", font=(None, 10, "bold"), foreground="#444444")
     except Exception:
         pass
+    apply_treeview_column_width_state(regular_tree, ("#0",) + tuple(regular_columns), "new_layout_launcher", "regular_tree")
+    bind_treeview_state_memory(root, "new_layout_launcher", "regular_tree", regular_tree, columns=("#0",) + tuple(regular_columns))
     btn_row = ttk.Frame(frame)
     btn_row.grid(row=5, column=0, columnspan=12, pady=(12, 0), sticky="w")
     action_button = ttk.Button(btn_row, text="New / Open", width=14)
@@ -6937,6 +7709,7 @@ def build_new_layout_launcher(parent):
         else:
             launcher_template_sort_state["col"] = col
             launcher_template_sort_state["desc"] = False
+        save_treeview_sort_state("new_layout_launcher", "templates_tree", launcher_template_sort_state)
         refresh_templates()
     def sort_launcher_regular_by(col):
         if launcher_regular_sort_state["col"] == col:
@@ -6944,6 +7717,7 @@ def build_new_layout_launcher(parent):
         else:
             launcher_regular_sort_state["col"] = col
             launcher_regular_sort_state["desc"] = False
+        save_treeview_sort_state("new_layout_launcher", "regular_tree", launcher_regular_sort_state)
         refresh_regulars()
     def _matches_template_filters(row):
         search_text = (template_search_var.get() or "").strip().lower()
@@ -6985,7 +7759,12 @@ def build_new_layout_launcher(parent):
     def refresh_templates(*_):
         if mode_state["regular"]:
             return
+        tree_state, has_saved_state = get_treeview_reload_state(templates_tree, "new_layout_launcher", "templates_tree", columns=("#0",) + tuple(template_columns))
         selected = selected_template_path()
+        saved_selected = [str(iid) for iid in (tree_state.get("selected_iids") or [])]
+        saved_focus = str(tree_state.get("focus_iid") or "").strip() or None
+        saved_yview = tree_state.get("yview") if isinstance(tree_state.get("yview"), list) else None
+        open_iids = set(str(iid) for iid in (tree_state.get("open_iids") or []))
         template_rows_by_iid.clear()
         launcher_template_group_by_iid.clear()
         templates_tree.delete(*templates_tree.get_children())
@@ -7015,27 +7794,48 @@ def build_new_layout_launcher(parent):
             press_iid = f"__new_layout_template_press__::{press_name}"
             format_groups = grouped.get(press_name, {})
             press_count = sum(len(items) for items in format_groups.values())
-            templates_tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", ""), open=True, tags=("group_row",))
+            press_open = True if not has_saved_state else (press_iid in open_iids)
+            templates_tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", ""), open=press_open, tags=("group_row",))
             launcher_template_group_by_iid[press_iid] = ("press", press_name)
             for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
                 format_iid = f"__new_layout_template_format__::{press_name}::{format_name}"
                 format_count = len(format_groups.get(format_name, []))
-                templates_tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", ""), open=True, tags=("subgroup_row",))
+                format_open = True if not has_saved_state else (format_iid in open_iids)
+                templates_tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", ""), open=format_open, tags=("subgroup_row",))
                 launcher_template_group_by_iid[format_iid] = ("format", press_name, format_name)
                 for row in format_groups.get(format_name, []):
                     iid = row["path"]
                     template_rows_by_iid[iid] = row
                     templates_tree.insert(format_iid, "end", iid=iid, text=row.get("name", ""), values=(row.get("section_count", ""), row.get("pages_disp", ""), row.get("last_changed_by", "Unknown"), row.get("saved_disp", "")))
         update_launcher_template_sort_headings()
-        if selected and selected in template_rows_by_iid:
-            templates_tree.selection_set(selected)
-            templates_tree.focus(selected)
-        else:
+        known_iids = set(template_rows_by_iid).union(launcher_template_group_by_iid)
+        restore_selection = [iid for iid in saved_selected if iid in known_iids]
+        if not restore_selection and selected and selected in template_rows_by_iid:
+            restore_selection = [selected]
+        for iid in restore_selection:
+            open_treeview_item_ancestors(templates_tree, iid)
+        if restore_selection:
+            templates_tree.selection_set(restore_selection)
+        focus_target = saved_focus if saved_focus in known_iids else (restore_selection[0] if restore_selection else None)
+        if focus_target:
+            open_treeview_item_ancestors(templates_tree, focus_target)
+            templates_tree.focus(focus_target)
+        if saved_yview and len(saved_yview) > 0:
+            try:
+                templates_tree.yview_moveto(float(saved_yview[0]))
+            except Exception:
+                pass
+        if not restore_selection:
             close_preview()
     def refresh_regulars(*_):
         if not mode_state["regular"]:
             return
+        tree_state, has_saved_state = get_treeview_reload_state(regular_tree, "new_layout_launcher", "regular_tree", columns=("#0",) + tuple(regular_columns))
         selected = selected_regular_path()
+        saved_selected = [str(iid) for iid in (tree_state.get("selected_iids") or [])]
+        saved_focus = str(tree_state.get("focus_iid") or "").strip() or None
+        saved_yview = tree_state.get("yview") if isinstance(tree_state.get("yview"), list) else None
+        open_iids = set(str(iid) for iid in (tree_state.get("open_iids") or []))
         rows, _changed = get_cached_regular_rows(force=False)
         rows = [row for row in rows if _matches_regular_filters(row)]
         rows = sort_launcher_regular_rows(rows)
@@ -7059,22 +7859,38 @@ def build_new_layout_launcher(parent):
             press_iid = f"__new_layout_regular_press__::{press_name}"
             format_groups = grouped.get(press_name, {})
             press_count = sum(len(items) for items in format_groups.values())
-            regular_tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", ""), open=True, tags=("group_row",))
+            press_open = True if not has_saved_state else (press_iid in open_iids)
+            regular_tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", ""), open=press_open, tags=("group_row",))
             launcher_regular_group_by_iid[press_iid] = ("press", press_name)
             for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
                 format_iid = f"__new_layout_regular_format__::{press_name}::{format_name}"
                 format_count = len(format_groups.get(format_name, []))
-                regular_tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", ""), open=True, tags=("subgroup_row",))
+                format_open = True if not has_saved_state else (format_iid in open_iids)
+                regular_tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", ""), open=format_open, tags=("subgroup_row",))
                 launcher_regular_group_by_iid[format_iid] = ("format", press_name, format_name)
                 for row in format_groups.get(format_name, []):
                     iid = row.get("path")
                     regular_rows[iid] = row
                     regular_tree.insert(format_iid, "end", iid=iid, text=row.get("product", ""), values=(row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("last_changed_by", "Unknown"), row.get("saved_disp", "")))
         update_launcher_regular_sort_headings()
-        if selected and selected in regular_rows:
-            regular_tree.selection_set(selected)
-            regular_tree.focus(selected)
-        else:
+        known_iids = set(regular_rows).union(launcher_regular_group_by_iid)
+        restore_selection = [iid for iid in saved_selected if iid in known_iids]
+        if not restore_selection and selected and selected in regular_rows:
+            restore_selection = [selected]
+        for iid in restore_selection:
+            open_treeview_item_ancestors(regular_tree, iid)
+        if restore_selection:
+            regular_tree.selection_set(restore_selection)
+        focus_target = saved_focus if saved_focus in known_iids else (restore_selection[0] if restore_selection else None)
+        if focus_target:
+            open_treeview_item_ancestors(regular_tree, focus_target)
+            regular_tree.focus(focus_target)
+        if saved_yview and len(saved_yview) > 0:
+            try:
+                regular_tree.yview_moveto(float(saved_yview[0]))
+            except Exception:
+                pass
+        if not restore_selection:
             close_preview()
     def update_mode_widgets():
         if mode_state["regular"]:
@@ -7098,6 +7914,7 @@ def build_new_layout_launcher(parent):
         refresh_templates()
     def toggle_mode():
         mode_state["regular"] = not mode_state["regular"]
+        save_new_layout_mode_preference()
         update_mode_widgets()
     def _create_blank_or_template_layout():
         template_path = selected_template_path()
@@ -7197,6 +8014,19 @@ def build_new_layout_launcher(parent):
     regular_tree.bind("<Double-Button-1>", _on_new_layout_regular_double_click)
     action_button.configure(command=on_new_or_open)
     mode_button.configure(command=toggle_mode)
+
+    def _persist_new_layout_mode_on_destroy(event=None):
+        try:
+            if event is not None and event.widget is not root:
+                return
+        except Exception:
+            pass
+        save_new_layout_mode_preference()
+
+    try:
+        root.bind("<Destroy>", _persist_new_layout_mode_on_destroy, add="+")
+    except Exception:
+        pass
     update_launcher_template_sort_headings()
     update_launcher_regular_sort_headings()
     template_cache_watcher = _bind_cache_watcher(root, get_cached_templates, lambda: refresh_templates())
@@ -7271,11 +8101,13 @@ def build_template_editor_launcher(parent):
         tree.tag_configure("subgroup_row", font=(None, 10, "bold"), foreground="#444444")
     except Exception:
         pass
+    apply_treeview_column_width_state(tree, ("#0", "sections", "pages", "changed_by", "saved"), "template_editor_launcher", "template_tree")
+    bind_treeview_state_memory(root, "template_editor_launcher", "template_tree", tree, columns=("#0", "sections", "pages", "changed_by", "saved"))
 
     template_rows = []
     row_by_iid = {}
     group_by_iid = {}
-    sort_state = {"col": "name", "desc": False}
+    sort_state = load_treeview_sort_state("template_editor_launcher", "template_tree", "name")
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
@@ -7350,6 +8182,11 @@ def build_template_editor_launcher(parent):
         return sorted(rows, key=keyfunc, reverse=sort_state["desc"])
 
     def load_rows(rows):
+        tree_state, has_saved_state = get_treeview_reload_state(tree, "template_editor_launcher", "template_tree", columns=("#0", "sections", "pages", "changed_by", "saved"))
+        saved_selected = [str(iid) for iid in (tree_state.get("selected_iids") or [])]
+        saved_focus = str(tree_state.get("focus_iid") or "").strip() or None
+        saved_yview = tree_state.get("yview") if isinstance(tree_state.get("yview"), list) else None
+        open_iids = set(str(iid) for iid in (tree_state.get("open_iids") or []))
         tree.delete(*tree.get_children())
         row_by_iid.clear()
         group_by_iid.clear()
@@ -7375,17 +8212,34 @@ def build_template_editor_launcher(parent):
             press_iid = f"__template_press__::{press_name}"
             format_groups = press_groups.get(press_name, {})
             press_count = sum(len(items) for items in format_groups.values())
-            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", ""), open=True, tags=("group_row",))
+            press_open = True if not has_saved_state else (press_iid in open_iids)
+            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", ""), open=press_open, tags=("group_row",))
             group_by_iid[press_iid] = ("press", press_name)
             for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
                 format_iid = f"__template_format__::{press_name}::{format_name}"
                 format_count = len(format_groups.get(format_name, []))
-                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", ""), open=True, tags=("subgroup_row",))
+                format_open = True if not has_saved_state else (format_iid in open_iids)
+                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", ""), open=format_open, tags=("subgroup_row",))
                 group_by_iid[format_iid] = ("format", press_name, format_name)
                 for row in format_groups.get(format_name, []):
                     iid = row["path"]
                     tree.insert(format_iid, "end", iid=iid, text=row.get("name", ""), values=(row.get("section_count", ""), row.get("pages_disp", ""), row.get("last_changed_by", "Unknown"), row.get("saved_disp", "")))
                     row_by_iid[iid] = row
+        known_iids = set(row_by_iid).union(group_by_iid)
+        restore_selection = [iid for iid in saved_selected if iid in known_iids]
+        for iid in restore_selection:
+            open_treeview_item_ancestors(tree, iid)
+        if restore_selection:
+            tree.selection_set(restore_selection)
+        focus_target = saved_focus if saved_focus in known_iids else (restore_selection[0] if restore_selection else None)
+        if focus_target:
+            open_treeview_item_ancestors(tree, focus_target)
+            tree.focus(focus_target)
+        if saved_yview and len(saved_yview) > 0:
+            try:
+                tree.yview_moveto(float(saved_yview[0]))
+            except Exception:
+                pass
 
     def _matches_template_filter(row):
         search_text = (search_var.get() or "").strip().lower()
@@ -7435,6 +8289,7 @@ def build_template_editor_launcher(parent):
         else:
             sort_state["col"] = col
             sort_state["desc"] = False
+        save_treeview_sort_state("template_editor_launcher", "template_tree", sort_state)
         refresh()
 
     update_sort_headings()
@@ -7658,9 +8513,11 @@ def build_regular_editor_launcher(parent):
         tree.tag_configure("subgroup_row", font=(None, 10, "bold"), foreground="#444444")
     except Exception:
         pass
+    apply_treeview_column_width_state(tree, ("#0",) + tuple(columns), "regular_editor_launcher", "regular_tree")
+    bind_treeview_state_memory(root, "regular_editor_launcher", "regular_tree", tree, columns=("#0",) + tuple(columns))
 
     group_by_iid = {}
-    sort_state = {"col": "product", "desc": False}
+    sort_state = load_treeview_sort_state("regular_editor_launcher", "regular_tree", "product")
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
@@ -7735,6 +8592,11 @@ def build_regular_editor_launcher(parent):
             tree.heading(col, text=_treeview_sort_heading_text(regular_heading_titles[col], sort_state, col), command=lambda _c=col: sort_by(_c))
 
     def refresh():
+        tree_state, has_saved_state = get_treeview_reload_state(tree, "regular_editor_launcher", "regular_tree", columns=("#0",) + tuple(columns))
+        saved_selected = [str(iid) for iid in (tree_state.get("selected_iids") or [])]
+        saved_focus = str(tree_state.get("focus_iid") or "").strip() or None
+        saved_yview = tree_state.get("yview") if isinstance(tree_state.get("yview"), list) else None
+        open_iids = set(str(iid) for iid in (tree_state.get("open_iids") or []))
         rows, _changed = get_cached_regular_rows(force=False)
         rows = sort_rows([row for row in rows if matches(row)])
         tree.delete(*tree.get_children())
@@ -7761,22 +8623,46 @@ def build_regular_editor_launcher(parent):
             press_iid = f"__regular_press__::{press_name}"
             format_groups = press_groups.get(press_name, {})
             press_count = sum(len(items) for items in format_groups.values())
-            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", ""), open=True, tags=("group_row",))
+            press_open = True if not has_saved_state else (press_iid in open_iids)
+            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", ""), open=press_open, tags=("group_row",))
             group_by_iid[press_iid] = ("press", press_name)
             for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
                 format_iid = f"__regular_format__::{press_name}::{format_name}"
                 format_count = len(format_groups.get(format_name, []))
-                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", ""), open=True, tags=("subgroup_row",))
+                format_open = True if not has_saved_state else (format_iid in open_iids)
+                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", ""), open=format_open, tags=("subgroup_row",))
                 group_by_iid[format_iid] = ("format", press_name, format_name)
                 for row in format_groups.get(format_name, []):
                     tree.insert(format_iid, "end", iid=row["path"], text=row.get("product", ""), values=(row.get("pages_disp", ""), row.get("color_pages", 0), row.get("plates", 0), row.get("last_changed_by", "Unknown"), row.get("saved_disp", "")))
         update_sort_headings()
+        known_iids = set(group_by_iid)
+        known_iids.update(tree.get_children())
+        for parent_iid in tuple(group_by_iid):
+            try:
+                known_iids.update(tree.get_children(parent_iid))
+            except Exception:
+                pass
+        restore_selection = [iid for iid in saved_selected if iid in known_iids or tree.exists(iid)]
+        for iid in restore_selection:
+            open_treeview_item_ancestors(tree, iid)
+        if restore_selection:
+            tree.selection_set(restore_selection)
+        focus_target = saved_focus if (saved_focus and tree.exists(saved_focus)) else (restore_selection[0] if restore_selection else None)
+        if focus_target:
+            open_treeview_item_ancestors(tree, focus_target)
+            tree.focus(focus_target)
+        if saved_yview and len(saved_yview) > 0:
+            try:
+                tree.yview_moveto(float(saved_yview[0]))
+            except Exception:
+                pass
     def sort_by(col):
         if sort_state["col"] == col:
             sort_state["desc"] = not sort_state["desc"]
         else:
             sort_state["col"] = col
             sort_state["desc"] = False
+        save_treeview_sort_state("regular_editor_launcher", "regular_tree", sort_state)
         refresh()
     update_sort_headings()
     search_var.trace_add("write", lambda *_: refresh())
@@ -8407,6 +9293,1097 @@ def show_changelog_dialog(parent):
         pass
     return dialog
 
+
+
+
+
+def _launcher_user_can_open_macros(username):
+    return str(username or '').strip().lower() in {'jsaalsaa', 'mbradbury'}
+
+
+def _show_month_year_picker(parent, initial_year=None, initial_month=None, title="Select Month / Year"):
+    now = datetime.now()
+    try:
+        initial_year = int(initial_year if initial_year is not None else now.year)
+    except Exception:
+        initial_year = now.year
+    try:
+        initial_month = int(initial_month if initial_month is not None else now.month)
+    except Exception:
+        initial_month = now.month
+    initial_month = max(1, min(12, initial_month))
+
+    result = {"value": None}
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.resizable(False, False)
+    remember_window_geometry(dialog, "macro_month_year_picker", default_geometry="320x150", minsize=(320, 150))
+
+    outer = ttk.Frame(dialog, padding=12)
+    outer.grid(row=0, column=0, sticky="nsew")
+    outer.columnconfigure(1, weight=1)
+
+    ttk.Label(outer, text="Month:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 8))
+    month_names = [calendar.month_name[i] for i in range(1, 13)]
+    month_var = tk.StringVar(value=month_names[initial_month - 1])
+    month_combo = ttk.Combobox(outer, textvariable=month_var, values=month_names, state="readonly", width=16)
+    month_combo.grid(row=0, column=1, sticky="ew", pady=(0, 8))
+
+    ttk.Label(outer, text="Year:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 8))
+    year_var = tk.StringVar(value=str(initial_year))
+    year_spin = tk.Spinbox(outer, from_=2000, to=2100, textvariable=year_var, width=10)
+    year_spin.grid(row=1, column=1, sticky="w", pady=(0, 8))
+
+    button_row = ttk.Frame(outer)
+    button_row.grid(row=2, column=0, columnspan=2, sticky="e", pady=(6, 0))
+
+    def close_dialog(value=None):
+        result["value"] = value
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+
+    def confirm():
+        try:
+            picked_year = int(str(year_var.get() or '').strip())
+        except Exception:
+            messagebox.showerror("Invalid Year", "Please enter a valid 4-digit year.", parent=dialog)
+            return
+        picked_month_name = str(month_var.get() or '').strip()
+        if picked_month_name not in month_names:
+            messagebox.showerror("Invalid Month", "Please select a month.", parent=dialog)
+            return
+        close_dialog((picked_year, month_names.index(picked_month_name) + 1))
+
+    ttk.Button(button_row, text="Cancel", command=lambda: close_dialog(None), width=10).pack(side="right")
+    ttk.Button(button_row, text="OK", command=confirm, width=10).pack(side="right", padx=(0, 8))
+
+    dialog.bind("<Return>", lambda _event: confirm())
+    dialog.bind("<Escape>", lambda _event: close_dialog(None))
+    dialog.protocol("WM_DELETE_WINDOW", lambda: close_dialog(None))
+    dialog.grab_set()
+    try:
+        month_combo.focus_set()
+    except Exception:
+        pass
+    parent.wait_window(dialog)
+    return result["value"]
+
+
+def _macro_normalize_match_text(value):
+    return re.sub(r'\s+', ' ', normalize_publication_name(value or '')).strip()
+
+
+def _find_macro_regular_source(target_name):
+    target = _macro_normalize_match_text(target_name)
+    rows, _changed = get_cached_regular_rows(force=False)
+    product_matches = [row for row in rows if _macro_normalize_match_text(row.get('product')) == target]
+    name_matches = [row for row in rows if _macro_normalize_match_text(row.get('name')) == target]
+    if len(product_matches) == 1:
+        return product_matches[0], None
+    if len(product_matches) > 1:
+        items = [os.path.basename(str(row.get('path') or '')) for row in product_matches]
+        return None, f"Multiple regulars matched {target_name}: {', '.join(items)}"
+    if len(name_matches) == 1:
+        return name_matches[0], None
+    if len(name_matches) > 1:
+        items = [os.path.basename(str(row.get('path') or '')) for row in name_matches]
+        return None, f"Multiple regulars matched {target_name}: {', '.join(items)}"
+    return None, f"Could not find a regular named {target_name}."
+
+
+def _build_usat_month_issue_plan(year, month):
+    plan = []
+    try:
+        year = int(year)
+        month = int(month)
+        _first_weekday, last_day = calendar.monthrange(year, month)
+    except Exception:
+        return plan
+    monday_thursday_names = ["USAT A&B", "USAT C&D"]
+    friday_names = ["USAT A&D", "USAT B&C"]
+    for day in range(1, last_day + 1):
+        current_dt = datetime(year, month, day)
+        weekday = current_dt.weekday()
+        if weekday >= 5:
+            continue
+        macro_names = friday_names if weekday == 4 else monday_thursday_names
+        plan.append({
+            'date': current_dt.strftime('%m/%d/%Y'),
+            'weekday': weekday,
+            'regular_names': list(macro_names),
+        })
+    return plan
+
+
+def _build_gre_homefinder_month_issue_plan(year, month):
+    plan = []
+    try:
+        year = int(year)
+        month = int(month)
+        _first_weekday, last_day = calendar.monthrange(year, month)
+    except Exception:
+        return plan
+    sunday_names = ["GRE Homefinder"]
+    for day in range(1, last_day + 1):
+        current_dt = datetime(year, month, day)
+        weekday = current_dt.weekday()
+        if weekday != 6:
+            continue
+        plan.append({
+            'date': current_dt.strftime('%m/%d/%Y'),
+            'weekday': weekday,
+            'regular_names': list(sunday_names),
+        })
+    return plan
+
+
+def _macro_target_layout_exists(target_path):
+    try:
+        return safe_read_json(target_path) is not None
+    except Exception:
+        pass
+    try:
+        return os.path.exists(target_path)
+    except Exception:
+        return False
+
+
+def _resolve_usat_monthly_generation_plan(year, month):
+    required_regulars = ["USAT A&B", "USAT C&D", "USAT A&D", "USAT B&C"]
+    source_bundle = {}
+    errors = []
+    for regular_name in required_regulars:
+        row, error_text = _find_macro_regular_source(regular_name)
+        if row is None:
+            errors.append(error_text)
+            continue
+        source_data = safe_read_json(row.get('path'))
+        if not isinstance(source_data, dict):
+            errors.append(f"Could not read the regular layout for {regular_name}.")
+            continue
+        source_bundle[regular_name] = {
+            'row': row,
+            'data': source_data,
+        }
+
+    month_issue_plan = _build_usat_month_issue_plan(year, month)
+    if not month_issue_plan:
+        errors.append("No weekday issues were found for that month.")
+        return [], errors
+
+    generation_plan = []
+    for issue in month_issue_plan:
+        issue_date = issue['date']
+        for regular_name in issue['regular_names']:
+            bundle = source_bundle.get(regular_name)
+            if not isinstance(bundle, dict):
+                continue
+            source_data = json.loads(json.dumps(bundle.get('data') or {}, default=str))
+            for transient_key in ('_db_record_id', '_db_record_type', '_file_path', '_layout_name'):
+                source_data.pop(transient_key, None)
+            source_data['issue_date'] = issue_date
+            press_name = source_data.get('press') or ''
+            format_name = source_data.get('format') or ''
+            cfg = CONFIG_MAP.get((press_name, format_name))
+            file_name = _build_filename_suggestion_from_layout_data(
+                source_data,
+                template_mode=False,
+                regular_mode=False,
+                default_dir=LAYOUTS_DIR,
+                config=(dict(cfg) if isinstance(cfg, dict) else None),
+            )
+            file_name = str(file_name or '').strip() or f"{sanitize_filename(regular_name)} {issue_date.replace('/', '-')}.json"
+            if not file_name.lower().endswith('.json'):
+                file_name += '.json'
+            target_path = os.path.join(LAYOUTS_DIR, file_name)
+            generation_plan.append({
+                'issue_date': issue_date,
+                'weekday': issue.get('weekday'),
+                'regular_name': regular_name,
+                'source_path': bundle['row'].get('path'),
+                'source_data': source_data,
+                'target_path': target_path,
+                'target_name': os.path.basename(file_name),
+                'exists': _macro_target_layout_exists(target_path),
+            })
+    return generation_plan, errors
+
+
+def _resolve_gre_homefinder_monthly_generation_plan(year, month):
+    required_regulars = ["GRE Homefinder"]
+    source_bundle = {}
+    errors = []
+    for regular_name in required_regulars:
+        row, error_text = _find_macro_regular_source(regular_name)
+        if row is None:
+            errors.append(error_text)
+            continue
+        source_data = safe_read_json(row.get('path'))
+        if not isinstance(source_data, dict):
+            errors.append(f"Could not read the regular layout for {regular_name}.")
+            continue
+        source_bundle[regular_name] = {
+            'row': row,
+            'data': source_data,
+        }
+
+    month_issue_plan = _build_gre_homefinder_month_issue_plan(year, month)
+    if not month_issue_plan:
+        errors.append("No Sunday issues were found for that month.")
+        return [], errors
+
+    generation_plan = []
+    for issue in month_issue_plan:
+        issue_date = issue['date']
+        for regular_name in issue['regular_names']:
+            bundle = source_bundle.get(regular_name)
+            if not isinstance(bundle, dict):
+                continue
+            source_data = json.loads(json.dumps(bundle.get('data') or {}, default=str))
+            for transient_key in ('_db_record_id', '_db_record_type', '_file_path', '_layout_name'):
+                source_data.pop(transient_key, None)
+            source_data['issue_date'] = issue_date
+            press_name = source_data.get('press') or ''
+            format_name = source_data.get('format') or ''
+            cfg = CONFIG_MAP.get((press_name, format_name))
+            file_name = _build_filename_suggestion_from_layout_data(
+                source_data,
+                template_mode=False,
+                regular_mode=False,
+                default_dir=LAYOUTS_DIR,
+                config=(dict(cfg) if isinstance(cfg, dict) else None),
+            )
+            file_name = str(file_name or '').strip() or f"{sanitize_filename(regular_name)} {issue_date.replace('/', '-')}.json"
+            if not file_name.lower().endswith('.json'):
+                file_name += '.json'
+            target_path = os.path.join(LAYOUTS_DIR, file_name)
+            generation_plan.append({
+                'issue_date': issue_date,
+                'weekday': issue.get('weekday'),
+                'regular_name': regular_name,
+                'source_path': bundle['row'].get('path'),
+                'source_data': source_data,
+                'target_path': target_path,
+                'target_name': os.path.basename(file_name),
+                'exists': _macro_target_layout_exists(target_path),
+            })
+    return generation_plan, errors
+
+
+def _show_usat_monthly_confirmation(parent, year, month, generation_plan):
+    result = {'confirmed': False, 'overwrite_mode': 'skip', 'print_outputs': False}
+    dialog = tk.Toplevel(parent)
+    dialog.title("Confirm USAT Monthly")
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.resizable(False, False)
+    remember_window_geometry(dialog, "usat_monthly_confirmation_dialog", default_geometry="520x390", minsize=(520, 390))
+
+    total_layouts = len(generation_plan)
+    unique_dates = sorted({str(item.get('issue_date') or '') for item in generation_plan if item.get('issue_date')})
+    friday_dates = sorted({str(item.get('issue_date') or '') for item in generation_plan if int(item.get('weekday', -1)) == 4})
+    friday_count = len(friday_dates)
+    monday_thursday_count = max(0, len(unique_dates) - friday_count)
+    existing_count = sum(1 for item in generation_plan if item.get('exists'))
+    new_count = max(0, total_layouts - existing_count)
+
+    outer = ttk.Frame(dialog, padding=12)
+    outer.grid(row=0, column=0, sticky="nsew")
+    outer.columnconfigure(0, weight=1)
+
+    month_name = calendar.month_name[int(month)]
+    summary_lines = [
+        f"Month / Year: {month_name} {int(year)}",
+        f"Issue dates to generate: {len(unique_dates)}",
+        f"Layouts to process: {total_layouts}",
+        f"  • Monday-Thursday issues: {monday_thursday_count} date(s) using USAT A&B and USAT C&D",
+        f"  • Friday issues: {friday_count} date(s) using USAT A&D and USAT B&C",
+        f"Existing target layouts found: {existing_count}",
+        f"New target layouts: {new_count}",
+    ]
+    if unique_dates:
+        summary_lines.append(f"Date range: {unique_dates[0]} to {unique_dates[-1]}")
+
+    ttk.Label(outer, text="Please review the macro summary before continuing.", font=(None, 11, "bold")).grid(row=0, column=0, sticky='w')
+    ttk.Label(outer, text="\n".join(summary_lines), justify='left').grid(row=1, column=0, sticky='w', pady=(8, 10))
+
+    options_frame = ttk.LabelFrame(outer, text="If a target layout already exists")
+    options_frame.grid(row=2, column=0, sticky='ew', pady=(0, 10))
+    overwrite_var = tk.StringVar(value='skip')
+    ttk.Radiobutton(options_frame, text="Skip existing layouts", value='skip', variable=overwrite_var).pack(anchor='w', padx=10, pady=(8, 4))
+    ttk.Radiobutton(options_frame, text="Overwrite existing layouts", value='overwrite', variable=overwrite_var).pack(anchor='w', padx=10, pady=(0, 8))
+
+    print_var = tk.BooleanVar(value=False)
+    print_frame = ttk.LabelFrame(outer, text="Print generated output")
+    print_frame.grid(row=3, column=0, sticky='ew', pady=(0, 10))
+    ttk.Checkbutton(
+        print_frame,
+        text="Print generated layouts and starter sheets to the default printer",
+        variable=print_var,
+    ).pack(anchor='w', padx=10, pady=(8, 2))
+    ttk.Label(
+        print_frame,
+        text="If selected, the macro prints 5 copies of each generated layout and 1 copy of each generated starter sheet.",
+        justify='left',
+    ).pack(anchor='w', padx=30, pady=(0, 8))
+
+    preview_names = [str(item.get('target_name') or '') for item in generation_plan[:8] if item.get('target_name')]
+    if preview_names:
+        preview_frame = ttk.LabelFrame(outer, text="Example output filenames")
+        preview_frame.grid(row=4, column=0, sticky='ew', pady=(0, 10))
+        ttk.Label(preview_frame, text="\n".join(f"• {name}" for name in preview_names), justify='left').pack(anchor='w', padx=10, pady=8)
+
+    button_row = ttk.Frame(outer)
+    button_row.grid(row=5, column=0, sticky='e')
+
+    def close_dialog(confirm=False):
+        result['confirmed'] = bool(confirm)
+        result['overwrite_mode'] = str(overwrite_var.get() or 'skip').strip().lower()
+        result['print_outputs'] = bool(print_var.get())
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+
+    ttk.Button(button_row, text="Cancel", command=lambda: close_dialog(False), width=10).pack(side='right')
+    ttk.Button(button_row, text="Run", command=lambda: close_dialog(True), width=10).pack(side='right', padx=(0, 8))
+
+    dialog.bind('<Return>', lambda _event: close_dialog(True))
+    dialog.bind('<Escape>', lambda _event: close_dialog(False))
+    dialog.protocol('WM_DELETE_WINDOW', lambda: close_dialog(False))
+    dialog.grab_set()
+    parent.wait_window(dialog)
+    return result
+
+
+def _show_gre_homefinder_monthly_confirmation(parent, year, month, generation_plan):
+    result = {'confirmed': False, 'overwrite_mode': 'skip', 'print_outputs': False}
+    dialog = tk.Toplevel(parent)
+    dialog.title("Confirm GRE Homefinder Monthly")
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.resizable(False, False)
+    remember_window_geometry(dialog, "gre_homefinder_monthly_confirmation_dialog", default_geometry="520x390", minsize=(520, 390))
+
+    total_layouts = len(generation_plan)
+    unique_dates = sorted({str(item.get('issue_date') or '') for item in generation_plan if item.get('issue_date')})
+    sunday_count = len(unique_dates)
+    existing_count = sum(1 for item in generation_plan if item.get('exists'))
+    new_count = max(0, total_layouts - existing_count)
+
+    outer = ttk.Frame(dialog, padding=12)
+    outer.grid(row=0, column=0, sticky="nsew")
+    outer.columnconfigure(0, weight=1)
+
+    month_name = calendar.month_name[int(month)]
+    summary_lines = [
+        f"Month / Year: {month_name} {int(year)}",
+        f"Sunday issue dates to generate: {sunday_count}",
+        f"Layouts to process: {total_layouts}",
+        f"  • Sunday issues: {sunday_count} date(s) using GRE Homefinder",
+        f"Existing target layouts found: {existing_count}",
+        f"New target layouts: {new_count}",
+    ]
+    if unique_dates:
+        summary_lines.append(f"Date range: {unique_dates[0]} to {unique_dates[-1]}")
+
+    ttk.Label(outer, text="Please review the macro summary before continuing.", font=(None, 11, "bold")).grid(row=0, column=0, sticky='w')
+    ttk.Label(outer, text="\n".join(summary_lines), justify='left').grid(row=1, column=0, sticky='w', pady=(8, 10))
+
+    options_frame = ttk.LabelFrame(outer, text="If a target layout already exists")
+    options_frame.grid(row=2, column=0, sticky='ew', pady=(0, 10))
+    overwrite_var = tk.StringVar(value='skip')
+    ttk.Radiobutton(options_frame, text="Skip existing layouts", value='skip', variable=overwrite_var).pack(anchor='w', padx=10, pady=(8, 4))
+    ttk.Radiobutton(options_frame, text="Overwrite existing layouts", value='overwrite', variable=overwrite_var).pack(anchor='w', padx=10, pady=(0, 8))
+
+    print_var = tk.BooleanVar(value=False)
+    print_frame = ttk.LabelFrame(outer, text="Print generated output")
+    print_frame.grid(row=3, column=0, sticky='ew', pady=(0, 10))
+    ttk.Checkbutton(
+        print_frame,
+        text="Print generated layouts and starter sheets to the default printer",
+        variable=print_var,
+    ).pack(anchor='w', padx=10, pady=(8, 2))
+    ttk.Label(
+        print_frame,
+        text="If selected, the macro prints 5 copies of each generated layout and 1 copy of each generated starter sheet.",
+        justify='left',
+    ).pack(anchor='w', padx=30, pady=(0, 8))
+
+    preview_names = [str(item.get('target_name') or '') for item in generation_plan[:8] if item.get('target_name')]
+    if preview_names:
+        preview_frame = ttk.LabelFrame(outer, text="Example output filenames")
+        preview_frame.grid(row=4, column=0, sticky='ew', pady=(0, 10))
+        ttk.Label(preview_frame, text="\n".join(f"• {name}" for name in preview_names), justify='left').pack(anchor='w', padx=10, pady=8)
+
+    button_row = ttk.Frame(outer)
+    button_row.grid(row=5, column=0, sticky='e')
+
+    def close_dialog(confirm=False):
+        result['confirmed'] = bool(confirm)
+        result['overwrite_mode'] = str(overwrite_var.get() or 'skip').strip().lower()
+        result['print_outputs'] = bool(print_var.get())
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+
+    ttk.Button(button_row, text="Cancel", command=lambda: close_dialog(False), width=10).pack(side='right')
+    ttk.Button(button_row, text="Run", command=lambda: close_dialog(True), width=10).pack(side='right', padx=(0, 8))
+
+    dialog.bind('<Return>', lambda _event: close_dialog(True))
+    dialog.bind('<Escape>', lambda _event: close_dialog(False))
+    dialog.protocol('WM_DELETE_WINDOW', lambda: close_dialog(False))
+    dialog.grab_set()
+    parent.wait_window(dialog)
+    return result
+
+
+def _create_usat_monthly_progress_window(parent, total_steps):
+    progress = {
+        'dialog': None,
+        'label_var': tk.StringVar(value='Preparing macro run...'),
+        'detail_var': tk.StringVar(value=''),
+        'count_var': tk.StringVar(value=f"0 / {max(1, int(total_steps or 1))}"),
+        'bar': None,
+        'cancelled': False,
+        'total_steps': max(1, int(total_steps or 1)),
+    }
+    dialog = tk.Toplevel(parent)
+    dialog.title("USAT Monthly Progress")
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.resizable(False, False)
+    remember_window_geometry(dialog, "usat_monthly_progress_dialog", default_geometry="420x150", minsize=(420, 150))
+    progress['dialog'] = dialog
+
+    outer = ttk.Frame(dialog, padding=12)
+    outer.grid(row=0, column=0, sticky='nsew')
+    outer.columnconfigure(0, weight=1)
+
+    ttk.Label(outer, textvariable=progress['label_var'], font=(None, 11, 'bold')).grid(row=0, column=0, sticky='w')
+    ttk.Label(outer, textvariable=progress['detail_var'], justify='left').grid(row=1, column=0, sticky='w', pady=(8, 8))
+    bar = ttk.Progressbar(outer, orient='horizontal', mode='determinate', maximum=progress['total_steps'])
+    bar.grid(row=2, column=0, sticky='ew')
+    progress['bar'] = bar
+    ttk.Label(outer, textvariable=progress['count_var']).grid(row=3, column=0, sticky='e', pady=(8, 0))
+
+    def _cancel_close():
+        progress['cancelled'] = True
+    dialog.protocol('WM_DELETE_WINDOW', _cancel_close)
+    dialog.update_idletasks()
+    return progress
+
+
+def _create_gre_homefinder_monthly_progress_window(parent, total_steps):
+    progress = {
+        'dialog': None,
+        'label_var': tk.StringVar(value='Preparing macro run...'),
+        'detail_var': tk.StringVar(value=''),
+        'count_var': tk.StringVar(value=f"0 / {max(1, int(total_steps or 1))}"),
+        'bar': None,
+        'cancelled': False,
+        'total_steps': max(1, int(total_steps or 1)),
+    }
+    dialog = tk.Toplevel(parent)
+    dialog.title("GRE Homefinder Monthly Progress")
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.resizable(False, False)
+    remember_window_geometry(dialog, "gre_homefinder_monthly_progress_dialog", default_geometry="420x150", minsize=(420, 150))
+    progress['dialog'] = dialog
+
+    outer = ttk.Frame(dialog, padding=12)
+    outer.grid(row=0, column=0, sticky='nsew')
+    ttk.Label(outer, textvariable=progress['label_var'], font=(None, 11, 'bold')).grid(row=0, column=0, sticky='w')
+    ttk.Label(outer, textvariable=progress['detail_var'], justify='left').grid(row=1, column=0, sticky='w', pady=(8, 8))
+    bar = ttk.Progressbar(outer, mode='determinate', maximum=max(1, int(total_steps or 1)))
+    bar.grid(row=2, column=0, sticky='ew')
+    progress['bar'] = bar
+    ttk.Label(outer, textvariable=progress['count_var']).grid(row=3, column=0, sticky='e', pady=(8, 0))
+
+    def _cancel():
+        progress['cancelled'] = True
+
+    dialog.protocol('WM_DELETE_WINDOW', _cancel)
+    return progress
+
+
+def _update_usat_monthly_progress(progress_state, current_step, label_text=None, detail_text=None):
+    if not isinstance(progress_state, dict):
+        return
+    dialog = progress_state.get('dialog')
+    if dialog is None:
+        return
+    try:
+        if label_text is not None:
+            progress_state['label_var'].set(str(label_text))
+        if detail_text is not None:
+            progress_state['detail_var'].set(str(detail_text))
+        bar = progress_state.get('bar')
+        if bar is not None:
+            bar.configure(value=max(0, min(int(current_step), int(progress_state.get('total_steps', 1)))))
+        progress_state['count_var'].set(f"{max(0, int(current_step))} / {int(progress_state.get('total_steps', 1))}")
+        dialog.update_idletasks()
+        dialog.update()
+    except Exception:
+        pass
+
+
+def _close_usat_monthly_progress_window(progress_state):
+    if not isinstance(progress_state, dict):
+        return
+    dialog = progress_state.get('dialog')
+    if dialog is None:
+        return
+    try:
+        dialog.destroy()
+    except Exception:
+        pass
+    progress_state['dialog'] = None
+
+
+def _show_usat_monthly_report_dialog(parent, month_label, report_data):
+    report_data = report_data if isinstance(report_data, dict) else {}
+    created = [str(item) for item in (report_data.get('created') or []) if str(item)]
+    overwritten = [str(item) for item in (report_data.get('overwritten') or []) if str(item)]
+    skipped = [str(item) for item in (report_data.get('skipped') or []) if str(item)]
+    preview_failures = [str(item) for item in (report_data.get('preview_failures') or []) if str(item)]
+    printed_layouts = [str(item) for item in (report_data.get('printed_layouts') or []) if str(item)]
+    printed_starters = [str(item) for item in (report_data.get('printed_starters') or []) if str(item)]
+    print_failures = [str(item) for item in (report_data.get('print_failures') or []) if str(item)]
+    processed_dates = sorted({str(item) for item in (report_data.get('processed_dates') or []) if str(item)})
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("USAT Monthly Report")
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.resizable(True, True)
+    dialog.geometry("760x560")
+    dialog.minsize(680, 460)
+    remember_window_geometry(dialog, "usat_monthly_report_dialog", default_geometry="760x560", minsize=(680, 460))
+
+    outer = ttk.Frame(dialog, padding=12)
+    outer.grid(row=0, column=0, sticky='nsew')
+    dialog.rowconfigure(0, weight=1)
+    dialog.columnconfigure(0, weight=1)
+    outer.rowconfigure(1, weight=1)
+    outer.columnconfigure(0, weight=1)
+
+    summary_lines = [
+        f"Month / Year: {month_label}",
+        f"Issue dates processed: {len(processed_dates)}",
+        f"Layouts created: {len(created)}",
+        f"Layouts overwritten: {len(overwritten)}",
+        f"Layouts skipped: {len(skipped)}",
+        f"Layouts printed: {len(printed_layouts)}",
+        f"Starter sheets printed: {len(printed_starters)}",
+    ]
+    if preview_failures:
+        summary_lines.append(f"Preview failures: {len(preview_failures)}")
+    if print_failures:
+        summary_lines.append(f"Print failures: {len(print_failures)}")
+    ttk.Label(outer, text="USAT Monthly Run Report", font=(None, 11, 'bold')).grid(row=0, column=0, sticky='w')
+    ttk.Label(outer, text="\n".join(summary_lines), justify='left').grid(row=0, column=0, sticky='e')
+
+    text_frame = ttk.Frame(outer)
+    text_frame.grid(row=1, column=0, sticky='nsew', pady=(12, 12))
+    text_frame.rowconfigure(0, weight=1)
+    text_frame.columnconfigure(0, weight=1)
+
+    report_box = tk.Text(text_frame, wrap='word', state='normal')
+    report_box.grid(row=0, column=0, sticky='nsew')
+    scroll = ttk.Scrollbar(text_frame, orient='vertical', command=report_box.yview)
+    scroll.grid(row=0, column=1, sticky='ns')
+    report_box.configure(yscrollcommand=scroll.set)
+
+    section_lines = []
+    if processed_dates:
+        section_lines.append("Issue Dates Processed")
+        section_lines.append("-" * 60)
+        section_lines.extend(f"• {item}" for item in processed_dates)
+        section_lines.append("")
+    for heading, values in [
+        ("Created Layouts", created),
+        ("Overwritten Layouts", overwritten),
+        ("Skipped Layouts", skipped),
+        ("Printed Layouts", printed_layouts),
+        ("Printed Starter Sheets", printed_starters),
+        ("Print Failures", print_failures),
+        ("Preview Failures", preview_failures),
+    ]:
+        section_lines.append(heading)
+        section_lines.append("-" * 60)
+        if values:
+            section_lines.extend(f"• {item}" for item in values)
+        else:
+            section_lines.append("(none)")
+        section_lines.append("")
+
+    report_box.insert('1.0', "\n".join(section_lines).strip() + "\n")
+    report_box.configure(state='disabled')
+
+    button_row = ttk.Frame(outer)
+    button_row.grid(row=2, column=0, sticky='e')
+    ttk.Button(button_row, text='Close', command=dialog.destroy, width=10).pack(side='right')
+
+    dialog.bind('<Escape>', lambda _event: dialog.destroy())
+    dialog.protocol('WM_DELETE_WINDOW', dialog.destroy)
+    return dialog
+
+
+def _show_gre_homefinder_monthly_report_dialog(parent, month_label, report_data):
+    report_data = report_data if isinstance(report_data, dict) else {}
+    created = [str(item) for item in (report_data.get('created') or []) if str(item)]
+    overwritten = [str(item) for item in (report_data.get('overwritten') or []) if str(item)]
+    skipped = [str(item) for item in (report_data.get('skipped') or []) if str(item)]
+    preview_failures = [str(item) for item in (report_data.get('preview_failures') or []) if str(item)]
+    printed_layouts = [str(item) for item in (report_data.get('printed_layouts') or []) if str(item)]
+    printed_starters = [str(item) for item in (report_data.get('printed_starters') or []) if str(item)]
+    print_failures = [str(item) for item in (report_data.get('print_failures') or []) if str(item)]
+    processed_dates = sorted({str(item) for item in (report_data.get('processed_dates') or []) if str(item)})
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("GRE Homefinder Monthly Report")
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.resizable(True, True)
+    dialog.geometry("760x560")
+    dialog.minsize(680, 460)
+    remember_window_geometry(dialog, "gre_homefinder_monthly_report_dialog", default_geometry="760x560", minsize=(680, 460))
+
+    outer = ttk.Frame(dialog, padding=12)
+    outer.grid(row=0, column=0, sticky='nsew')
+    dialog.rowconfigure(0, weight=1)
+    dialog.columnconfigure(0, weight=1)
+    outer.rowconfigure(1, weight=1)
+    outer.columnconfigure(0, weight=1)
+
+    summary_lines = [
+        f"Month / Year: {month_label}",
+        f"Issue dates processed: {len(processed_dates)}",
+        f"Layouts created: {len(created)}",
+        f"Layouts overwritten: {len(overwritten)}",
+        f"Layouts skipped: {len(skipped)}",
+        f"Layouts printed: {len(printed_layouts)}",
+        f"Starter sheets printed: {len(printed_starters)}",
+    ]
+    if preview_failures:
+        summary_lines.append(f"Preview failures: {len(preview_failures)}")
+    if print_failures:
+        summary_lines.append(f"Print failures: {len(print_failures)}")
+    ttk.Label(outer, text="GRE Homefinder Monthly Run Report", font=(None, 11, 'bold')).grid(row=0, column=0, sticky='w')
+    ttk.Label(outer, text="\n".join(summary_lines), justify='left').grid(row=0, column=0, sticky='e')
+
+    text_frame = ttk.Frame(outer)
+    text_frame.grid(row=1, column=0, sticky='nsew', pady=(12, 12))
+    text_frame.rowconfigure(0, weight=1)
+    text_frame.columnconfigure(0, weight=1)
+
+    report_box = tk.Text(text_frame, wrap='word', state='normal')
+    report_box.grid(row=0, column=0, sticky='nsew')
+    scroll = ttk.Scrollbar(text_frame, orient='vertical', command=report_box.yview)
+    scroll.grid(row=0, column=1, sticky='ns')
+    report_box.configure(yscrollcommand=scroll.set)
+
+    section_lines = []
+    if processed_dates:
+        section_lines.append("Issue Dates Processed")
+        section_lines.append("-" * 60)
+        section_lines.extend(f"• {item}" for item in processed_dates)
+        section_lines.append("")
+    for heading, values in [
+        ("Created Layouts", created),
+        ("Overwritten Layouts", overwritten),
+        ("Skipped Layouts", skipped),
+        ("Printed Layouts", printed_layouts),
+        ("Printed Starter Sheets", printed_starters),
+        ("Print Failures", print_failures),
+        ("Preview Failures", preview_failures),
+    ]:
+        section_lines.append(heading)
+        section_lines.append("-" * 60)
+        if values:
+            section_lines.extend(f"• {item}" for item in values)
+        else:
+            section_lines.append("(none)")
+        section_lines.append("")
+
+    report_box.insert('1.0', "\n".join(section_lines).strip() + "\n")
+    report_box.configure(state='disabled')
+
+    button_row = ttk.Frame(outer)
+    button_row.grid(row=2, column=0, sticky='e')
+    ttk.Button(button_row, text='Close', command=dialog.destroy, width=10).pack(side='right')
+
+    dialog.bind('<Escape>', lambda _event: dialog.destroy())
+    dialog.protocol('WM_DELETE_WINDOW', dialog.destroy)
+    return dialog
+
+
+def _generate_usat_monthly_layouts(parent, year, month, generation_plan, overwrite_mode='skip', print_outputs=False):
+    overwrite_mode = str(overwrite_mode or 'skip').strip().lower()
+    total_steps = len(generation_plan)
+    progress_state = _create_usat_monthly_progress_window(parent, total_steps)
+    created = []
+    overwritten = []
+    skipped = []
+    preview_failures = []
+    printed_layouts = []
+    printed_starters = []
+    print_failures = []
+    processed_dates = set()
+
+    try:
+        for index, item in enumerate(generation_plan, start=1):
+            target_path = item.get('target_path')
+            target_name = str(item.get('target_name') or os.path.basename(str(target_path or '')))
+            issue_date = str(item.get('issue_date') or '')
+            regular_name = str(item.get('regular_name') or '')
+            processed_dates.add(issue_date)
+            _update_usat_monthly_progress(
+                progress_state,
+                index - 1,
+                label_text="Generating USAT monthly layouts...",
+                detail_text=f"{issue_date} — {regular_name}\n{target_name}",
+            )
+            if progress_state.get('cancelled'):
+                skipped.append(f"{target_name} (cancelled)")
+                continue
+
+            target_exists = _macro_target_layout_exists(target_path)
+            if target_exists and overwrite_mode != 'overwrite':
+                skipped.append(target_name)
+                _update_usat_monthly_progress(
+                    progress_state,
+                    index,
+                    label_text="Skipping existing layout...",
+                    detail_text=f"{issue_date} — {regular_name}\n{target_name}",
+                )
+                continue
+
+            data = json.loads(json.dumps(item.get('source_data') or {}, default=str))
+            for transient_key in ('_db_record_id', '_db_record_type', '_file_path', '_layout_name'):
+                data.pop(transient_key, None)
+            data['issue_date'] = issue_date
+            data['saved_at'] = datetime.now().isoformat(timespec='seconds')
+            data['last_changed_by'] = get_windows_username()
+            data['name'] = os.path.splitext(target_name)[0]
+
+            safe_write_json(target_path, data)
+            if target_exists:
+                overwritten.append(target_name)
+            else:
+                created.append(target_name)
+
+            if print_outputs:
+                _update_usat_monthly_progress(
+                    progress_state,
+                    index - 1,
+                    label_text="Printing generated layouts...",
+                    detail_text=f"{issue_date} — {regular_name}\n{target_name}",
+                )
+                try:
+                    _print_layout_data_to_default_printer(data, copies=5)
+                    printed_layouts.append(f"{target_name} (5 copies)")
+                except Exception as exc:
+                    print_failures.append(f"Layout: {target_name} — {exc}")
+                try:
+                    _print_starter_sheet_data_to_default_printer(data, copies=1)
+                    printed_starters.append(f"{target_name} (1 copy)")
+                except Exception as exc:
+                    print_failures.append(f"Starter: {target_name} — {exc}")
+
+            try:
+                regenerate_preview_image_for_json_path(
+                    target_path,
+                    template_mode=False,
+                    default_dir=LAYOUTS_DIR,
+                    prompt_save_template=False,
+                    scale=0.75,
+                )
+            except Exception:
+                preview_failures.append(target_name)
+
+            _update_usat_monthly_progress(
+                progress_state,
+                index,
+                label_text="Generating USAT monthly layouts...",
+                detail_text=f"{issue_date} — {regular_name}\n{target_name}",
+            )
+    finally:
+        _close_usat_monthly_progress_window(progress_state)
+
+    month_label = f"{calendar.month_name[int(month)]} {int(year)}"
+    report_data = {
+        'created': created,
+        'overwritten': overwritten,
+        'skipped': skipped,
+        'preview_failures': preview_failures,
+        'printed_layouts': printed_layouts,
+        'printed_starters': printed_starters,
+        'print_failures': print_failures,
+        'processed_dates': sorted(processed_dates),
+    }
+    _show_usat_monthly_report_dialog(parent, month_label, report_data)
+    return True
+
+
+def _generate_gre_homefinder_monthly_layouts(parent, year, month, generation_plan, overwrite_mode='skip', print_outputs=False):
+    overwrite_mode = str(overwrite_mode or 'skip').strip().lower()
+    total_steps = len(generation_plan)
+    progress_state = _create_gre_homefinder_monthly_progress_window(parent, total_steps)
+    created = []
+    overwritten = []
+    skipped = []
+    preview_failures = []
+    printed_layouts = []
+    printed_starters = []
+    print_failures = []
+    processed_dates = set()
+
+    try:
+        for index, item in enumerate(generation_plan, start=1):
+            target_path = item.get('target_path')
+            target_name = str(item.get('target_name') or os.path.basename(str(target_path or '')))
+            issue_date = str(item.get('issue_date') or '')
+            regular_name = str(item.get('regular_name') or '')
+            processed_dates.add(issue_date)
+            _update_usat_monthly_progress(
+                progress_state,
+                index - 1,
+                label_text="Generating GRE Homefinder monthly layouts...",
+                detail_text=f"{issue_date} — {regular_name}\n{target_name}",
+            )
+            if progress_state.get('cancelled'):
+                skipped.append(f"{target_name} (cancelled)")
+                continue
+
+            target_exists = _macro_target_layout_exists(target_path)
+            if target_exists and overwrite_mode != 'overwrite':
+                skipped.append(target_name)
+                _update_usat_monthly_progress(
+                    progress_state,
+                    index,
+                    label_text="Skipping existing layout...",
+                    detail_text=f"{issue_date} — {regular_name}\n{target_name}",
+                )
+                continue
+
+            data = json.loads(json.dumps(item.get('source_data') or {}, default=str))
+            for transient_key in ('_db_record_id', '_db_record_type', '_file_path', '_layout_name'):
+                data.pop(transient_key, None)
+            data['issue_date'] = issue_date
+            data['saved_at'] = datetime.now().isoformat(timespec='seconds')
+            data['last_changed_by'] = get_windows_username()
+            data['name'] = os.path.splitext(target_name)[0]
+
+            safe_write_json(target_path, data)
+            if target_exists:
+                overwritten.append(target_name)
+            else:
+                created.append(target_name)
+
+            if print_outputs:
+                _update_usat_monthly_progress(
+                    progress_state,
+                    index - 1,
+                    label_text="Printing generated layouts...",
+                    detail_text=f"{issue_date} — {regular_name}\n{target_name}",
+                )
+                try:
+                    _print_layout_data_to_default_printer(data, copies=5)
+                    printed_layouts.append(f"{target_name} (5 copies)")
+                except Exception as exc:
+                    print_failures.append(f"Layout: {target_name} — {exc}")
+                try:
+                    _print_starter_sheet_data_to_default_printer(data, copies=1)
+                    printed_starters.append(f"{target_name} (1 copy)")
+                except Exception as exc:
+                    print_failures.append(f"Starter: {target_name} — {exc}")
+
+            try:
+                regenerate_preview_image_for_json_path(
+                    target_path,
+                    template_mode=False,
+                    default_dir=LAYOUTS_DIR,
+                    prompt_save_template=False,
+                    scale=0.75,
+                )
+            except Exception:
+                preview_failures.append(target_name)
+
+            _update_usat_monthly_progress(
+                progress_state,
+                index,
+                label_text="Generating GRE Homefinder monthly layouts...",
+                detail_text=f"{issue_date} — {regular_name}\n{target_name}",
+            )
+    finally:
+        _close_usat_monthly_progress_window(progress_state)
+
+    month_label = f"{calendar.month_name[int(month)]} {int(year)}"
+    report_data = {
+        'created': created,
+        'overwritten': overwritten,
+        'skipped': skipped,
+        'preview_failures': preview_failures,
+        'printed_layouts': printed_layouts,
+        'printed_starters': printed_starters,
+        'print_failures': print_failures,
+        'processed_dates': sorted(processed_dates),
+    }
+    _show_gre_homefinder_monthly_report_dialog(parent, month_label, report_data)
+    return True
+
+
+def _run_launcher_macro(parent, macro_key):
+    key = str(macro_key or '').strip().lower()
+    if key == 'usat_monthly':
+        picked = _show_month_year_picker(parent, title="USAT Monthly")
+        if not picked:
+            return False
+        year, month = picked
+        generation_plan, errors = _resolve_usat_monthly_generation_plan(year, month)
+        if errors:
+            messagebox.showerror("USAT Monthly", "\n".join(error_text for error_text in errors if error_text), parent=parent)
+            return False
+        confirmation = _show_usat_monthly_confirmation(parent, year, month, generation_plan)
+        if not confirmation.get('confirmed'):
+            return False
+        return _generate_usat_monthly_layouts(parent, year, month, generation_plan, overwrite_mode=confirmation.get('overwrite_mode'), print_outputs=confirmation.get('print_outputs'))
+    if key == 'gre_homefinder_monthly':
+        picked = _show_month_year_picker(parent, title="GRE Homefinder Monthly")
+        if not picked:
+            return False
+        year, month = picked
+        generation_plan, errors = _resolve_gre_homefinder_monthly_generation_plan(year, month)
+        if errors:
+            messagebox.showerror("GRE Homefinder Monthly", "\n".join(error_text for error_text in errors if error_text), parent=parent)
+            return False
+        confirmation = _show_gre_homefinder_monthly_confirmation(parent, year, month, generation_plan)
+        if not confirmation.get('confirmed'):
+            return False
+        return _generate_gre_homefinder_monthly_layouts(parent, year, month, generation_plan, overwrite_mode=confirmation.get('overwrite_mode'), print_outputs=confirmation.get('print_outputs'))
+    messagebox.showerror("Macros", f"Unknown macro: {macro_key}", parent=parent)
+    return False
+
+
+def show_launcher_macro_dialog(parent, launcher_username=None):
+    if not _launcher_user_can_open_macros(launcher_username or get_windows_username()):
+        return None
+    existing = getattr(parent, '_launcher_macro_dialog', None)
+    try:
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return existing
+    except Exception:
+        pass
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("Macros")
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.resizable(False, False)
+    remember_window_geometry(dialog, "launcher_macro_dialog", default_geometry="400x260", minsize=(400, 260))
+    parent._launcher_macro_dialog = dialog
+
+    def _cleanup_dialog():
+        try:
+            parent._launcher_macro_dialog = None
+        except Exception:
+            pass
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+
+    outer = ttk.Frame(dialog, padding=12)
+    outer.grid(row=0, column=0, sticky="nsew")
+    outer.columnconfigure(0, weight=1)
+    outer.rowconfigure(1, weight=1)
+
+    ttk.Label(outer, text="Available Macros", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+
+    macros = [
+        ("usat_monthly", "USAT monthly", "Generate USAT layouts for every Monday-Friday issue date in the selected month, show a confirmation summary, choose overwrite or skip for existing layouts, and then display a progress window and end-of-run report."),
+        ("gre_homefinder_monthly", "GRE Homefinder Monthly", "Generate GRE Homefinder layouts for every Sunday issue date in the selected month, show a confirmation summary, optionally print 5 layout copies plus 1 starter sheet per layout, choose overwrite or skip for existing layouts, and then display a progress window and end-of-run report."),
+    ]
+    macro_list = tk.Listbox(outer, exportselection=False, height=max(4, len(macros)))
+    macro_list.grid(row=1, column=0, sticky="nsew", pady=(8, 8))
+    for _macro_key, macro_label, _description in macros:
+        macro_list.insert('end', macro_label)
+    if macros:
+        macro_list.selection_set(0)
+        macro_list.activate(0)
+
+    description_var = tk.StringVar(value=macros[0][2] if macros else '')
+    ttk.Label(outer, textvariable=description_var, wraplength=360, justify='left').grid(row=2, column=0, sticky='w')
+
+    def selected_macro_key():
+        selection = macro_list.curselection()
+        if not selection:
+            return None
+        index = int(selection[0])
+        if index < 0 or index >= len(macros):
+            return None
+        return macros[index][0]
+
+    def refresh_description(_event=None):
+        selection = macro_list.curselection()
+        if not selection:
+            description_var.set('')
+            return
+        index = int(selection[0])
+        if 0 <= index < len(macros):
+            description_var.set(macros[index][2])
+
+    def run_selected_macro(_event=None):
+        macro_key = selected_macro_key()
+        if not macro_key:
+            messagebox.showinfo("Macros", "Please select a macro to run.", parent=dialog)
+            return
+        _run_launcher_macro(dialog, macro_key)
+
+    button_row = ttk.Frame(outer)
+    button_row.grid(row=3, column=0, sticky='e', pady=(10, 0))
+    ttk.Button(button_row, text='Close', command=_cleanup_dialog, width=10).pack(side='right')
+    ttk.Button(button_row, text='Run', command=run_selected_macro, width=10).pack(side='right', padx=(0, 8))
+
+    macro_list.bind('<<ListboxSelect>>', refresh_description)
+    macro_list.bind('<Double-Button-1>', run_selected_macro)
+    dialog.bind('<Return>', run_selected_macro)
+    dialog.bind('<Escape>', lambda _event: _cleanup_dialog())
+    dialog.protocol('WM_DELETE_WINDOW', _cleanup_dialog)
+    refresh_description()
+    try:
+        macro_list.focus_set()
+    except Exception:
+        pass
+    return dialog
+
 def build_main_launcher():  
     ensure_dir(LAYOUTS_DIR)  
     ensure_dir(TEMPLATE_DIR)  
@@ -8420,6 +10397,7 @@ def build_main_launcher():
     allow_launcher_maintenance_actions = is_admin()
     style = ttk.Style(root)
     style.configure("LauncherVersion.TLabel", foreground="#1a73e8")
+    style.configure("LauncherLink.TLabel", foreground="#1a73e8")
     style.configure("AdminFlag.TLabel", foreground="#c62828", font=(None, 10, "bold"))
     paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
     paned.pack(fill="both", expand=True)
@@ -8439,12 +10417,16 @@ def build_main_launcher():
     status_frame.grid(row=0, column=0, sticky="ne")
     if allow_launcher_maintenance_actions:
         ttk.Label(status_frame, text="(ADMIN)", style="AdminFlag.TLabel").grid(row=0, column=0, sticky="e", pady=(0, 2))
-    ttk.Label(status_frame, text=f"User: {launcher_username}", anchor="e", justify="right").grid(
+    username_label = ttk.Label(status_frame, text=f"User: {launcher_username}", anchor="e", justify="right")
+    username_label.grid(
         row=1 if allow_launcher_maintenance_actions else 0,
         column=0,
         sticky="e",
         pady=(0, 2),
     )
+    if _launcher_user_can_open_macros(launcher_username):
+        username_label.configure(style="LauncherLink.TLabel", cursor="hand2")
+        username_label.bind("<Button-1>", lambda _event: show_launcher_macro_dialog(root, launcher_username=launcher_username))
     version_label_var = tk.StringVar(value=_format_version_label(running_version))
     version_label = ttk.Label(status_frame, textvariable=version_label_var, style="LauncherVersion.TLabel", font=(None, 10))
     version_label.grid(row=2 if allow_launcher_maintenance_actions else 1, column=0, sticky="e")
@@ -8500,9 +10482,11 @@ def build_main_launcher():
         tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
     except Exception:
         pass
+    apply_treeview_column_width_state(tree, ("#0",) + tuple(columns), "main_launcher", "layout_tree")
+    bind_treeview_state_memory(root, "main_launcher", "layout_tree", tree, columns=("#0",) + tuple(columns))
     row_by_iid = {}
     group_by_iid = {}
-    sort_state = {"col": "product", "desc": False}  
+    sort_state = load_treeview_sort_state("main_launcher", "layout_tree", "product")  
     refresh_job = {"id": None}  
     auto_refresh_ms = 5000    
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
@@ -8581,16 +10565,12 @@ def build_main_launcher():
             return ""  
         return sorted(rows, key=keyfunc, reverse=sort_state["desc"])  
     def load_rows_into_tree(rows, preserve_selection=None, preserve_focus=None, preserve_yview=None):
-        preserve_selection = tuple(preserve_selection or ())
-        preserve_focus = preserve_focus or None
-        preserve_yview = tuple(preserve_yview or ())
-        preserve_tree_state = bool(preserve_selection or preserve_focus or preserve_yview)
+        reload_state, has_saved_tree_state = get_treeview_reload_state(tree, "main_launcher", "layout_tree", columns=("#0",) + tuple(columns))
+        preserve_selection = tuple(reload_state.get("selected_iids") or preserve_selection or ())
+        preserve_focus = str(reload_state.get("focus_iid") or preserve_focus or "").strip() or None
+        preserve_yview = tuple(reload_state.get("yview") or preserve_yview or ())
+        expanded_group_ids = set(str(iid) for iid in (reload_state.get("open_iids") or []))
         existing_group_ids = tuple(tree.get_children(""))
-        existing_group_id_set = set(existing_group_ids)
-        expanded_group_ids = {
-            iid for iid in existing_group_ids
-            if bool(tree.item(iid, "open"))
-        } if preserve_tree_state else set()
         preserved_selected_rows = [row_by_iid.get(iid) for iid in preserve_selection if iid in row_by_iid]
         preserved_focus_row = row_by_iid.get(preserve_focus) if preserve_focus in row_by_iid else None
         tree.delete(*existing_group_ids)
@@ -8627,7 +10607,7 @@ def build_main_launcher():
         for issue_label in group_labels:
             group_iid = f"__issue_group__::{issue_label}"
             default_open = (issue_label == tomorrow_issue_display)
-            if preserve_tree_state and group_iid in existing_group_id_set:
+            if has_saved_tree_state:
                 should_open = bool(group_iid in expanded_group_ids)
             else:
                 should_open = default_open
@@ -8748,6 +10728,7 @@ def build_main_launcher():
         else:
             sort_state["col"] = col
             sort_state["desc"] = False
+        save_treeview_sort_state("main_launcher", "layout_tree", sort_state)
         refresh(preserve_state=True)
     update_sort_headings()
     search_var.trace_add("write", lambda *_: refresh(preserve_state=False))

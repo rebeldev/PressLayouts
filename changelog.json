@@ -1,6 +1,164 @@
 {
-  "current_version": "1.2.11",
+  "current_version": "1.2.21",
   "versions": [
+    {
+      "version": "1.2.21",
+      "released": "6-19-2026",
+      "summary": "Adds a GRE Homefinder Monthly launcher macro for Sunday-only layout generation and printing.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a GRE Homefinder Monthly macro for JSaalsaa and MBradbury that clones the USAT monthly workflow using the regular GRE Homefinder source.",
+            "Configured the GRE Homefinder Monthly macro to generate layouts only for Sunday issue dates in the selected month and optionally print each layout with its starter sheet."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.20",
+      "released": "6-19-2026",
+      "summary": "Fixes layout save template prompts so matching database templates are recognized.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed layout save/save-as template prompting so matching templates stored in the PostgreSQL template collection are recognized instead of only checking legacy flat-file template JSON files.",
+            "Kept the imposition-name and structural template matching fallback so renamed templates still suppress the unnecessary save-template prompt."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.19",
+      "released": "6-19-2026",
+      "summary": "Fixes starter-sheet font helper references introduced by the USAT monthly print additions.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the shared starter-sheet renderer helpers to call the existing _render_load_starter_font function so editor diagnostics no longer flag _load_starter_font as undefined.",
+            "Kept the USAT monthly print helpers aligned with the existing starter-sheet rendering code path so printing support continues to compile cleanly."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.18",
+      "released": "6-19-2026",
+      "summary": "Fixes USAT monthly printing so selected generated layouts and starter sheets are actually sent to the default printer.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the USAT monthly macro so choosing the Print option now actually prints each generated layout and starter sheet during the run instead of only recording the setting in the confirmation dialog.",
+            "Fixed the USAT monthly report counts so printed layouts, printed starter sheets, and print failures now reflect the actual work performed by the macro."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.17",
+      "released": "6-19-2026",
+      "summary": "Adds optional USAT monthly printing for generated layouts and starter sheets.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a Print option to the USAT monthly confirmation dialog so users can choose whether to print generated output before running the macro.",
+            "Added automatic USAT monthly printing that sends 5 copies of each generated layout and 1 copy of each generated starter sheet to the default printer when the Print option is selected."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the USAT monthly completion report to show printed layouts, printed starter sheets, and any print failures alongside creation, overwrite, skip, and preview results."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.16",
+      "released": "6-18-2026",
+      "summary": "Adds a progress window and report dialog to the USAT monthly macro.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a progress window to the USAT monthly macro that shows the current issue date, regular name, target filename, and overall item progress while layouts are being generated.",
+            "Added a report dialog at the end of the USAT monthly macro run that lists processed issue dates plus the layouts that were created, overwritten, skipped, and any preview failures."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.15",
+      "released": "6-18-2026",
+      "summary": "Adds a USAT monthly confirmation summary and overwrite-or-skip handling for existing layouts.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a confirmation summary before the USAT monthly macro runs showing the selected month, weekday issue-date count, layout count, and how many target layouts already exist.",
+            "Added overwrite and skip options for existing target layouts in the USAT monthly macro run confirmation dialog."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Updated the USAT monthly macro completion flow so results are shown in a detailed report after generation instead of a simple count-only finish message."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.14",
+      "released": "6-18-2026",
+      "summary": "Adds launcher macros with a USAT monthly generator for selected users.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a clickable username link in the top right corner of the main launcher for JSaalsaa and MBradbury that opens a Macros dialog with a Run button.",
+            "Added a USAT monthly macro with a month/year picker that generates USAT layouts for every weekday issue date in the chosen month from the matching regulars."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Configured the USAT monthly macro so Monday through Thursday issues use the USAT A&B and USAT C&D regulars, while Friday issues use the USAT A&D and USAT B&C regulars."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.13",
+      "released": "6-18-2026",
+      "summary": "New Layout now remembers whether each user last used Standard mode or From Regular mode.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the New Layout window to save and restore whether each user last used Standard mode or From Regular mode.",
+            "Stored the per-user New Layout mode preference in the same user-specific window state JSON used for geometry and other remembered view settings."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.12",
+      "released": "6-18-2026",
+      "summary": "Saves and restores each user's treeview view state, including expansion, selection, scroll, sort, and column sizes.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the main launcher, New Layout, Template Editor, and Regular Editor to save and restore each user's treeview expand/collapse state, selected row, scroll position, sort order, and column widths.",
+            "Stored the per-user treeview view state alongside the existing user-specific window size and position data without letting geometry saves overwrite the treeview settings."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.2.11",
       "released": "6-18-2026",
