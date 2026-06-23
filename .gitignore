@@ -1,5 +1,3 @@
-Backup/
-Layouts/
-Templates/
-Regular/
 __pycache__/
+Compile/build/
+Compile/dist/

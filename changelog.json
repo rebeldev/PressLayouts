@@ -1,6 +1,298 @@
 {
-  "current_version": "1.2.21",
+  "current_version": "1.3.10",
   "versions": [
+    {
+      "version": "1.3.10",
+      "released": "6-23-2026",
+      "summary": "Uses a custom always-on-top dialog for the single-instance warning instead of a standard message box.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the single-instance warning to use a custom Press Layouts dialog that stays always on top until dismissed, instead of the default message box."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.9",
+      "released": "6-23-2026",
+      "summary": "Hardens the single-instance launcher guard so duplicate starts now reliably refocus the existing window and show the one-instance warning.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed main launcher single-instance enforcement by replacing the previous startup guard with a stronger Windows mutex plus activation listener approach.",
+            "Fixed duplicate Press Layouts launches so the already-running launcher or startup dialog is brought to the front and shows a one-instance warning instead of allowing another main launcher to open."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.8",
+      "released": "6-23-2026",
+      "summary": "Limits Press Layouts to one launcher instance and brings the existing launcher to the front when another start is attempted.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed startup so only one Press Layouts main launcher instance can run at a time.",
+            "Changed second-launch attempts so the existing Press Layouts window is brought to the front and shows a message that only one main launcher instance can be run at a time."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.7",
+      "released": "6-23-2026",
+      "summary": "Makes the update notification open above every window and stay always on top until dismissed.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the newer-version update notification so it opens above all other windows and remains always on top until it is closed or Restart is chosen."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.6",
+      "released": "6-23-2026",
+      "summary": "Removes the main launcher preview pane label/header entirely while keeping the preview resize handle intact.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the main launcher preview pane to remove the Preview label/header entirely while keeping the resize sash and preview area behavior the same."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.5",
+      "released": "6-23-2026",
+      "summary": "Tightens the main launcher preview title area by replacing the bulky label-frame header with a smaller compact header.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the main launcher preview pane to use a compact Preview header instead of the larger default labelframe title area so more height is available for the preview image."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.4",
+      "released": "6-23-2026",
+      "summary": "Removes more wasted vertical space around the main launcher button row so the preview gets more usable height.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the main launcher upper pane padding so there is less blank space below the button row before the preview sash.",
+            "Changed the main launcher button row spacing so the buttons sit much closer to both the treeview and the preview sash.",
+            "Changed the main launcher preview frame padding slightly so a little more of the lower pane height goes to the preview area itself."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.3",
+      "released": "6-23-2026",
+      "summary": "Tightens the launcher button-to-preview spacing and makes the database selector remember its window position.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the main launcher button row to reduce the space below it so the preview pane gets a little more vertical room.",
+            "Changed the admin Live/Test database selector window so it now remembers its last window position like the other remembered windows."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.2",
+      "released": "6-23-2026",
+      "summary": "Condenses the launcher status line, moves database connection status into DB Maintenance, and gives the main preview more room.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the main launcher top row so the Live/Test database label, (ADMIN) flag, username, and version appear together on one line at the right side opposite the Layouts label.",
+            "Changed the main launcher filters so Search now sits on its own row, while Issue Date appears before Press and Format on the filter row.",
+            "Changed the main launcher action-button row padding to 10 pixels above and below so the preview area has a little more room.",
+            "Moved the pulsing database connection status bar out of the main launcher preview area and into the DB Maintenance window."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.1",
+      "released": "6-23-2026",
+      "summary": "Shows the Live/Test database label only for admins and places it on the same line as the admin status flag.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the main launcher top-right status so the Live/Test database label is shown only for admins.",
+            "Changed the admin status area so the Live/Test database label appears on the same line as the (ADMIN) label instead of on its own row."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.0",
+      "released": "6-23-2026",
+      "summary": "First release of the shared launcher using compiled binaries.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added the shared launcher executable with compiled binaries."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.29",
+      "released": "6-23-2026",
+      "summary": "Update-detected restarts now relaunch Press Layouts through the shared launcher path.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the newer-version update dialog so choosing Restart relaunches Press Layouts from L:\\PressLayouts\\launcher\\press_layouts_launcher.exe when that launcher is available.",
+            "Changed restart requests triggered by shared restart flows to fall back to the existing launcher-managed restart exit code only when the shared launcher executable cannot be started."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.28",
+      "released": "6-23-2026",
+      "summary": "Bumped version to 1.2.28 for a new release with the same changelog as 1.2.27.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a launcher status indicator that shows whether Press Layouts is currently connected using the Live or Test database selection."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Changed EXE distribution startup so changelog.json is read from L:\\changelog.json and the live database config is read from L:\\press_layouts_db.json.",
+            "Changed admin startup for MBradbury so launch now prompts for Live or Test database selection, with Test using L:\\working\\press_layouts_db.json.",
+            "Changed restart after update checks and restart after database restore to relaunch L:\\press_layout.exe instead of the extracted temporary runtime or a Python script."
+          ]
+        },
+        {
+          "category": "Removed",
+          "items": [
+            "Removed runtime dependency install checks and prompts from the EXE build since packaged distributions already contain the required dependencies."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.27",
+      "released": "6-23-2026",
+      "summary": "Adds a visible live/test database indicator in the launcher and aligns EXE distribution settings with shared L:\\ files and relaunch behavior.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a launcher status indicator that shows whether Press Layouts is currently connected using the Live or Test database selection."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Changed EXE distribution startup so changelog.json is read from L:\\changelog.json and the live database config is read from L:\\press_layouts_db.json.",
+            "Changed admin startup for MBradbury so launch now prompts for Live or Test database selection, with Test using L:\\working\\press_layouts_db.json.",
+            "Changed restart after update checks and restart after database restore to relaunch L:\\press_layout.exe instead of the extracted temporary runtime or a Python script."
+          ]
+        },
+        {
+          "category": "Removed",
+          "items": [
+            "Removed runtime dependency install checks and prompts from the EXE build since packaged distributions already contain the required dependencies."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.26",
+      "released": "6-22-2026",
+      "summary": "Uses icon.ico as the window icon for the launcher and child dialogs when the file is present beside the script.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the launcher and child window creation flow to apply icon.ico from the script folder as the application window icon whenever the file is available."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.25",
+      "released": "6-22-2026",
+      "summary": "Ensures monthly macro confirmation dialogs open large enough on first run so controls are not cut off.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the USAT Monthly, GRE Homefinder Monthly, and shared Sunday-only monthly macro confirmation dialogs so they auto-expand to fit their full content on first run instead of opening too short and cutting off controls."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.24",
+      "released": "6-22-2026",
+      "summary": "Adds four new Sunday-only comics monthly macros for AUG, GRE, RAL, and USAT CO.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added AUG COMICS Monthly, GRE COMICS Monthly, RAL COMICS Monthly, and USAT CO COMICS Monthly launcher macros for JSaalsaa and MBradbury by cloning the GRE Homefinder monthly Sunday-only workflow and pointing each macro at its matching regular."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the shared Sunday-only monthly macro flow so GRE Homefinder and the new comics macros all use the same confirmation summary, separate layout and starter-sheet print options, progress window, and end-of-run report structure."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.23",
+      "released": "6-22-2026",
+      "summary": "Splits monthly macro printing options so layouts and starter sheets can be printed independently.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the USAT Monthly and GRE Homefinder Monthly confirmation dialogs so Print generated output now uses separate checkboxes for layouts and starter sheets, allowing either option or both to be selected.",
+            "Changed the USAT Monthly and GRE Homefinder Monthly macro runs so layout printing and starter-sheet printing now follow the individual confirmation checkbox selections instead of a single combined print toggle."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.2.22",
+      "released": "6-22-2026",
+      "summary": "Cloned layouts now keep the existing product name while clearing the issue date for the new copy.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed layout cloning from the main launcher so new cloned layouts keep the source layout's product name instead of clearing it, while still blanking the issue date for the new copy."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.2.21",
       "released": "6-19-2026",
@@ -908,5 +1200,17 @@
         }
       ]
     }
-  ]
+  ],
+  "distribution": {
+    "manifest_version": 1,
+    "package_type": "onedir",
+    "release_root": "L:\\\\PressLayouts\\\\releases",
+    "current_release": "1.3.10",
+    "entry_exe": "press_layouts.exe",
+    "launcher_exe": "press_layouts_launcher.exe",
+    "local_root": "%LOCALAPPDATA%\\\\PressLayouts",
+    "retain_local_versions": 3,
+    "notes": "Press Layouts launcher uses this block plus current_version to locate and cache the active onedir release.",
+    "launcher_root": "L:\\PressLayouts\\launcher"
+  }
 }

@@ -1,11 +1,3 @@
-"""Press Layout application (single-file consolidated build).
-
-This standalone script combines:
-- press_layout_core.py
-- press_layout_ui.py
-- press_layout_entry.py
-"""
-
 # ===== BEGIN: original press_layout_core.py =====
 import os
 import json
@@ -16,11 +8,36 @@ import getpass
 import subprocess
 import importlib
 import importlib.util
+import threading
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 _RUNTIME_DEPENDENCY_CHECK_COMPLETE = False
+WINDOW_ICON_FILENAME = "l:\\icon.ico"
+
+def _window_icon_path() -> str:
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base_dir = os.getcwd()
+    return os.path.join(base_dir, WINDOW_ICON_FILENAME)
+
+def set_window_icon(win):
+    if win is None:
+        return
+    icon_path = _window_icon_path()
+    if not os.path.exists(icon_path):
+        return
+    try:
+        win.iconbitmap(default=icon_path)
+        return
+    except Exception:
+        pass
+    try:
+        win.iconbitmap(icon_path)
+    except Exception:
+        pass
 
 
 def _runtime_module_available(module_name: str) -> bool:
@@ -73,95 +90,203 @@ def _install_runtime_package(package_name: str):
 
 def ensure_runtime_dependencies(parent=None, force=False, prompt_user=True):
     global _RUNTIME_DEPENDENCY_CHECK_COMPLETE
-    if _RUNTIME_DEPENDENCY_CHECK_COMPLETE and not force:
-        return True
-
-    missing = _collect_missing_runtime_dependencies()
-    if not missing:
-        _RUNTIME_DEPENDENCY_CHECK_COMPLETE = True
-        return True
-
-    if not prompt_user:
-        return False
-
-    missing_names = ", ".join(item.get("display") or "dependency" for item in missing)
-    try:
-        install_now = messagebox.askyesno(
-            "Install Required Dependencies",
-            (
-                "Press Layouts is missing required dependencies:\n\n"
-                + missing_names
-                + "\n\nWould you like Press Layouts to install them now?\n\n"
-                + "The program will continue loading or restarting after the install succeeds."
-            ),
-            parent=parent,
-        )
-    except Exception:
-        install_now = False
-
-    if not install_now:
-        try:
-            messagebox.showerror(
-                "Missing Dependencies",
-                "Press Layouts cannot continue without those dependencies.\n\n"
-                + "Please install them manually or allow the automatic install the next time the program starts.",
-                parent=parent,
-            )
-        except Exception:
-            pass
-        return False
-
-    failures = []
-    installed = []
-    for dependency in missing:
-        display_name = dependency.get("display") or "dependency"
-        success = False
-        last_error = None
-        for package_name in dependency.get("packages") or []:
-            try:
-                _install_runtime_package(package_name)
-                success = True
-                installed.append(display_name)
-                break
-            except Exception as exc:
-                last_error = exc
-        if not success:
-            failures.append((display_name, str(last_error or "Unknown install failure")))
-
-    try:
-        importlib.invalidate_caches()
-    except Exception:
-        pass
-
-    still_missing = _collect_missing_runtime_dependencies()
-    if failures or still_missing:
-        error_lines = [f"• {name}: {msg}" for name, msg in failures]
-        unresolved = [item.get("display") or "dependency" for item in still_missing]
-        if unresolved:
-            error_lines.append("• Still missing after install attempt: " + ", ".join(unresolved))
-        try:
-            messagebox.showerror(
-                "Dependency Install Failed",
-                "Press Layouts could not install all required dependencies.\n\n" + "\n".join(error_lines),
-                parent=parent,
-            )
-        except Exception:
-            pass
-        return False
-
     _RUNTIME_DEPENDENCY_CHECK_COMPLETE = True
-    try:
-        messagebox.showinfo(
-            "Dependencies Installed",
-            "Press Layouts installed the required dependencies successfully.\n\nInstalled: " + ", ".join(dict.fromkeys(installed)),
-            parent=parent,
-        )
-    except Exception:
-        pass
     return True
 
 # ===== BEGIN: config.py =====
 MAIN_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED_ROOT_DIR = "L:\\"
+SHARED_WORKING_ROOT_DIR = "L:\\working"
+SHARED_CHANGELOG_PATH = os.path.join(SHARED_ROOT_DIR, "changelog.json")
+SHARED_LIVE_DB_CONFIG_PATH = os.path.join(SHARED_ROOT_DIR, "press_layouts_db.json")
+SHARED_TEST_DB_CONFIG_PATH = os.path.join(SHARED_WORKING_ROOT_DIR, "press_layouts_db.json")
+SHARED_EXE_PATH = os.path.join(SHARED_ROOT_DIR, "press_layout.exe")
+SHARED_EXE_FALLBACK_PATH = os.path.join(SHARED_ROOT_DIR, "press_layouts.exe")
+SHARED_LAUNCHER_EXE_PATH = os.path.join(SHARED_ROOT_DIR, "PressLayouts", "launcher", "press_layouts_launcher.exe")
+SHARED_LAUNCHER_EXE_FALLBACK_PATH = os.path.join(SHARED_ROOT_DIR, "press_layouts_launcher.exe")
+
+def _shared_launcher_executable_candidates():
+    candidates = []
+    for value in (SHARED_LAUNCHER_EXE_PATH, SHARED_LAUNCHER_EXE_FALLBACK_PATH):
+        path = str(value or "").strip()
+        if path and path not in candidates:
+            candidates.append(path)
+    return candidates
+
+def _resolve_shared_launcher_executable_path():
+    candidates = _shared_launcher_executable_candidates()
+    for candidate in candidates:
+        try:
+            if os.path.exists(candidate):
+                return candidate
+        except Exception:
+            pass
+    return candidates[0] if candidates else ""
+
+def _shared_executable_candidates():
+    candidates = []
+    for value in (SHARED_EXE_PATH, SHARED_EXE_FALLBACK_PATH):
+        path = str(value or "").strip()
+        if path and path not in candidates:
+            candidates.append(path)
+    return candidates
+
+def _resolve_shared_executable_path():
+    candidates = _shared_executable_candidates()
+    for candidate in candidates:
+        try:
+            if os.path.exists(candidate):
+                return candidate
+        except Exception:
+            pass
+    return candidates[0] if candidates else ""
+
+SELECTED_DB_CONFIG_PATH = SHARED_LIVE_DB_CONFIG_PATH
+SELECTED_DB_CONFIG_LABEL = "Live"
+
+def _set_selected_db_config_path(path, label=None):
+    global SELECTED_DB_CONFIG_PATH, SELECTED_DB_CONFIG_LABEL
+    SELECTED_DB_CONFIG_PATH = str(path or SHARED_LIVE_DB_CONFIG_PATH)
+    SELECTED_DB_CONFIG_LABEL = str(label or "Live").strip() or "Live"
+    return SELECTED_DB_CONFIG_PATH
+
+def get_selected_db_config_path():
+    return str(SELECTED_DB_CONFIG_PATH or SHARED_LIVE_DB_CONFIG_PATH)
+
+def get_selected_db_config_label():
+    return str(SELECTED_DB_CONFIG_LABEL or "Live")
+
+def prompt_admin_db_config_selection():
+    selected_path = SHARED_LIVE_DB_CONFIG_PATH
+    selected_label = "Live"
+    if not is_admin():
+        _set_selected_db_config_path(selected_path, selected_label)
+        return True
+
+    dialog = None
+    result = {"selection": None}
+    try:
+        dialog = tk.Tk()
+        set_window_icon(dialog)
+        dialog.withdraw()
+        dialog.title("Select Database")
+        dialog.resizable(False, False)
+
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+
+        ttk.Label(body, text="Select Database", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+        message = (
+            "Choose which database Press Layouts should use for this launch.\n\n"
+            f"TEST: {SHARED_TEST_DB_CONFIG_PATH}\n"
+            f"LIVE: {SHARED_LIVE_DB_CONFIG_PATH}"
+        )
+        ttk.Label(body, text=message, justify="left", wraplength=420).grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+        button_row = ttk.Frame(body)
+        button_row.grid(row=2, column=0, sticky="e", pady=(18, 0))
+
+        def _close_with(value):
+            result["selection"] = value
+            try:
+                dialog.quit()
+            except Exception:
+                pass
+
+        ttk.Button(button_row, text="TEST", width=12, command=lambda: _close_with("test")).pack(side="left", padx=(0, 8))
+        ttk.Button(button_row, text="LIVE", width=12, command=lambda: _close_with("live")).pack(side="left", padx=(0, 8))
+        ttk.Button(button_row, text="Cancel", width=12, command=lambda: _close_with(None)).pack(side="left")
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: _close_with(None))
+        dialog.update_idletasks()
+        req_w = max(440, int(dialog.winfo_reqwidth()))
+        req_h = max(180, int(dialog.winfo_reqheight()))
+        vroot_x = int(dialog.winfo_vrootx())
+        vroot_y = int(dialog.winfo_vrooty())
+        vroot_w = int(dialog.winfo_vrootwidth())
+        vroot_h = int(dialog.winfo_vrootheight())
+        if vroot_w <= 0:
+            vroot_w = int(dialog.winfo_screenwidth())
+        if vroot_h <= 0:
+            vroot_h = int(dialog.winfo_screenheight())
+        x = int(vroot_x + max(0, (vroot_w - req_w) / 2))
+        y = int(vroot_y + max(0, (vroot_h - req_h) / 2))
+        default_geometry = f"{req_w}x{req_h}+{x}+{y}"
+        try:
+            remember_window_geometry(
+                dialog,
+                "db_config_selection_dialog",
+                default_geometry=default_geometry,
+                minsize=(req_w, req_h),
+            )
+        except Exception:
+            dialog.geometry(default_geometry)
+        try:
+            dialog.deiconify()
+        except Exception:
+            pass
+        try:
+            dialog.lift()
+        except Exception:
+            pass
+        try:
+            dialog.attributes("-topmost", True)
+            dialog.after(250, lambda: dialog.attributes("-topmost", False))
+        except Exception:
+            pass
+        try:
+            dialog.focus_force()
+        except Exception:
+            pass
+        register_single_instance_window(dialog)
+        try:
+            dialog.mainloop()
+        except Exception:
+            pass
+    finally:
+        if dialog is not None:
+            try:
+                unregister_single_instance_window(dialog)
+            except Exception:
+                pass
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+    selection = result.get("selection")
+    if selection is None:
+        return False
+    if str(selection).strip().lower() == "test":
+        selected_path = SHARED_TEST_DB_CONFIG_PATH
+        selected_label = "Test"
+
+    if not os.path.exists(selected_path):
+        error_parent = None
+        try:
+            error_parent = tk.Tk()
+            error_parent.withdraw()
+            set_window_icon(error_parent)
+        except Exception:
+            error_parent = None
+        try:
+            messagebox.showerror(
+                "Database Config Missing",
+                f"Could not find the selected database config:\n{selected_path}",
+                parent=error_parent,
+            )
+        finally:
+            if error_parent is not None:
+                try:
+                    error_parent.destroy()
+                except Exception:
+                    pass
+        return False
+
+    _set_selected_db_config_path(selected_path, selected_label)
+    return True
+
 LAYOUTS_DIR = "__DB_LAYOUTS__"
 TEMPLATE_DIR = "__DB_TEMPLATES__"
 REGULAR_DIR = "__DB_REGULAR__"
@@ -3018,6 +3143,7 @@ import json
 import calendar
 import re
 import sys
+import threading
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -3066,6 +3192,7 @@ def ask_issue_date_with_calendar(parent, initial_text="", anchor_widget=None, ti
     result = {"value": None}
 
     dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
     dialog.title(title)
     try:
         dialog.transient(parent)
@@ -5337,6 +5464,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
 
         result = {}
         dialog = tk.Toplevel(win)
+        set_window_icon(dialog)
         dialog.title(dialog_title or "Print")
         dialog.transient(win)
         dialog.resizable(False, False)
@@ -6161,6 +6289,15 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                             pass
                         try:
                             product_entry.delete(0, "end")
+                        except Exception:
+                            pass
+                    elif config.get("copy_blank_issue_only", False):
+                        try:
+                            issue_entry.state(["!disabled"])
+                        except Exception:
+                            pass
+                        try:
+                            issue_entry.delete(0, "end")
                         except Exception:
                             pass
                     elif config.get("copy_issue_date_tomorrow", False):
@@ -7014,6 +7151,7 @@ def open_json_in_layout(
     template_mode=False,
     load_as_copy=False,
     copy_blank_issue_product=False,
+    copy_blank_issue_only=False,
     default_dir=None,
     prompt_save_template=None,
     copy_issue_date_tomorrow=False,
@@ -7037,6 +7175,7 @@ def open_json_in_layout(
     cfg["template_mode"] = bool(template_mode)
     cfg["regular_mode"] = (not bool(template_mode)) and bool(default_dir) and os.path.abspath(default_dir) == os.path.abspath(REGULAR_DIR)
     cfg["copy_blank_issue_product"] = bool(copy_blank_issue_product)
+    cfg["copy_blank_issue_only"] = bool(copy_blank_issue_only)
     cfg["copy_issue_date_tomorrow"] = bool(copy_issue_date_tomorrow)
     if default_dir:
         cfg["default_dir"] = default_dir
@@ -7044,6 +7183,7 @@ def open_json_in_layout(
         cfg["prompt_save_template"] = bool(prompt_save_template)
     title = f"{press} - {fmt}"
     win = tk.Toplevel(root)
+    set_window_icon(win)
     win.withdraw()
     build_press_layout(
         win,
@@ -7321,6 +7461,7 @@ def open_new_template(parent):
     """Open a new blank layout in template mode."""
     # Create a simple dialog to select Press and Format
     dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
     dialog.title("New Template")
     dialog.transient(parent)
     dialog.grab_set()
@@ -7375,6 +7516,7 @@ def open_new_template(parent):
     cfg["template_mode"] = True
     
     win = tk.Toplevel(parent)
+    set_window_icon(win)
     win.withdraw()
     build_press_layout(
         win,
@@ -7388,6 +7530,7 @@ def open_new_template(parent):
 def open_new_regular(parent):
     """Open a new blank regular publication layout."""
     dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
     dialog.title("New Regular")
     dialog.transient(parent)
     dialog.grab_set()
@@ -7432,12 +7575,14 @@ def open_new_regular(parent):
     cfg["prompt_save_template"] = False
 
     win = tk.Toplevel(parent)
+    set_window_icon(win)
     win.withdraw()
     build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=None, load_as_copy=False)
 
 
 def build_new_layout_launcher(parent):
     root = tk.Toplevel(parent)
+    set_window_icon(root)
     root.title("New Layout")
     root.geometry("1180x760")
     root.minsize(1040, 680)
@@ -7446,7 +7591,7 @@ def build_new_layout_launcher(parent):
 
     paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
     paned.pack(fill="both", expand=True)
-    frame = ttk.Frame(paned, padding=16)
+    frame = ttk.Frame(paned, padding=(16, 16, 16, 4))
     paned.add(frame, stretch="always", minsize=220)
     frame.columnconfigure(1, weight=1)
     frame.rowconfigure(4, weight=1)
@@ -7584,7 +7729,7 @@ def build_new_layout_launcher(parent):
     refresh_button = ttk.Button(btn_row, text="Refresh Templates", width=16)
     refresh_button.pack(side="left")
 
-    preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
+    preview_box = ttk.LabelFrame(paned, text="Preview", padding=(8, 4, 8, 8))
     preview_box.columnconfigure(0, weight=1)
     preview_label = ttk.Label(preview_box, text="Select a template to preview", anchor="center", justify="center")
     preview_label.grid(row=0, column=0, sticky="nsew")
@@ -7935,6 +8080,7 @@ def build_new_layout_launcher(parent):
             cfg["template_mode"] = False
             close_preview()
             win = tk.Toplevel(parent)
+            set_window_icon(win)
             build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=template_path, load_as_copy=True)
             root.destroy()
             return
@@ -7957,6 +8103,7 @@ def build_new_layout_launcher(parent):
         cfg["template_mode"] = False
         close_preview()
         win = tk.Toplevel(parent)
+        set_window_icon(win)
         build_press_layout(win, title=f"{press} - {fmt}", config=cfg, load_path=None, load_as_copy=True)
         root.destroy()
     def on_new_or_open():
@@ -8038,6 +8185,7 @@ def build_new_layout_launcher(parent):
     return root
 def build_template_editor_launcher(parent):
     root = tk.Toplevel(parent)
+    set_window_icon(root)
     root.title("Template Editor")
     root.geometry("900x700")
     root.minsize(820, 620)
@@ -8459,6 +8607,7 @@ def _load_layout_color_and_plate_counts(path):
 
 def build_regular_editor_launcher(parent):
     root = tk.Toplevel(parent)
+    set_window_icon(root)
     root.title("Regular Editor")
     root.geometry("980x720")
     root.minsize(900, 640)
@@ -8754,7 +8903,7 @@ def build_regular_editor_launcher(parent):
     return root
 
 
-CHANGELOG_PATH = os.path.join(MAIN_DIR, "changelog.json")
+CHANGELOG_PATH = SHARED_CHANGELOG_PATH
 DEFAULT_CHANGELOG_DATA = {
     "current_version": "1.0.1",
     "versions": [
@@ -8892,48 +9041,123 @@ def _get_changelog_current_version_value(changelog_data=None):
     entry = get_current_changelog_entry(data)
     return _normalize_version_text(entry.get("version"))
 
-def restart_press_layout_program(root=None):
-    if not ensure_runtime_dependencies(parent=root, force=True, prompt_user=True):
-        return
-    python_executable = sys.executable or "python"
-    if getattr(sys, "frozen", False):
-        restart_args = [python_executable]
-    else:
-        script_path = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else os.path.join(MAIN_DIR, "press_layout_entry.py")
-        restart_args = [python_executable, script_path]
-        if len(sys.argv) > 1:
-            restart_args.extend(sys.argv[1:])
+
+LAUNCHER_MANAGED_ENV_VAR = "PRESS_LAYOUTS_MANAGED_BY_LAUNCHER"
+LAUNCHER_SHARED_CHANGELOG_ENV_VAR = "PRESS_LAYOUTS_SHARED_CHANGELOG_PATH"
+LAUNCHER_RESTART_EXIT_CODE = 42
+
+
+def _launcher_managed_restart_enabled():
+    return str(os.environ.get(LAUNCHER_MANAGED_ENV_VAR, "")).strip() == "1"
+
+
+def _launcher_restart_available():
+    launcher_path = str(_resolve_shared_launcher_executable_path() or "").strip()
+    if not launcher_path:
+        return False
     try:
-        os.chdir(MAIN_DIR)
+        return os.path.exists(launcher_path)
+    except Exception:
+        return False
+
+
+def _relaunch_press_layout_from_launcher():
+    launcher_path = str(_resolve_shared_launcher_executable_path() or "").strip()
+    if not launcher_path:
+        raise RuntimeError("The Press Layouts launcher path is not configured.")
+    if not os.path.exists(launcher_path):
+        raise RuntimeError(f"The Press Layouts launcher was not found at:\n\n{launcher_path}")
+    popen_kwargs = {}
+    launch_dir = os.path.dirname(launcher_path)
+    if launch_dir:
+        popen_kwargs["cwd"] = launch_dir
+    if os.name == "nt":
+        creationflags = 0
+        creationflags |= int(getattr(subprocess, "DETACHED_PROCESS", 0) or 0)
+        creationflags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) or 0)
+        if creationflags:
+            popen_kwargs["creationflags"] = creationflags
+    subprocess.Popen([launcher_path], **popen_kwargs)
+    return launcher_path
+
+
+def _shutdown_root_for_restart(root=None):
+    if root is None:
+        return
+    try:
+        _persist_bound_preview_panes(root)
     except Exception:
         pass
-    if root is not None:
-        try:
-            _persist_bound_preview_panes(root)
-        except Exception:
-            pass
-        try:
-            root.update_idletasks()
-        except Exception:
-            pass
-        try:
-            root.destroy()
-        except Exception:
-            pass
-    os.execv(python_executable, restart_args)
+    try:
+        root.update_idletasks()
+    except Exception:
+        pass
+    try:
+        root.destroy()
+    except Exception:
+        pass
+
+
+def restart_press_layout_program(root=None):
+    """
+    Restart Press Layouts by relaunching the shared launcher when it is available.
+
+    This keeps update-driven restarts and database-restore restarts on the same
+    launcher-managed path, so the latest shared build is reopened instead of
+    relying only on an exit code or asking the user to launch it manually.
+    """
+    restart_error = None
+    try:
+        _relaunch_press_layout_from_launcher()
+    except Exception as exc:
+        restart_error = exc
+    else:
+        _shutdown_root_for_restart(root)
+        return True
+
+    if _launcher_managed_restart_enabled():
+        _shutdown_root_for_restart(root)
+        raise SystemExit(LAUNCHER_RESTART_EXIT_CODE)
+
+    raise RuntimeError(f"Could not relaunch Press Layouts from the launcher.\n\n{restart_error}")
 
 def show_restart_required_dialog(parent, running_version, latest_version):
+    def _raise_restart_dialog(target_dialog, force_focus=False):
+        if target_dialog is None:
+            return
+        try:
+            if not target_dialog.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            target_dialog.deiconify()
+        except Exception:
+            pass
+        try:
+            target_dialog.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            target_dialog.lift()
+        except Exception:
+            pass
+        if force_focus:
+            try:
+                target_dialog.focus_force()
+            except Exception:
+                pass
+
     existing = getattr(parent, "_restart_required_dialog", None)
     try:
         if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_force()
+            _raise_restart_dialog(existing, force_focus=True)
             return existing
     except Exception:
         pass
 
     dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
     parent._restart_required_dialog = dialog
     dialog.title("Update Available")
     try:
@@ -8945,16 +9169,21 @@ def show_restart_required_dialog(parent, running_version, latest_version):
     except Exception:
         pass
     dialog.resizable(False, False)
-    remember_window_geometry(dialog, "restart_required_dialog", default_geometry="520x220", minsize=(520, 220))
+    remember_window_geometry(dialog, "restart_required_dialog", default_geometry="520x230", minsize=(520, 230))
 
     body = ttk.Frame(dialog, padding=16)
     body.pack(fill="both", expand=True)
     body.columnconfigure(0, weight=1)
 
     ttk.Label(body, text="A newer version of Press Layouts is available.", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    restart_cta = (
+        "Please save your work and choose Restart to relaunch Press Layouts from the launcher."
+        if (_launcher_restart_available() or _launcher_managed_restart_enabled())
+        else "Please save your work and close Press Layouts. Reopen it from the launcher to load the latest version."
+    )
     message = (
         f"You are using {_format_version_label(running_version)}, but {_format_version_label(latest_version)} is now available.\n\n"
-        "Please save your work and restart the program to load the latest version."
+        f"{restart_cta}"
     )
     ttk.Label(body, text=message, justify="left", wraplength=460).grid(row=1, column=0, sticky="w", pady=(10, 0))
 
@@ -8962,6 +9191,10 @@ def show_restart_required_dialog(parent, running_version, latest_version):
     button_row.grid(row=2, column=0, sticky="e", pady=(18, 0))
 
     def _close_dialog():
+        try:
+            dialog.attributes("-topmost", False)
+        except Exception:
+            pass
         try:
             dialog.grab_release()
         except Exception:
@@ -8980,16 +9213,15 @@ def show_restart_required_dialog(parent, running_version, latest_version):
         except Exception as exc:
             messagebox.showerror("Restart Failed", f"Could not restart Press Layouts.\n\n{exc}")
 
-    ttk.Button(button_row, text="Restart", command=_restart_now, width=12).pack(side="left", padx=(0, 8))
+    restart_button_text = "Restart" if (_launcher_restart_available() or _launcher_managed_restart_enabled()) else "Close"
+    ttk.Button(button_row, text=restart_button_text, command=_restart_now, width=12).pack(side="left", padx=(0, 8))
     ttk.Button(button_row, text="Cancel", command=_close_dialog, width=12).pack(side="left")
 
     dialog.protocol("WM_DELETE_WINDOW", _close_dialog)
     dialog.bind("<Escape>", lambda _event: _close_dialog())
-    try:
-        dialog.lift()
-        dialog.focus_force()
-    except Exception:
-        pass
+    dialog.bind("<Map>", lambda _event: dialog.after_idle(lambda: _raise_restart_dialog(dialog, force_focus=False)), add="+")
+    dialog.bind("<Visibility>", lambda _event: dialog.after_idle(lambda: _raise_restart_dialog(dialog, force_focus=False)), add="+")
+    _raise_restart_dialog(dialog, force_focus=True)
     return dialog
 
 def check_for_required_restart(parent, running_version):
@@ -9086,6 +9318,7 @@ def show_changelog_dialog(parent):
 
     changelog_data = load_changelog_data()
     dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
     parent._changelog_dialog = dialog
     dialog.title(f"Changelog - {get_version_label(changelog_data)}")
     try:
@@ -9300,6 +9533,29 @@ def show_changelog_dialog(parent):
 def _launcher_user_can_open_macros(username):
     return str(username or '').strip().lower() in {'jsaalsaa', 'mbradbury'}
 
+SUNDAY_SINGLE_REGULAR_MONTHLY_MACROS = {
+    'aug_comics_monthly': {
+        'title': 'AUG COMICS Monthly',
+        'regular_name': 'AUG COMICS',
+        'state_prefix': 'aug_comics_monthly',
+    },
+    'gre_comics_monthly': {
+        'title': 'GRE COMICS Monthly',
+        'regular_name': 'GRE COMICS',
+        'state_prefix': 'gre_comics_monthly',
+    },
+    'ral_comics_monthly': {
+        'title': 'RAL COMICS Monthly',
+        'regular_name': 'RAL COMICS',
+        'state_prefix': 'ral_comics_monthly',
+    },
+    'usat_co_comics_monthly': {
+        'title': 'USAT CO COMICS Monthly',
+        'regular_name': 'USAT CO COMICS',
+        'state_prefix': 'usat_co_comics_monthly',
+    },
+}
+
 
 def _show_month_year_picker(parent, initial_year=None, initial_month=None, title="Select Month / Year"):
     now = datetime.now()
@@ -9315,6 +9571,7 @@ def _show_month_year_picker(parent, initial_year=None, initial_month=None, title
 
     result = {"value": None}
     dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
     dialog.title(title)
     try:
         dialog.transient(parent)
@@ -9442,6 +9699,29 @@ def _build_gre_homefinder_month_issue_plan(year, month):
         })
     return plan
 
+
+
+def _build_single_regular_sunday_month_issue_plan(year, month, regular_name):
+    plan = []
+    try:
+        year = int(year)
+        month = int(month)
+        _first_weekday, last_day = calendar.monthrange(year, month)
+    except Exception:
+        return plan
+    sunday_names = [str(regular_name or '').strip()]
+    sunday_names = [name for name in sunday_names if name]
+    for day in range(1, last_day + 1):
+        current_dt = datetime(year, month, day)
+        weekday = current_dt.weekday()
+        if weekday != 6:
+            continue
+        plan.append({
+            'date': current_dt.strftime('%m/%d/%Y'),
+            'weekday': weekday,
+            'regular_names': list(sunday_names),
+        })
+    return plan
 
 def _macro_target_layout_exists(target_path):
     try:
@@ -9576,16 +9856,126 @@ def _resolve_gre_homefinder_monthly_generation_plan(year, month):
     return generation_plan, errors
 
 
+
+def _resolve_single_regular_sunday_monthly_generation_plan(year, month, regular_name):
+    regular_name = str(regular_name or '').strip()
+    if not regular_name:
+        return [], ['No regular name was provided for this macro.']
+    required_regulars = [regular_name]
+    source_bundle = {}
+    errors = []
+    for regular_name in required_regulars:
+        row, error_text = _find_macro_regular_source(regular_name)
+        if row is None:
+            errors.append(error_text)
+            continue
+        source_data = safe_read_json(row.get('path'))
+        if not isinstance(source_data, dict):
+            errors.append(f"Could not read the regular layout for {regular_name}.")
+            continue
+        source_bundle[regular_name] = {
+            'row': row,
+            'data': source_data,
+        }
+
+    month_issue_plan = _build_single_regular_sunday_month_issue_plan(year, month, regular_name)
+    if not month_issue_plan:
+        errors.append('No Sunday issues were found for that month.')
+        return [], errors
+
+    generation_plan = []
+    for issue in month_issue_plan:
+        issue_date = issue['date']
+        for regular_name in issue['regular_names']:
+            bundle = source_bundle.get(regular_name)
+            if not isinstance(bundle, dict):
+                continue
+            source_data = json.loads(json.dumps(bundle.get('data') or {}, default=str))
+            for transient_key in ('_db_record_id', '_db_record_type', '_file_path', '_layout_name'):
+                source_data.pop(transient_key, None)
+            source_data['issue_date'] = issue_date
+            press_name = source_data.get('press') or ''
+            format_name = source_data.get('format') or ''
+            cfg = CONFIG_MAP.get((press_name, format_name))
+            file_name = _build_filename_suggestion_from_layout_data(
+                source_data,
+                template_mode=False,
+                regular_mode=False,
+                default_dir=LAYOUTS_DIR,
+                config=(dict(cfg) if isinstance(cfg, dict) else None),
+            )
+            file_name = str(file_name or '').strip() or f"{sanitize_filename(regular_name)} {issue_date.replace('/', '-')}.json"
+            if not file_name.lower().endswith('.json'):
+                file_name += '.json'
+            target_path = os.path.join(LAYOUTS_DIR, file_name)
+            generation_plan.append({
+                'issue_date': issue_date,
+                'weekday': issue.get('weekday'),
+                'regular_name': regular_name,
+                'source_path': bundle['row'].get('path'),
+                'source_data': source_data,
+                'target_path': target_path,
+                'target_name': os.path.basename(file_name),
+                'exists': _macro_target_layout_exists(target_path),
+            })
+    return generation_plan, errors
+
+def _ensure_dialog_fits_contents(dialog, min_width=0, min_height=0, extra_width=0, extra_height=0):
+    if dialog is None:
+        return
+    try:
+        dialog.update_idletasks()
+    except Exception:
+        return
+    try:
+        req_width = int(dialog.winfo_reqwidth()) + int(extra_width or 0)
+    except Exception:
+        req_width = int(min_width or 0)
+    try:
+        req_height = int(dialog.winfo_reqheight()) + int(extra_height or 0)
+    except Exception:
+        req_height = int(min_height or 0)
+    req_width = max(int(min_width or 0), req_width)
+    req_height = max(int(min_height or 0), req_height)
+    try:
+        dialog.minsize(req_width, req_height)
+    except Exception:
+        pass
+    try:
+        cur_width = int(dialog.winfo_width())
+        cur_height = int(dialog.winfo_height())
+    except Exception:
+        cur_width = 0
+        cur_height = 0
+    if cur_width >= req_width and cur_height >= req_height:
+        return
+    new_width = max(cur_width, req_width)
+    new_height = max(cur_height, req_height)
+    try:
+        x = int(dialog.winfo_x())
+        y = int(dialog.winfo_y())
+        dialog.geometry(f"{new_width}x{new_height}{x:+d}{y:+d}")
+    except Exception:
+        try:
+            dialog.geometry(f"{new_width}x{new_height}")
+        except Exception:
+            pass
+    try:
+        dialog.update_idletasks()
+    except Exception:
+        pass
+
 def _show_usat_monthly_confirmation(parent, year, month, generation_plan):
-    result = {'confirmed': False, 'overwrite_mode': 'skip', 'print_outputs': False}
+    result = {'confirmed': False, 'overwrite_mode': 'skip', 'print_layouts': False, 'print_starter_sheets': False}
     dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
     dialog.title("Confirm USAT Monthly")
     try:
         dialog.transient(parent)
     except Exception:
         pass
     dialog.resizable(False, False)
-    remember_window_geometry(dialog, "usat_monthly_confirmation_dialog", default_geometry="520x390", minsize=(520, 390))
+    remember_window_geometry(dialog, "usat_monthly_confirmation_dialog", default_geometry="520x430", minsize=(520, 430))
 
     total_layouts = len(generation_plan)
     unique_dates = sorted({str(item.get('issue_date') or '') for item in generation_plan if item.get('issue_date')})
@@ -9621,17 +10011,23 @@ def _show_usat_monthly_confirmation(parent, year, month, generation_plan):
     ttk.Radiobutton(options_frame, text="Skip existing layouts", value='skip', variable=overwrite_var).pack(anchor='w', padx=10, pady=(8, 4))
     ttk.Radiobutton(options_frame, text="Overwrite existing layouts", value='overwrite', variable=overwrite_var).pack(anchor='w', padx=10, pady=(0, 8))
 
-    print_var = tk.BooleanVar(value=False)
+    print_layouts_var = tk.BooleanVar(value=False)
+    print_starters_var = tk.BooleanVar(value=False)
     print_frame = ttk.LabelFrame(outer, text="Print generated output")
     print_frame.grid(row=3, column=0, sticky='ew', pady=(0, 10))
     ttk.Checkbutton(
         print_frame,
-        text="Print generated layouts and starter sheets to the default printer",
-        variable=print_var,
+        text="Print generated layouts (5 copies each)",
+        variable=print_layouts_var,
     ).pack(anchor='w', padx=10, pady=(8, 2))
+    ttk.Checkbutton(
+        print_frame,
+        text="Print generated starter sheets (1 copy each)",
+        variable=print_starters_var,
+    ).pack(anchor='w', padx=10, pady=(0, 2))
     ttk.Label(
         print_frame,
-        text="If selected, the macro prints 5 copies of each generated layout and 1 copy of each generated starter sheet.",
+        text="Select either option, or both, to choose which generated output is printed to the default printer.",
         justify='left',
     ).pack(anchor='w', padx=30, pady=(0, 8))
 
@@ -9647,7 +10043,8 @@ def _show_usat_monthly_confirmation(parent, year, month, generation_plan):
     def close_dialog(confirm=False):
         result['confirmed'] = bool(confirm)
         result['overwrite_mode'] = str(overwrite_var.get() or 'skip').strip().lower()
-        result['print_outputs'] = bool(print_var.get())
+        result['print_layouts'] = bool(print_layouts_var.get())
+        result['print_starter_sheets'] = bool(print_starters_var.get())
         try:
             dialog.destroy()
         except Exception:
@@ -9655,6 +10052,8 @@ def _show_usat_monthly_confirmation(parent, year, month, generation_plan):
 
     ttk.Button(button_row, text="Cancel", command=lambda: close_dialog(False), width=10).pack(side='right')
     ttk.Button(button_row, text="Run", command=lambda: close_dialog(True), width=10).pack(side='right', padx=(0, 8))
+
+    _ensure_dialog_fits_contents(dialog, min_width=540, min_height=500, extra_width=12, extra_height=12)
 
     dialog.bind('<Return>', lambda _event: close_dialog(True))
     dialog.bind('<Escape>', lambda _event: close_dialog(False))
@@ -9664,16 +10063,17 @@ def _show_usat_monthly_confirmation(parent, year, month, generation_plan):
     return result
 
 
-def _show_gre_homefinder_monthly_confirmation(parent, year, month, generation_plan):
-    result = {'confirmed': False, 'overwrite_mode': 'skip', 'print_outputs': False}
+def _show_gre_homefinder_monthly_confirmation(parent, year, month, generation_plan, macro_title='GRE Homefinder Monthly', regular_name='GRE Homefinder', state_key='gre_homefinder_monthly_confirmation_dialog'):
+    result = {'confirmed': False, 'overwrite_mode': 'skip', 'print_layouts': False, 'print_starter_sheets': False}
     dialog = tk.Toplevel(parent)
-    dialog.title("Confirm GRE Homefinder Monthly")
+    set_window_icon(dialog)
+    dialog.title(f"Confirm {macro_title}")
     try:
         dialog.transient(parent)
     except Exception:
         pass
     dialog.resizable(False, False)
-    remember_window_geometry(dialog, "gre_homefinder_monthly_confirmation_dialog", default_geometry="520x390", minsize=(520, 390))
+    remember_window_geometry(dialog, state_key, default_geometry="520x430", minsize=(520, 430))
 
     total_layouts = len(generation_plan)
     unique_dates = sorted({str(item.get('issue_date') or '') for item in generation_plan if item.get('issue_date')})
@@ -9690,7 +10090,7 @@ def _show_gre_homefinder_monthly_confirmation(parent, year, month, generation_pl
         f"Month / Year: {month_name} {int(year)}",
         f"Sunday issue dates to generate: {sunday_count}",
         f"Layouts to process: {total_layouts}",
-        f"  • Sunday issues: {sunday_count} date(s) using GRE Homefinder",
+        f"  • Sunday issues: {sunday_count} date(s) using {regular_name}",
         f"Existing target layouts found: {existing_count}",
         f"New target layouts: {new_count}",
     ]
@@ -9706,17 +10106,23 @@ def _show_gre_homefinder_monthly_confirmation(parent, year, month, generation_pl
     ttk.Radiobutton(options_frame, text="Skip existing layouts", value='skip', variable=overwrite_var).pack(anchor='w', padx=10, pady=(8, 4))
     ttk.Radiobutton(options_frame, text="Overwrite existing layouts", value='overwrite', variable=overwrite_var).pack(anchor='w', padx=10, pady=(0, 8))
 
-    print_var = tk.BooleanVar(value=False)
+    print_layouts_var = tk.BooleanVar(value=False)
+    print_starters_var = tk.BooleanVar(value=False)
     print_frame = ttk.LabelFrame(outer, text="Print generated output")
     print_frame.grid(row=3, column=0, sticky='ew', pady=(0, 10))
     ttk.Checkbutton(
         print_frame,
-        text="Print generated layouts and starter sheets to the default printer",
-        variable=print_var,
+        text="Print generated layouts (5 copies each)",
+        variable=print_layouts_var,
     ).pack(anchor='w', padx=10, pady=(8, 2))
+    ttk.Checkbutton(
+        print_frame,
+        text="Print generated starter sheets (1 copy each)",
+        variable=print_starters_var,
+    ).pack(anchor='w', padx=10, pady=(0, 2))
     ttk.Label(
         print_frame,
-        text="If selected, the macro prints 5 copies of each generated layout and 1 copy of each generated starter sheet.",
+        text="Select either option, or both, to choose which generated output is printed to the default printer.",
         justify='left',
     ).pack(anchor='w', padx=30, pady=(0, 8))
 
@@ -9732,7 +10138,8 @@ def _show_gre_homefinder_monthly_confirmation(parent, year, month, generation_pl
     def close_dialog(confirm=False):
         result['confirmed'] = bool(confirm)
         result['overwrite_mode'] = str(overwrite_var.get() or 'skip').strip().lower()
-        result['print_outputs'] = bool(print_var.get())
+        result['print_layouts'] = bool(print_layouts_var.get())
+        result['print_starter_sheets'] = bool(print_starters_var.get())
         try:
             dialog.destroy()
         except Exception:
@@ -9740,6 +10147,8 @@ def _show_gre_homefinder_monthly_confirmation(parent, year, month, generation_pl
 
     ttk.Button(button_row, text="Cancel", command=lambda: close_dialog(False), width=10).pack(side='right')
     ttk.Button(button_row, text="Run", command=lambda: close_dialog(True), width=10).pack(side='right', padx=(0, 8))
+
+    _ensure_dialog_fits_contents(dialog, min_width=540, min_height=500, extra_width=12, extra_height=12)
 
     dialog.bind('<Return>', lambda _event: close_dialog(True))
     dialog.bind('<Escape>', lambda _event: close_dialog(False))
@@ -9760,6 +10169,7 @@ def _create_usat_monthly_progress_window(parent, total_steps):
         'total_steps': max(1, int(total_steps or 1)),
     }
     dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
     dialog.title("USAT Monthly Progress")
     try:
         dialog.transient(parent)
@@ -9787,7 +10197,7 @@ def _create_usat_monthly_progress_window(parent, total_steps):
     return progress
 
 
-def _create_gre_homefinder_monthly_progress_window(parent, total_steps):
+def _create_gre_homefinder_monthly_progress_window(parent, total_steps, macro_title='GRE Homefinder Monthly', state_key='gre_homefinder_monthly_progress_dialog'):
     progress = {
         'dialog': None,
         'label_var': tk.StringVar(value='Preparing macro run...'),
@@ -9798,13 +10208,14 @@ def _create_gre_homefinder_monthly_progress_window(parent, total_steps):
         'total_steps': max(1, int(total_steps or 1)),
     }
     dialog = tk.Toplevel(parent)
-    dialog.title("GRE Homefinder Monthly Progress")
+    set_window_icon(dialog)
+    dialog.title(f"{macro_title} Progress")
     try:
         dialog.transient(parent)
     except Exception:
         pass
     dialog.resizable(False, False)
-    remember_window_geometry(dialog, "gre_homefinder_monthly_progress_dialog", default_geometry="420x150", minsize=(420, 150))
+    remember_window_geometry(dialog, state_key, default_geometry="420x150", minsize=(420, 150))
     progress['dialog'] = dialog
 
     outer = ttk.Frame(dialog, padding=12)
@@ -9869,6 +10280,7 @@ def _show_usat_monthly_report_dialog(parent, month_label, report_data):
     processed_dates = sorted({str(item) for item in (report_data.get('processed_dates') or []) if str(item)})
 
     dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
     dialog.title("USAT Monthly Report")
     try:
         dialog.transient(parent)
@@ -9948,7 +10360,7 @@ def _show_usat_monthly_report_dialog(parent, month_label, report_data):
     return dialog
 
 
-def _show_gre_homefinder_monthly_report_dialog(parent, month_label, report_data):
+def _show_gre_homefinder_monthly_report_dialog(parent, month_label, report_data, macro_title='GRE Homefinder Monthly', state_key='gre_homefinder_monthly_report_dialog'):
     report_data = report_data if isinstance(report_data, dict) else {}
     created = [str(item) for item in (report_data.get('created') or []) if str(item)]
     overwritten = [str(item) for item in (report_data.get('overwritten') or []) if str(item)]
@@ -9960,7 +10372,8 @@ def _show_gre_homefinder_monthly_report_dialog(parent, month_label, report_data)
     processed_dates = sorted({str(item) for item in (report_data.get('processed_dates') or []) if str(item)})
 
     dialog = tk.Toplevel(parent)
-    dialog.title("GRE Homefinder Monthly Report")
+    set_window_icon(dialog)
+    dialog.title(f"{macro_title} Report")
     try:
         dialog.transient(parent)
     except Exception:
@@ -9968,7 +10381,7 @@ def _show_gre_homefinder_monthly_report_dialog(parent, month_label, report_data)
     dialog.resizable(True, True)
     dialog.geometry("760x560")
     dialog.minsize(680, 460)
-    remember_window_geometry(dialog, "gre_homefinder_monthly_report_dialog", default_geometry="760x560", minsize=(680, 460))
+    remember_window_geometry(dialog, state_key, default_geometry="760x560", minsize=(680, 460))
 
     outer = ttk.Frame(dialog, padding=12)
     outer.grid(row=0, column=0, sticky='nsew')
@@ -9990,7 +10403,7 @@ def _show_gre_homefinder_monthly_report_dialog(parent, month_label, report_data)
         summary_lines.append(f"Preview failures: {len(preview_failures)}")
     if print_failures:
         summary_lines.append(f"Print failures: {len(print_failures)}")
-    ttk.Label(outer, text="GRE Homefinder Monthly Run Report", font=(None, 11, 'bold')).grid(row=0, column=0, sticky='w')
+    ttk.Label(outer, text=f"{macro_title} Run Report", font=(None, 11, 'bold')).grid(row=0, column=0, sticky='w')
     ttk.Label(outer, text="\n".join(summary_lines), justify='left').grid(row=0, column=0, sticky='e')
 
     text_frame = ttk.Frame(outer)
@@ -10039,7 +10452,7 @@ def _show_gre_homefinder_monthly_report_dialog(parent, month_label, report_data)
     return dialog
 
 
-def _generate_usat_monthly_layouts(parent, year, month, generation_plan, overwrite_mode='skip', print_outputs=False):
+def _generate_usat_monthly_layouts(parent, year, month, generation_plan, overwrite_mode='skip', print_layouts=False, print_starter_sheets=False):
     overwrite_mode = str(overwrite_mode or 'skip').strip().lower()
     total_steps = len(generation_plan)
     progress_state = _create_usat_monthly_progress_window(parent, total_steps)
@@ -10094,23 +10507,31 @@ def _generate_usat_monthly_layouts(parent, year, month, generation_plan, overwri
             else:
                 created.append(target_name)
 
-            if print_outputs:
+            if print_layouts or print_starter_sheets:
+                if print_layouts and print_starter_sheets:
+                    print_status_label = "Printing generated layouts and starter sheets..."
+                elif print_layouts:
+                    print_status_label = "Printing generated layouts..."
+                else:
+                    print_status_label = "Printing generated starter sheets..."
                 _update_usat_monthly_progress(
                     progress_state,
                     index - 1,
-                    label_text="Printing generated layouts...",
+                    label_text=print_status_label,
                     detail_text=f"{issue_date} — {regular_name}\n{target_name}",
                 )
-                try:
-                    _print_layout_data_to_default_printer(data, copies=5)
-                    printed_layouts.append(f"{target_name} (5 copies)")
-                except Exception as exc:
-                    print_failures.append(f"Layout: {target_name} — {exc}")
-                try:
-                    _print_starter_sheet_data_to_default_printer(data, copies=1)
-                    printed_starters.append(f"{target_name} (1 copy)")
-                except Exception as exc:
-                    print_failures.append(f"Starter: {target_name} — {exc}")
+                if print_layouts:
+                    try:
+                        _print_layout_data_to_default_printer(data, copies=5)
+                        printed_layouts.append(f"{target_name} (5 copies)")
+                    except Exception as exc:
+                        print_failures.append(f"Layout: {target_name} — {exc}")
+                if print_starter_sheets:
+                    try:
+                        _print_starter_sheet_data_to_default_printer(data, copies=1)
+                        printed_starters.append(f"{target_name} (1 copy)")
+                    except Exception as exc:
+                        print_failures.append(f"Starter: {target_name} — {exc}")
 
             try:
                 regenerate_preview_image_for_json_path(
@@ -10147,10 +10568,10 @@ def _generate_usat_monthly_layouts(parent, year, month, generation_plan, overwri
     return True
 
 
-def _generate_gre_homefinder_monthly_layouts(parent, year, month, generation_plan, overwrite_mode='skip', print_outputs=False):
+def _generate_gre_homefinder_monthly_layouts(parent, year, month, generation_plan, overwrite_mode='skip', print_layouts=False, print_starter_sheets=False, macro_title='GRE Homefinder Monthly', state_prefix='gre_homefinder_monthly'):
     overwrite_mode = str(overwrite_mode or 'skip').strip().lower()
     total_steps = len(generation_plan)
-    progress_state = _create_gre_homefinder_monthly_progress_window(parent, total_steps)
+    progress_state = _create_gre_homefinder_monthly_progress_window(parent, total_steps, macro_title=macro_title, state_key=f'{state_prefix}_progress_dialog')
     created = []
     overwritten = []
     skipped = []
@@ -10170,7 +10591,7 @@ def _generate_gre_homefinder_monthly_layouts(parent, year, month, generation_pla
             _update_usat_monthly_progress(
                 progress_state,
                 index - 1,
-                label_text="Generating GRE Homefinder monthly layouts...",
+                label_text=f"Generating {macro_title} layouts...",
                 detail_text=f"{issue_date} — {regular_name}\n{target_name}",
             )
             if progress_state.get('cancelled'):
@@ -10202,23 +10623,31 @@ def _generate_gre_homefinder_monthly_layouts(parent, year, month, generation_pla
             else:
                 created.append(target_name)
 
-            if print_outputs:
+            if print_layouts or print_starter_sheets:
+                if print_layouts and print_starter_sheets:
+                    print_status_label = "Printing generated layouts and starter sheets..."
+                elif print_layouts:
+                    print_status_label = "Printing generated layouts..."
+                else:
+                    print_status_label = "Printing generated starter sheets..."
                 _update_usat_monthly_progress(
                     progress_state,
                     index - 1,
-                    label_text="Printing generated layouts...",
+                    label_text=print_status_label,
                     detail_text=f"{issue_date} — {regular_name}\n{target_name}",
                 )
-                try:
-                    _print_layout_data_to_default_printer(data, copies=5)
-                    printed_layouts.append(f"{target_name} (5 copies)")
-                except Exception as exc:
-                    print_failures.append(f"Layout: {target_name} — {exc}")
-                try:
-                    _print_starter_sheet_data_to_default_printer(data, copies=1)
-                    printed_starters.append(f"{target_name} (1 copy)")
-                except Exception as exc:
-                    print_failures.append(f"Starter: {target_name} — {exc}")
+                if print_layouts:
+                    try:
+                        _print_layout_data_to_default_printer(data, copies=5)
+                        printed_layouts.append(f"{target_name} (5 copies)")
+                    except Exception as exc:
+                        print_failures.append(f"Layout: {target_name} — {exc}")
+                if print_starter_sheets:
+                    try:
+                        _print_starter_sheet_data_to_default_printer(data, copies=1)
+                        printed_starters.append(f"{target_name} (1 copy)")
+                    except Exception as exc:
+                        print_failures.append(f"Starter: {target_name} — {exc}")
 
             try:
                 regenerate_preview_image_for_json_path(
@@ -10251,9 +10680,50 @@ def _generate_gre_homefinder_monthly_layouts(parent, year, month, generation_pla
         'print_failures': print_failures,
         'processed_dates': sorted(processed_dates),
     }
-    _show_gre_homefinder_monthly_report_dialog(parent, month_label, report_data)
+    _show_gre_homefinder_monthly_report_dialog(parent, month_label, report_data, macro_title=macro_title, state_key=f'{state_prefix}_report_dialog')
     return True
 
+
+
+
+def _run_single_regular_sunday_monthly_macro(parent, macro_key):
+    macro_settings = SUNDAY_SINGLE_REGULAR_MONTHLY_MACROS.get(str(macro_key or '').strip().lower())
+    if not isinstance(macro_settings, dict):
+        return False
+    macro_title = str(macro_settings.get('title') or 'Sunday Monthly Macro').strip() or 'Sunday Monthly Macro'
+    regular_name = str(macro_settings.get('regular_name') or '').strip()
+    state_prefix = str(macro_settings.get('state_prefix') or str(macro_key or '').strip().lower() or 'sunday_monthly_macro').strip()
+
+    picked = _show_month_year_picker(parent, title=macro_title)
+    if not picked:
+        return False
+    year, month = picked
+    generation_plan, errors = _resolve_single_regular_sunday_monthly_generation_plan(year, month, regular_name)
+    if errors:
+        messagebox.showerror(macro_title, '\n'.join(error_text for error_text in errors if error_text), parent=parent)
+        return False
+    confirmation = _show_gre_homefinder_monthly_confirmation(
+        parent,
+        year,
+        month,
+        generation_plan,
+        macro_title=macro_title,
+        regular_name=regular_name,
+        state_key=f'{state_prefix}_confirmation_dialog',
+    )
+    if not confirmation.get('confirmed'):
+        return False
+    return _generate_gre_homefinder_monthly_layouts(
+        parent,
+        year,
+        month,
+        generation_plan,
+        overwrite_mode=confirmation.get('overwrite_mode'),
+        print_layouts=confirmation.get('print_layouts'),
+        print_starter_sheets=confirmation.get('print_starter_sheets'),
+        macro_title=macro_title,
+        state_prefix=state_prefix,
+    )
 
 def _run_launcher_macro(parent, macro_key):
     key = str(macro_key or '').strip().lower()
@@ -10269,7 +10739,15 @@ def _run_launcher_macro(parent, macro_key):
         confirmation = _show_usat_monthly_confirmation(parent, year, month, generation_plan)
         if not confirmation.get('confirmed'):
             return False
-        return _generate_usat_monthly_layouts(parent, year, month, generation_plan, overwrite_mode=confirmation.get('overwrite_mode'), print_outputs=confirmation.get('print_outputs'))
+        return _generate_usat_monthly_layouts(
+            parent,
+            year,
+            month,
+            generation_plan,
+            overwrite_mode=confirmation.get('overwrite_mode'),
+            print_layouts=confirmation.get('print_layouts'),
+            print_starter_sheets=confirmation.get('print_starter_sheets'),
+        )
     if key == 'gre_homefinder_monthly':
         picked = _show_month_year_picker(parent, title="GRE Homefinder Monthly")
         if not picked:
@@ -10282,7 +10760,17 @@ def _run_launcher_macro(parent, macro_key):
         confirmation = _show_gre_homefinder_monthly_confirmation(parent, year, month, generation_plan)
         if not confirmation.get('confirmed'):
             return False
-        return _generate_gre_homefinder_monthly_layouts(parent, year, month, generation_plan, overwrite_mode=confirmation.get('overwrite_mode'), print_outputs=confirmation.get('print_outputs'))
+        return _generate_gre_homefinder_monthly_layouts(
+            parent,
+            year,
+            month,
+            generation_plan,
+            overwrite_mode=confirmation.get('overwrite_mode'),
+            print_layouts=confirmation.get('print_layouts'),
+            print_starter_sheets=confirmation.get('print_starter_sheets'),
+        )
+    if key in SUNDAY_SINGLE_REGULAR_MONTHLY_MACROS:
+        return _run_single_regular_sunday_monthly_macro(parent, key)
     messagebox.showerror("Macros", f"Unknown macro: {macro_key}", parent=parent)
     return False
 
@@ -10301,13 +10789,14 @@ def show_launcher_macro_dialog(parent, launcher_username=None):
         pass
 
     dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
     dialog.title("Macros")
     try:
         dialog.transient(parent)
     except Exception:
         pass
     dialog.resizable(False, False)
-    remember_window_geometry(dialog, "launcher_macro_dialog", default_geometry="400x260", minsize=(400, 260))
+    remember_window_geometry(dialog, "launcher_macro_dialog", default_geometry="460x360", minsize=(460, 360))
     parent._launcher_macro_dialog = dialog
 
     def _cleanup_dialog():
@@ -10328,8 +10817,12 @@ def show_launcher_macro_dialog(parent, launcher_username=None):
     ttk.Label(outer, text="Available Macros", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
 
     macros = [
-        ("usat_monthly", "USAT monthly", "Generate USAT layouts for every Monday-Friday issue date in the selected month, show a confirmation summary, choose overwrite or skip for existing layouts, and then display a progress window and end-of-run report."),
-        ("gre_homefinder_monthly", "GRE Homefinder Monthly", "Generate GRE Homefinder layouts for every Sunday issue date in the selected month, show a confirmation summary, optionally print 5 layout copies plus 1 starter sheet per layout, choose overwrite or skip for existing layouts, and then display a progress window and end-of-run report."),
+        ("usat_monthly", "USAT monthly", "Generate USAT layouts for every Monday-Friday issue date in the selected month, show a confirmation summary, choose overwrite or skip for existing layouts, select layout and starter-sheet printing independently, and then display a progress window and end-of-run report."),
+        ("gre_homefinder_monthly", "GRE Homefinder Monthly", "Generate GRE Homefinder layouts for every Sunday issue date in the selected month, show a confirmation summary, select layout and starter-sheet printing independently, choose overwrite or skip for existing layouts, and then display a progress window and end-of-run report."),
+        ("aug_comics_monthly", "AUG COMICS Monthly", "Generate AUG COMICS layouts for every Sunday issue date in the selected month, show a confirmation summary, select layout and starter-sheet printing independently, choose overwrite or skip for existing layouts, and then display a progress window and end-of-run report."),
+        ("gre_comics_monthly", "GRE COMICS Monthly", "Generate GRE COMICS layouts for every Sunday issue date in the selected month, show a confirmation summary, select layout and starter-sheet printing independently, choose overwrite or skip for existing layouts, and then display a progress window and end-of-run report."),
+        ("ral_comics_monthly", "RAL COMICS Monthly", "Generate RAL COMICS layouts for every Sunday issue date in the selected month, show a confirmation summary, select layout and starter-sheet printing independently, choose overwrite or skip for existing layouts, and then display a progress window and end-of-run report."),
+        ("usat_co_comics_monthly", "USAT CO COMICS Monthly", "Generate USAT CO COMICS layouts for every Sunday issue date in the selected month, show a confirmation summary, select layout and starter-sheet printing independently, choose overwrite or skip for existing layouts, and then display a progress window and end-of-run report."),
     ]
     macro_list = tk.Listbox(outer, exportselection=False, height=max(4, len(macros)))
     macro_list.grid(row=1, column=0, sticky="nsew", pady=(8, 8))
@@ -10384,11 +10877,370 @@ def show_launcher_macro_dialog(parent, launcher_username=None):
         pass
     return dialog
 
+
+_SINGLE_INSTANCE_HOST = "127.0.0.1"
+_SINGLE_INSTANCE_PORT = 47657
+_SINGLE_INSTANCE_AUTH_TOKEN = "PRESS_LAYOUTS_SINGLE_INSTANCE_V2"
+_SINGLE_INSTANCE_MUTEX_NAME = r"Local\PressLayoutsMainLauncherSingleton"
+_SINGLE_INSTANCE_ALERT_TITLE = "Press Layouts Already Running"
+_SINGLE_INSTANCE_ALERT_MESSAGE = "Press Layouts is already open. Only one main launcher instance can run at a time."
+_SINGLE_INSTANCE_SERVER_SOCKET = None
+_SINGLE_INSTANCE_MUTEX_HANDLE = None
+_SINGLE_INSTANCE_ACTIVE_WINDOW = None
+_SINGLE_INSTANCE_PENDING_ALERTS = 0
+_SINGLE_INSTANCE_STATE_LOCK = threading.Lock()
+
+
+def show_single_instance_warning_dialog(parent):
+    def _raise_single_instance_dialog(target_dialog, force_focus=False):
+        if target_dialog is None:
+            return
+        try:
+            if not target_dialog.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            target_dialog.deiconify()
+        except Exception:
+            pass
+        try:
+            target_dialog.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            target_dialog.lift()
+        except Exception:
+            pass
+        if force_focus:
+            try:
+                target_dialog.focus_force()
+            except Exception:
+                pass
+
+    existing = getattr(parent, "_single_instance_warning_dialog", None)
+    try:
+        if existing is not None and existing.winfo_exists():
+            _raise_single_instance_dialog(existing, force_focus=True)
+            return existing
+    except Exception:
+        pass
+
+    dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
+    parent._single_instance_warning_dialog = dialog
+    dialog.title(_SINGLE_INSTANCE_ALERT_TITLE)
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+    dialog.resizable(False, False)
+    remember_window_geometry(dialog, "single_instance_warning_dialog", default_geometry="460x180", minsize=(460, 180))
+
+    body = ttk.Frame(dialog, padding=16)
+    body.pack(fill="both", expand=True)
+    body.columnconfigure(0, weight=1)
+
+    ttk.Label(body, text=_SINGLE_INSTANCE_ALERT_TITLE, font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    ttk.Label(body, text=_SINGLE_INSTANCE_ALERT_MESSAGE, justify="left", wraplength=400).grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+    button_row = ttk.Frame(body)
+    button_row.grid(row=2, column=0, sticky="e", pady=(18, 0))
+
+    def _close_dialog():
+        try:
+            dialog.attributes("-topmost", False)
+        except Exception:
+            pass
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+        if getattr(parent, "_single_instance_warning_dialog", None) is dialog:
+            parent._single_instance_warning_dialog = None
+
+    ttk.Button(button_row, text="OK", command=_close_dialog, width=12).pack(side="left")
+
+    dialog.protocol("WM_DELETE_WINDOW", _close_dialog)
+    dialog.bind("<Escape>", lambda _event: _close_dialog())
+    dialog.bind("<Map>", lambda _event: dialog.after_idle(lambda: _raise_single_instance_dialog(dialog, force_focus=False)), add="+")
+    dialog.bind("<Visibility>", lambda _event: dialog.after_idle(lambda: _raise_single_instance_dialog(dialog, force_focus=False)), add="+")
+    _raise_single_instance_dialog(dialog, force_focus=True)
+    return dialog
+
+
+def _single_instance_raise_window(win, show_message=False):
+    if win is None:
+        return False
+    try:
+        if not win.winfo_exists():
+            return False
+    except Exception:
+        return False
+
+    def _show_on_ui_thread():
+        try:
+            win.deiconify()
+        except Exception:
+            pass
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            win.lift()
+        except Exception:
+            pass
+        try:
+            win.focus_force()
+        except Exception:
+            pass
+        try:
+            win.after(500, lambda: win.attributes("-topmost", False))
+        except Exception:
+            pass
+        if show_message:
+            try:
+                show_single_instance_warning_dialog(win)
+            except Exception:
+                try:
+                    messagebox.showwarning(_SINGLE_INSTANCE_ALERT_TITLE, _SINGLE_INSTANCE_ALERT_MESSAGE, parent=win)
+                except Exception:
+                    try:
+                        messagebox.showwarning(_SINGLE_INSTANCE_ALERT_TITLE, _SINGLE_INSTANCE_ALERT_MESSAGE)
+                    except Exception:
+                        pass
+
+    try:
+        win.after(0, _show_on_ui_thread)
+        return True
+    except Exception:
+        return False
+
+
+
+def _single_instance_handle_activation_request():
+    global _SINGLE_INSTANCE_PENDING_ALERTS
+    with _SINGLE_INSTANCE_STATE_LOCK:
+        win = _SINGLE_INSTANCE_ACTIVE_WINDOW
+        if _single_instance_raise_window(win, show_message=True):
+            return True
+        _SINGLE_INSTANCE_PENDING_ALERTS = int(_SINGLE_INSTANCE_PENDING_ALERTS or 0) + 1
+        return False
+
+
+
+def _single_instance_server_loop(server_socket):
+    while True:
+        try:
+            conn, _addr = server_socket.accept()
+        except OSError:
+            break
+        try:
+            with conn:
+                payload = b""
+                try:
+                    payload = conn.recv(1024)
+                except Exception:
+                    payload = b""
+                command = payload.decode('utf-8', errors='ignore').strip()
+                if command == f"{_SINGLE_INSTANCE_AUTH_TOKEN}:ACTIVATE":
+                    _single_instance_handle_activation_request()
+                    try:
+                        conn.sendall(b"OK")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        conn.sendall(b"OK")
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+    try:
+        server_socket.close()
+    except Exception:
+        pass
+
+
+
+def _signal_existing_single_instance_activate(timeout=0.35, attempts=8, pause_seconds=0.15):
+    import time
+    timeout = max(0.1, float(timeout or 0.35))
+    attempts = max(1, int(attempts or 1))
+    pause_seconds = max(0.0, float(pause_seconds or 0.0))
+    for attempt_index in range(attempts):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(timeout)
+        except Exception:
+            pass
+        try:
+            sock.connect((_SINGLE_INSTANCE_HOST, int(_SINGLE_INSTANCE_PORT)))
+            sock.sendall(f"{_SINGLE_INSTANCE_AUTH_TOKEN}:ACTIVATE".encode('utf-8'))
+            try:
+                response = sock.recv(32)
+            except Exception:
+                response = b""
+            return response == b"OK" or response == b""
+        except Exception:
+            if attempt_index + 1 < attempts and pause_seconds > 0:
+                time.sleep(pause_seconds)
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    return False
+
+
+
+def _try_acquire_single_instance_mutex():
+    if os.name != 'nt':
+        return True, None
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        create_mutex = kernel32.CreateMutexW
+        create_mutex.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        create_mutex.restype = ctypes.c_void_p
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        handle = create_mutex(None, 0, _SINGLE_INSTANCE_MUTEX_NAME)
+        if not handle:
+            return True, None
+        already_exists = int(ctypes.get_last_error() or 0) == 183
+        if already_exists:
+            try:
+                close_handle(handle)
+            except Exception:
+                pass
+            return False, None
+        return True, handle
+    except Exception:
+        return True, None
+
+
+
+def _release_single_instance_mutex_handle(handle):
+    if not handle or os.name != 'nt':
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        close_handle(handle)
+    except Exception:
+        pass
+
+
+
+def ensure_single_main_launcher_instance():
+    global _SINGLE_INSTANCE_SERVER_SOCKET, _SINGLE_INSTANCE_MUTEX_HANDLE
+    with _SINGLE_INSTANCE_STATE_LOCK:
+        if _SINGLE_INSTANCE_SERVER_SOCKET is not None:
+            return True
+    owns_mutex, mutex_handle = _try_acquire_single_instance_mutex()
+    if not owns_mutex:
+        _signal_existing_single_instance_activate()
+        return False
+
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if os.name == 'nt' and hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            try:
+                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            except Exception:
+                pass
+        elif os.name != 'nt':
+            try:
+                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            except Exception:
+                pass
+        server_socket.bind((_SINGLE_INSTANCE_HOST, int(_SINGLE_INSTANCE_PORT)))
+        server_socket.listen(5)
+    except OSError:
+        try:
+            server_socket.close()
+        except Exception:
+            pass
+        _release_single_instance_mutex_handle(mutex_handle)
+        _signal_existing_single_instance_activate()
+        return False
+
+    with _SINGLE_INSTANCE_STATE_LOCK:
+        _SINGLE_INSTANCE_SERVER_SOCKET = server_socket
+        _SINGLE_INSTANCE_MUTEX_HANDLE = mutex_handle
+    listener = threading.Thread(target=_single_instance_server_loop, args=(server_socket,), name='PressLayoutsSingleInstance', daemon=True)
+    listener.start()
+    return True
+
+
+
+def release_single_main_launcher_instance():
+    global _SINGLE_INSTANCE_SERVER_SOCKET, _SINGLE_INSTANCE_MUTEX_HANDLE, _SINGLE_INSTANCE_ACTIVE_WINDOW, _SINGLE_INSTANCE_PENDING_ALERTS
+    server_socket = None
+    mutex_handle = None
+    with _SINGLE_INSTANCE_STATE_LOCK:
+        server_socket = _SINGLE_INSTANCE_SERVER_SOCKET
+        _SINGLE_INSTANCE_SERVER_SOCKET = None
+        mutex_handle = _SINGLE_INSTANCE_MUTEX_HANDLE
+        _SINGLE_INSTANCE_MUTEX_HANDLE = None
+        _SINGLE_INSTANCE_ACTIVE_WINDOW = None
+        _SINGLE_INSTANCE_PENDING_ALERTS = 0
+    if server_socket is not None:
+        try:
+            server_socket.close()
+        except Exception:
+            pass
+    _release_single_instance_mutex_handle(mutex_handle)
+
+
+
+def register_single_instance_window(win):
+    global _SINGLE_INSTANCE_ACTIVE_WINDOW, _SINGLE_INSTANCE_PENDING_ALERTS
+    if win is None:
+        return
+    pending_count = 0
+    with _SINGLE_INSTANCE_STATE_LOCK:
+        _SINGLE_INSTANCE_ACTIVE_WINDOW = win
+        pending_count = int(_SINGLE_INSTANCE_PENDING_ALERTS or 0)
+        _SINGLE_INSTANCE_PENDING_ALERTS = 0
+    try:
+        if not getattr(win, '_single_instance_destroy_bound', False):
+            def _on_destroy(event):
+                try:
+                    if event.widget is not win:
+                        return
+                except Exception:
+                    pass
+                unregister_single_instance_window(win)
+            win.bind('<Destroy>', _on_destroy, add='+')
+            win._single_instance_destroy_bound = True
+    except Exception:
+        pass
+    if pending_count > 0:
+        _single_instance_raise_window(win, show_message=True)
+
+
+
+def unregister_single_instance_window(win):
+    global _SINGLE_INSTANCE_ACTIVE_WINDOW
+    with _SINGLE_INSTANCE_STATE_LOCK:
+        if _SINGLE_INSTANCE_ACTIVE_WINDOW is win:
+            _SINGLE_INSTANCE_ACTIVE_WINDOW = None
+
+
 def build_main_launcher():  
     ensure_dir(LAYOUTS_DIR)  
     ensure_dir(TEMPLATE_DIR)  
     ensure_dir(REGULAR_DIR)  
     root = tk.Tk()  
+    set_window_icon(root)
+    register_single_instance_window(root)
     root.title("Press Layouts")  
     root.geometry("1100x760")  
     root.minsize(980, 680)  
@@ -10399,46 +11251,50 @@ def build_main_launcher():
     style.configure("LauncherVersion.TLabel", foreground="#1a73e8")
     style.configure("LauncherLink.TLabel", foreground="#1a73e8")
     style.configure("AdminFlag.TLabel", foreground="#c62828", font=(None, 10, "bold"))
+    style.configure("DatabaseModeLive.TLabel", foreground="#2e7d32", font=(None, 10, "bold"))
+    style.configure("DatabaseModeTest.TLabel", foreground="#ef6c00", font=(None, 10, "bold"))
     paned = tk.PanedWindow(root, orient="vertical", sashrelief="raised", sashwidth=8, bd=0, showhandle=False)
     paned.pack(fill="both", expand=True)
     frame = ttk.Frame(paned, padding=16)
     paned.add(frame, stretch="always", minsize=220)
-    frame.rowconfigure(2, weight=1)
+    frame.rowconfigure(3, weight=1)
     frame.columnconfigure(0, weight=1)
     ttk.Label(frame, text="Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
     changelog_data = load_changelog_data()
     running_version = _get_changelog_current_version_value(changelog_data)
     version_check_job = {"id": None}
-    db_status_job = {"id": None}
-    db_status_pulse_job = {"id": None}
-    db_status_state = {"connected": False, "phase": 0, "error_text": None, "last_success": None}
     launcher_username = get_windows_username()
     status_frame = ttk.Frame(frame)
-    status_frame.grid(row=0, column=0, sticky="ne")
-    if allow_launcher_maintenance_actions:
-        ttk.Label(status_frame, text="(ADMIN)", style="AdminFlag.TLabel").grid(row=0, column=0, sticky="e", pady=(0, 2))
+    status_frame.grid(row=0, column=0, sticky="e")
+    version_label_var = tk.StringVar(value=_format_version_label(running_version))
+    version_label = ttk.Label(status_frame, textvariable=version_label_var, style="LauncherVersion.TLabel", font=(None, 10))
+    version_label.pack(side="right")
+    version_label.configure(cursor="hand2")
+    version_label.bind("<Button-1>", lambda _event: show_changelog_dialog(root))
     username_label = ttk.Label(status_frame, text=f"User: {launcher_username}", anchor="e", justify="right")
-    username_label.grid(
-        row=1 if allow_launcher_maintenance_actions else 0,
-        column=0,
-        sticky="e",
-        pady=(0, 2),
-    )
+    username_label.pack(side="right", padx=(0, 12))
     if _launcher_user_can_open_macros(launcher_username):
         username_label.configure(style="LauncherLink.TLabel", cursor="hand2")
         username_label.bind("<Button-1>", lambda _event: show_launcher_macro_dialog(root, launcher_username=launcher_username))
-    version_label_var = tk.StringVar(value=_format_version_label(running_version))
-    version_label = ttk.Label(status_frame, textvariable=version_label_var, style="LauncherVersion.TLabel", font=(None, 10))
-    version_label.grid(row=2 if allow_launcher_maintenance_actions else 1, column=0, sticky="e")
-    version_label.configure(cursor="hand2")
-    version_label.bind("<Button-1>", lambda _event: show_changelog_dialog(root))
-    filter_frame = ttk.Frame(frame)
-    filter_frame.grid(row=1, column=0, sticky="ew", pady=(8, 8))
-    filter_frame.columnconfigure(5, weight=1)
-    ttk.Label(filter_frame, text="Search:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    if allow_launcher_maintenance_actions:
+        ttk.Label(status_frame, text="(ADMIN)", style="AdminFlag.TLabel").pack(side="right", padx=(0, 12))
+        db_mode_label_text = f"Database: {get_selected_db_config_label().upper()}"
+        db_mode_style = "DatabaseModeTest.TLabel" if get_selected_db_config_label().strip().lower() == "test" else "DatabaseModeLive.TLabel"
+        ttk.Label(status_frame, text=db_mode_label_text, style=db_mode_style, anchor="e", justify="right").pack(side="right", padx=(0, 12))
+    search_frame = ttk.Frame(frame)
+    search_frame.grid(row=1, column=0, sticky="ew", pady=(8, 4))
+    search_frame.columnconfigure(1, weight=1)
+    ttk.Label(search_frame, text="Search:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
     search_var = tk.StringVar(value="")
-    search_entry = ttk.Entry(filter_frame, textvariable=search_var)
-    search_entry.grid(row=0, column=1, sticky="ew", padx=(8, 12))
+    search_entry = ttk.Entry(search_frame, textvariable=search_var)
+    search_entry.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+    filter_frame = ttk.Frame(frame)
+    filter_frame.grid(row=2, column=0, sticky="ew", pady=(4, 8))
+    ttk.Label(filter_frame, text="Issue Date:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
+    issue_date_var = tk.StringVar(value="All")
+    issue_date_combo = ttk.Combobox(filter_frame, textvariable=issue_date_var, values=["All"], state="readonly", width=16)
+    issue_date_combo.grid(row=0, column=1, sticky="w", padx=(8, 12))
     ttk.Label(filter_frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=2, sticky="w")
     press_var = tk.StringVar(value="All")
     press_combo = ttk.Combobox(filter_frame, textvariable=press_var, values=["All", "Press 1", "Press 2"], state="readonly", width=12)
@@ -10446,17 +11302,13 @@ def build_main_launcher():
     ttk.Label(filter_frame, text="Format:", font=(None, 11, "bold")).grid(row=0, column=4, sticky="w")
     format_var = tk.StringVar(value="All")
     format_combo = ttk.Combobox(filter_frame, textvariable=format_var, values=["All", "Broadsheet", "Tab", "8 up"], state="readonly", width=12)
-    format_combo.grid(row=0, column=5, sticky="w", padx=(8, 12))
-    ttk.Label(filter_frame, text="Issue Date:", font=(None, 11, "bold")).grid(row=0, column=6, sticky="w")
-    issue_date_var = tk.StringVar(value="All")
-    issue_date_combo = ttk.Combobox(filter_frame, textvariable=issue_date_var, values=["All"], state="readonly", width=16)
-    issue_date_combo.grid(row=0, column=7, sticky="w", padx=(8, 0))
+    format_combo.grid(row=0, column=5, sticky="w", padx=(8, 0))
 
     columns = ("press", "format", "pages", "color_pages", "plates", "changed_by", "saved")
     tree = ttk.Treeview(frame, columns=columns, show="tree headings", selectmode="browse")
-    tree.grid(row=2, column=0, sticky="nsew", pady=(0, 0))
+    tree.grid(row=3, column=0, sticky="nsew", pady=(0, 0))
     vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-    vsb.grid(row=2, column=1, sticky="ns", pady=(0, 0))
+    vsb.grid(row=3, column=1, sticky="ns", pady=(0, 0))
     tree.configure(yscrollcommand=vsb.set)
     recent_heading_titles = {
         "press": "Press",
@@ -10761,7 +11613,7 @@ def build_main_launcher():
             path,
             template_mode=False,
             load_as_copy=True,
-            copy_blank_issue_product=True,
+            copy_blank_issue_only=True,
         )
 
     def new_layout():
@@ -10811,6 +11663,7 @@ def build_main_launcher():
             return  
         all_rows.sort(key=lambda r: (r.get("issue_dt") or datetime.max, (r.get("product") or "").lower()))  
         dialog = tk.Toplevel(root)  
+        set_window_icon(dialog)
         dialog.title("Cleanup Layouts")  
         dialog.transient(root)  
         dialog.geometry("920x420")  
@@ -11109,6 +11962,7 @@ def build_main_launcher():
 
     def show_db_maintenance_dialog():
         dialog = tk.Toplevel(root)
+        set_window_icon(dialog)
         dialog.title("DB Maintenance")
         dialog.transient(root)
         dialog.geometry("720x520")
@@ -11119,7 +11973,7 @@ def build_main_launcher():
         outer = ttk.Frame(dialog, padding=16)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(3, weight=1)
+        outer.rowconfigure(4, weight=1)
 
         ttk.Label(
             outer,
@@ -11136,20 +11990,138 @@ def build_main_launcher():
             justify="left",
         ).grid(row=1, column=0, sticky="ew", pady=(6, 10))
 
+        db_status_job = {"id": None}
+        db_status_pulse_job = {"id": None}
+        db_status_state = {"connected": False, "phase": 0, "error_text": None, "last_success": None}
+        db_status_bar = ttk.Frame(outer)
+        db_status_bar.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        db_status_bar.columnconfigure(1, weight=1)
+        db_status_indicator = tk.Canvas(db_status_bar, width=16, height=16, highlightthickness=0, bd=0)
+        db_status_indicator.grid(row=0, column=0, sticky="nw", padx=(0, 8), pady=(2, 0))
+        db_status_indicator_oval = db_status_indicator.create_oval(2, 2, 14, 14, fill="#c62828", outline="#8e0000")
+        db_status_var = tk.StringVar(value="Database: checking connection...")
+        ttk.Label(db_status_bar, textvariable=db_status_var, anchor="w", justify="left", wraplength=620).grid(row=0, column=1, sticky="ew")
+
         action_row = ttk.Frame(outer)
-        action_row.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        action_row.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         for idx in range(3):
             action_row.columnconfigure(idx, weight=1)
 
-        status_var = tk.StringVar(value="Choose a maintenance action.")
-        ttk.Label(outer, textvariable=status_var, font=(None, 10, "bold")).grid(row=4, column=0, sticky="w", pady=(10, 0))
-
         output = tk.Text(outer, wrap="word", height=16)
-        output.grid(row=3, column=0, sticky="nsew")
+        output.grid(row=4, column=0, sticky="nsew")
         output.configure(state="disabled")
         output_scroll = ttk.Scrollbar(outer, orient="vertical", command=output.yview)
         output_scroll.place(in_=output, relx=1.0, rely=0.0, relheight=1.0, x=0, y=0, anchor="ne")
         output.configure(yscrollcommand=output_scroll.set)
+
+        status_var = tk.StringVar(value="Choose a maintenance action.")
+        ttk.Label(outer, textvariable=status_var, font=(None, 10, "bold")).grid(row=5, column=0, sticky="w", pady=(10, 0))
+
+        def _db_status_colors(connected, phase):
+            phase = int(phase or 0) % 2
+            if connected:
+                return ("#50c878", "#2e7d32") if phase == 0 else ("#2e7d32", "#1b5e20")
+            return ("#ff6f61", "#c62828") if phase == 0 else ("#c62828", "#8e0000")
+
+        def _db_status_last_success_text():
+            dt_value = db_status_state.get("last_success")
+            if not dt_value:
+                return "never"
+            try:
+                return dt_value.strftime("%m/%d/%Y %H:%M:%S")
+            except Exception:
+                return str(dt_value)
+
+        def update_db_status_pulse():
+            db_status_pulse_job["id"] = None
+            try:
+                connected = bool(db_status_state.get("connected"))
+                phase = (int(db_status_state.get("phase", 0)) + 1) % 2
+                db_status_state["phase"] = phase
+                fill_color, outline_color = _db_status_colors(connected, phase)
+                db_status_indicator.itemconfigure(db_status_indicator_oval, fill=fill_color, outline=outline_color)
+            except Exception:
+                pass
+            try:
+                if dialog.winfo_exists():
+                    db_status_pulse_job["id"] = dialog.after(700, update_db_status_pulse)
+            except Exception:
+                db_status_pulse_job["id"] = None
+
+        def update_db_status_indicator():
+            try:
+                config = _db_load_config()
+                server_name = str(config.get("host") or "Unknown Server")
+                database_name = str(config.get("database") or "Unknown Database")
+            except Exception:
+                server_name = "Unknown Server"
+                database_name = "Unknown Database"
+            connected = False
+            error_text = None
+            try:
+                conn = _db_connect()
+                try:
+                    cur = conn.cursor()
+                    try:
+                        cur.execute("SELECT 1")
+                        cur.fetchone()
+                        connected = True
+                        db_status_state["last_success"] = datetime.now()
+                    finally:
+                        try:
+                            cur.close()
+                        except Exception:
+                            pass
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                error_text = str(exc)
+                connected = False
+            db_status_state["connected"] = connected
+            db_status_state["error_text"] = error_text
+            try:
+                fill_color, outline_color = _db_status_colors(connected, db_status_state.get("phase", 0))
+                db_status_indicator.itemconfigure(db_status_indicator_oval, fill=fill_color, outline=outline_color)
+                last_success_text = _db_status_last_success_text()
+                if connected:
+                    db_status_var.set(
+                        f"Database: {server_name} / {database_name}\nLast successful check: {last_success_text}"
+                    )
+                else:
+                    message = (
+                        f"Database: {server_name} / {database_name} (offline)\n"
+                        + f"Last successful check: {last_success_text}"
+                    )
+                    if error_text:
+                        message += "\nError: " + error_text
+                    db_status_var.set(message)
+            except Exception:
+                pass
+
+        def schedule_db_status_check(delay_ms=15000):
+            try:
+                if db_status_job["id"] is not None:
+                    dialog.after_cancel(db_status_job["id"])
+            except Exception:
+                pass
+            try:
+                db_status_job["id"] = dialog.after(int(delay_ms), run_db_status_check)
+            except Exception:
+                db_status_job["id"] = None
+
+        def run_db_status_check():
+            db_status_job["id"] = None
+            try:
+                update_db_status_indicator()
+            finally:
+                try:
+                    if dialog.winfo_exists():
+                        schedule_db_status_check(15000)
+                except Exception:
+                    pass
 
         def log_message(message_text, clear=False):
             output.configure(state="normal")
@@ -11377,9 +12349,29 @@ def build_main_launcher():
         ttk.Button(action_row, text="Restore Database", command=maintenance_restore, width=20).grid(row=1, column=0, sticky="ew", padx=(0, 8))
         ttk.Button(action_row, text="Optimize Database", command=maintenance_optimize, width=20).grid(row=1, column=1, sticky="ew", padx=(0, 8))
 
+        def close_db_maintenance_dialog():
+            try:
+                if db_status_job["id"] is not None:
+                    dialog.after_cancel(db_status_job["id"])
+            except Exception:
+                pass
+            try:
+                if db_status_pulse_job["id"] is not None:
+                    dialog.after_cancel(db_status_pulse_job["id"])
+            except Exception:
+                pass
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
         footer = ttk.Frame(outer)
-        footer.grid(row=5, column=0, sticky="e", pady=(12, 0))
-        ttk.Button(footer, text="Close", command=dialog.destroy, width=12).pack(side="right")
+        footer.grid(row=6, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(footer, text="Close", command=close_db_maintenance_dialog, width=12).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", close_db_maintenance_dialog)
+        update_db_status_indicator()
+        update_db_status_pulse()
+        schedule_db_status_check(15000)
 
     def _on_main_tree_select(event=None):
         show_preview(selected_path())
@@ -11398,7 +12390,7 @@ def build_main_launcher():
     tree.bind("<<TreeviewSelect>>", _on_main_tree_select)
     tree.bind("<Double-Button-1>", _on_main_tree_double_click)
     btns = ttk.Frame(frame)
-    btns.grid(row=3, column=0, columnspan=2, pady=12, sticky="ew")
+    btns.grid(row=4, column=0, columnspan=2, pady=(2, 0), sticky="ew")
     btns.columnconfigure(0, weight=1)
     left_btns = ttk.Frame(btns)
     left_btns.grid(row=0, column=0, sticky="w")
@@ -11412,22 +12404,18 @@ def build_main_launcher():
     ttk.Button(right_btns, text="Delete", command=delete_selected, width=12).pack(side="right", padx=(0, 8))
     if allow_launcher_maintenance_actions:
         ttk.Button(right_btns, text="DB Maintenance", command=show_db_maintenance_dialog, width=16).pack(side="right", padx=(0, 8))
-    preview_box = ttk.LabelFrame(paned, text="Preview", padding=8)
+    preview_pane = ttk.Frame(paned, padding=(0, 0, 0, 0))
+    preview_pane.columnconfigure(0, weight=1)
+    preview_pane.rowconfigure(0, weight=1)
+    preview_box = ttk.Frame(preview_pane, padding=(8, 0, 8, 8))
+    preview_box.grid(row=0, column=0, sticky="nsew")
     preview_box.columnconfigure(0, weight=1)
+    preview_box.rowconfigure(0, weight=1)
     preview_label = ttk.Label(preview_box, text="Select a layout to preview", anchor="center", justify="center")
     preview_label.grid(row=0, column=0, sticky="nsew")
-    preview_box.rowconfigure(0, weight=1)
-    db_status_bar = ttk.Frame(preview_box, padding=(0, 8, 0, 0))
-    db_status_bar.grid(row=1, column=0, sticky="ew")
-    db_status_bar.columnconfigure(1, weight=1)
-    db_status_indicator = tk.Canvas(db_status_bar, width=16, height=16, highlightthickness=0, bd=0)
-    db_status_indicator.grid(row=0, column=0, sticky="nw", padx=(0, 8), pady=(2, 0))
-    db_status_indicator_oval = db_status_indicator.create_oval(2, 2, 14, 14, fill="#c62828", outline="#8e0000")
-    db_status_var = tk.StringVar(value="Database: checking connection...")
-    ttk.Label(db_status_bar, textvariable=db_status_var, anchor="w", justify="left", wraplength=460).grid(row=0, column=1, sticky="ew")
     preview_label.bind("<Configure>", lambda e: _render_preview_panel_image(preview_label, preview_state), add="+")
-    paned.add(preview_box, minsize=160)
-    _bind_preview_pane_memory(root, "main_launcher", paned, preview_box, default_height=240)
+    paned.add(preview_pane, minsize=160)
+    _bind_preview_pane_memory(root, "main_launcher", paned, preview_pane, default_height=240)
     # Print buttons for selected layout
     def _print_selected_starter():
         path = selected_path()
@@ -11470,136 +12458,10 @@ def build_main_launcher():
     ttk.Button(left_btns, text="Print Starter", command=_print_selected_starter, width=14).pack(side="left", padx=(8, 8))
     ttk.Button(left_btns, text="Print Layout", command=_print_selected_layout, width=12).pack(side="left", padx=(0, 8))
 
-    def _db_status_colors(connected, phase):
-        phase = int(phase or 0) % 2
-        if connected:
-            return ("#50c878", "#2e7d32") if phase == 0 else ("#2e7d32", "#1b5e20")
-        return ("#ff6f61", "#c62828") if phase == 0 else ("#c62828", "#8e0000")
-
-    def _db_status_last_success_text():
-        dt_value = db_status_state.get("last_success")
-        if not dt_value:
-            return "never"
-        try:
-            return dt_value.strftime("%m/%d/%Y %H:%M:%S")
-        except Exception:
-            return str(dt_value)
-
-    def update_db_status_pulse():
-        db_status_pulse_job["id"] = None
-        try:
-            connected = bool(db_status_state.get("connected"))
-            phase = (int(db_status_state.get("phase", 0)) + 1) % 2
-            db_status_state["phase"] = phase
-            fill_color, outline_color = _db_status_colors(connected, phase)
-            db_status_indicator.itemconfigure(db_status_indicator_oval, fill=fill_color, outline=outline_color)
-        except Exception:
-            pass
-        try:
-            if root.winfo_exists():
-                db_status_pulse_job["id"] = root.after(700, update_db_status_pulse)
-        except Exception:
-            db_status_pulse_job["id"] = None
-
-    def update_db_status_indicator():
-        try:
-            config = _db_load_config()
-            server_name = str(config.get("host") or "Unknown Server")
-            database_name = str(config.get("database") or "Unknown Database")
-        except Exception:
-            server_name = "Unknown Server"
-            database_name = "Unknown Database"
-        connected = False
-        error_text = None
-        try:
-            conn = _db_connect()
-            try:
-                cur = conn.cursor()
-                try:
-                    cur.execute("SELECT 1")
-                    cur.fetchone()
-                    connected = True
-                    db_status_state["last_success"] = datetime.now()
-                finally:
-                    try:
-                        cur.close()
-                    except Exception:
-                        pass
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        except Exception as exc:
-            error_text = str(exc)
-            connected = False
-        db_status_state["connected"] = connected
-        db_status_state["error_text"] = error_text
-        try:
-            fill_color, outline_color = _db_status_colors(connected, db_status_state.get("phase", 0))
-            db_status_indicator.itemconfigure(db_status_indicator_oval, fill=fill_color, outline=outline_color)
-            last_success_text = _db_status_last_success_text()
-            if connected:
-                db_status_var.set(
-                    f"Database: {server_name} / {database_name}\nLast successful check: {last_success_text}"
-                )
-            else:
-                message = (
-                    f"Database: {server_name} / {database_name} (offline)\n"
-                    + f"Last successful check: {last_success_text}"
-                )
-                if error_text:
-                    message += "\nError: " + error_text
-                db_status_var.set(message)
-        except Exception:
-            pass
-
-    def schedule_db_status_check(delay_ms=15000):
-        try:
-            if db_status_job["id"] is not None:
-                root.after_cancel(db_status_job["id"])
-        except Exception:
-            pass
-        try:
-            db_status_job["id"] = root.after(int(delay_ms), run_db_status_check)
-        except Exception:
-            db_status_job["id"] = None
-
-    def run_db_status_check():
-        db_status_job["id"] = None
-        try:
-            update_db_status_indicator()
-        finally:
-            try:
-                if root.winfo_exists():
-                    schedule_db_status_check(15000)
-            except Exception:
-                pass
-
     def schedule_version_check(delay_ms=CHANGELOG_CHECK_INTERVAL_MS):
         try:
             if version_check_job["id"] is not None:
                 root.after_cancel(version_check_job["id"])
-        except Exception:
-            pass
-        try:
-            if db_status_job["id"] is not None:
-                root.after_cancel(db_status_job["id"])
-        except Exception:
-            pass
-        try:
-            if db_status_pulse_job["id"] is not None:
-                root.after_cancel(db_status_pulse_job["id"])
-        except Exception:
-            pass
-        try:
-            if db_status_job["id"] is not None:
-                root.after_cancel(db_status_job["id"])
-        except Exception:
-            pass
-        try:
-            if db_status_pulse_job["id"] is not None:
-                root.after_cancel(db_status_pulse_job["id"])
         except Exception:
             pass
         try:
@@ -11637,16 +12499,14 @@ def build_main_launcher():
             pass
         _persist_bound_preview_panes(root)
         close_preview()
+        unregister_single_instance_window(root)
         root.destroy()  
     root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
     root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
     root.protocol("WM_DELETE_WINDOW", on_close)  
     refresh(preserve_state=False)  
-    update_db_status_indicator()
-    update_db_status_pulse()
     schedule_refresh()  
     schedule_version_check()
-    schedule_db_status_check(15000)
     root.mainloop()
 
 # ===== END: launchers.py =====
@@ -11724,7 +12584,7 @@ def ensure_dir(path: str):
 
 
 def _db_load_config():
-    config_path = os.path.join(MAIN_DIR, _DB_CONFIG_FILENAME)
+    config_path = get_selected_db_config_path()
     data = _FS_safe_read_json(config_path)
     if not isinstance(data, dict):
         raise RuntimeError(f"Database configuration file is missing or invalid: {config_path}")
@@ -11752,15 +12612,7 @@ def _db_import_driver():
         try:
             driver = importlib.import_module("psycopg")
         except Exception:
-            if not ensure_runtime_dependencies(force=True, prompt_user=True):
-                raise RuntimeError("PostgreSQL driver is required to continue.")
-            try:
-                driver = importlib.import_module("psycopg2")
-            except Exception:
-                try:
-                    driver = importlib.import_module("psycopg")
-                except Exception as exc:
-                    raise RuntimeError("PostgreSQL driver not found after the install attempt.") from exc
+            raise RuntimeError("PostgreSQL driver not found in the packaged Press Layouts executable.")
     _DB_DRIVER = driver
     return driver
 
@@ -12438,10 +13290,15 @@ os.remove = _db_os_remove
 
 
 def main():
-    if not ensure_runtime_dependencies(force=True, prompt_user=True):
+    if not ensure_single_main_launcher_instance():
         return
-    _db_bootstrap()
-    build_main_launcher()
+    try:
+        if not prompt_admin_db_config_selection():
+            return
+        _db_bootstrap()
+        build_main_launcher()
+    finally:
+        release_single_main_launcher_instance()
 
 # ===== END: PostgreSQL database conversion (v1.2.0) =====
 
