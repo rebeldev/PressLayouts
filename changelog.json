@@ -1,6 +1,233 @@
 {
-  "current_version": "1.3.10",
+  "current_version": "1.3.26",
   "versions": [
+    {
+      "version": "1.3.26",
+      "released": "6-24-2026",
+      "summary": "Restores true printed top alignment for all starter-sheet formats on the rotated landscape print path.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed shared starter-sheet top alignment so Standard, USAT, and NYT now align to the physical printed top edge again on the rotated landscape print path by anchoring the rotated-image X position instead of centering it.",
+            "Kept the shared starter-sheet print path centered on the physical printed left/right axis while maintaining the existing 3/8 inch requested margins and the non-cutting trimmed-content print flow."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.25",
+      "released": "6-24-2026",
+      "summary": "Simplifies starter-sheet printing to true horizontal centering plus top alignment with 3/8 inch margins.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed shared starter-sheet printing so align_top now means centered horizontally with the rendered top edge aligned to the requested top margin, instead of the previous landscape-specific left-edge anchoring behavior.",
+            "Changed the shared starter-sheet print helper to use 3/8 inch margins on all four sides while restoring normal whitespace trimming so the starter-sheet content is centered horizontally and top-aligned from its actual rendered content bounds.",
+            "Removed the temporary starter-sheet direction labels, the quarter-inch render shift, and the targeted crop experiments so the shared starter-sheet print path is now a clean centered-horizontal plus top-aligned implementation for both Starter-button and macro prints."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.24",
+      "released": "6-24-2026",
+      "summary": "Adjusts starter-sheet printed margins toward 3/8 inch by applying targeted shared crop trims before printing.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the shared starter-sheet print helper to crop 3/8 inch from the left, 5/16 inch from the right, and 3/8 inch from the top of the fully rendered starter-sheet image before printing, while leaving the bottom unchanged because it was already close enough.",
+            "Kept starter-sheet whitespace trimming disabled in the shared print helper so the targeted manual crop and render-time right shift are preserved instead of being auto-trimmed away."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.23",
+      "released": "6-24-2026",
+      "summary": "Stops trimming starter-sheet whitespace before printing so the shared render-time right shift can actually reach paper.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed starter-sheet right-shift tests that appeared to change scaling instead of moving on paper by adding a trim_whitespace switch to the shared print helper and disabling whitespace trimming for starter-sheet prints.",
+            "Kept layout printing on the existing trimmed print path while starter-sheet printing now preserves the full rendered page canvas so shared render-time left/right movement is no longer cropped back out before printing."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.22",
+      "released": "6-24-2026",
+      "summary": "Moves the entire starter-sheet render 1/4 inch right because printer-position adjustments were not moving anything on paper.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the shared starter-sheet renderer to shift the fully rendered starter-sheet image 0.25 inch to the right inside the page canvas so every printed starter-sheet element moves together on paper.",
+            "Removed the ineffective shared starter-sheet print-position X adjustment after print testing showed it did not move the printed output at all.",
+            "Kept the temporary TOP, BOTTOM, LEFT (-1/4\"), and RIGHT (+1/4\") diagnostic labels in the shared starter-sheet renderer so the next printed test can confirm that the whole starter sheet, including the labels, actually moved right."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.21",
+      "released": "6-24-2026",
+      "summary": "Moves starter-sheet output 1/4 inch right on the shared print path and updates the temporary side labels to show the test direction.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the shared starter-sheet printer helper to move printed starter sheets 0.25 inch to the right by applying the offset on the print-position X axis now that printed edge verification confirmed the physical left and right directions match the rendered image.",
+            "Changed the temporary shared starter-sheet side labels to show LEFT (-1/4\") and RIGHT (+1/4\") while keeping the TOP and BOTTOM diagnostics visible for print-direction verification."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.20",
+      "released": "6-24-2026",
+      "summary": "Adds temporary printed edge labels to starter sheets so the physical top, left, right, and bottom can be verified.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added temporary TOP, BOTTOM, LEFT, and RIGHT diagnostic labels around the shared starter-sheet renderer so both Starter-button and macro starter-sheet prints show which rendered edge lands on each physical printed side."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Removed the temporary quarter-inch starter-sheet render shift while printed edge diagnostics are being used so the direction test shows the unshifted shared starter-sheet output."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.19",
+      "released": "6-24-2026",
+      "summary": "Moves starter-sheet output right by a quarter inch through the shared rotated starter-sheet renderer.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the shared starter-sheet renderer to shift rendered starter-sheet content 0.25 inch on the rotated print-right axis inside the page image so printed starter sheets move right even when printer scaling leaves no extra placement slack.",
+            "Removed the starter-sheet printer-helper position adjustment so both Starter-button and macro starter-sheet prints now rely on the same shared rendered quarter-inch right shift."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.18",
+      "released": "6-24-2026",
+      "summary": "Moves starter-sheet output on the actual printed left axis for the rotated landscape print path.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed starter-sheet left-margin adjustment to move along the shared starter-sheet print path's actual printed left axis by applying the quarter-inch offset on Y instead of X for the rotated landscape output.",
+            "Removed the old starter-sheet render-time image shift so the shared starter-sheet print helper is now the only place that applies the quarter-inch printed left adjustment."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.17",
+      "released": "6-24-2026",
+      "summary": "Removes temporary starter-sheet test markers and routes both macro and Starter-button printing through the same shared starter-sheet print path.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Removed the temporary starter-sheet test markers and removed the launcher (TEST) flags after print-path verification was completed.",
+            "Changed Starter-button printing in the layout window to use the same shared starter-sheet image renderer and starter-sheet printer helper used by macro starter-sheet printing so both outputs now match.",
+            "Changed the shared starter-sheet printer helper to accept an optional printer name so both macro and Starter-button printing can use the same starter-sheet print function."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.16",
+      "released": "6-24-2026",
+      "summary": "Fixes the missed editor-local starter-sheet print path used by the layout window Starter button.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed starter-sheet debugging and margin-shift work to also update the separate editor-local starter-sheet renderer and printer path inside the layout window, which is the path used by the Starter print button.",
+            "Added a temporary EDITOR TEST marker and the same 0.25 inch right shift to the editor-local starter-sheet render path so printed output can confirm the correct starter-sheet code path is being hit."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.15",
+      "released": "6-24-2026",
+      "summary": "Adds a visible TEST flag to the main launcher title area so source-run builds are obvious at startup.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a red (TEST) flag beside the Layouts header and changed the launcher window title to Press Layouts (TEST) so it is easy to confirm when the newest Python source file is running."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.14",
+      "released": "6-24-2026",
+      "summary": "Adds a temporary SHIFT TEST marker to starter sheets so printed output can confirm the source-code print path is being used.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a temporary visible SHIFT TEST box near the upper-left corner of generated starter sheets to confirm when starter sheets are being rendered from the currently edited Python source."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.13",
+      "released": "6-24-2026",
+      "summary": "Moves starter-sheet content right by a quarter inch inside the rendered sheet so the printed left margin actually increases.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed starter-sheet left-margin adjustments that did not visibly move on paper by shifting the rendered starter-sheet content 0.25 inch to the right inside the final sheet image before printing."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.12",
+      "released": "6-24-2026",
+      "summary": "Applies starter-sheet left margin as an explicit print-position shift so it actually moves on paper.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed starter-sheet left-margin adjustment by applying the extra 0.25 inch as an explicit print-position shift after scaling instead of only changing the requested margin box."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.11",
+      "released": "6-24-2026",
+      "summary": "Increases the starter-sheet print left margin by an extra quarter inch.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed starter-sheet printing to add 0.25 inch more left margin while keeping the other default print margins the same."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.3.10",
       "released": "6-23-2026",
@@ -1205,7 +1432,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.3.10",
+    "current_release": "1.3.26",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",

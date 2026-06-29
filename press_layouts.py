@@ -4002,7 +4002,7 @@ def make_starter_sheet_image_from_data(data, format_name=None):
 
     # Render exactly for 8.5 x 11 landscape at 300 DPI.
     page_w, page_h = 3300, 2550
-    margin = 110
+    margin = 75
     gap = 36
     img = Image.new("RGB", (page_w, page_h), "white")
     draw = ImageDraw.Draw(img)
@@ -4144,6 +4144,7 @@ def make_starter_sheet_image_from_data(data, format_name=None):
     common_rows = 3
     common_cols = 2
     common_field_w = int((page_w - (2 * margin) - gap) / common_cols)
+
     common_fields_for_draw = list(common_fields)
     for index, field in enumerate(common_fields_for_draw):
         row = index // common_cols
@@ -4212,7 +4213,6 @@ def make_starter_sheet_image_from_data(data, format_name=None):
                 label_max_size=label_size,
                 value_max_size=value_size,
             )
-
     return img
 
 
@@ -4232,7 +4232,7 @@ def get_default_printer_name():
     return printer_name
 
 
-def direct_print_image_file(img_path, printer_name=None, copies=1, orientation="Landscape", margins_inches=None, align_top=False):
+def direct_print_image_file(img_path, printer_name=None, copies=1, orientation="Landscape", margins_inches=None, align_top=False, position_adjust_inches=None, trim_whitespace=True):
     printer_name = str(printer_name or '').strip() or get_default_printer_name()
     try:
         import win32ui
@@ -4258,20 +4258,21 @@ def direct_print_image_file(img_path, printer_name=None, copies=1, orientation="
 
         # Trim white outer padding so the print fills the page more tightly
         # while still respecting the requested printer margins.
-        try:
-            bg = Image.new('RGB', img.size, 'white')
-            diff = ImageChops.difference(img, bg)
-            bbox = diff.getbbox()
-            if bbox:
-                pad = 4
-                left = max(0, int(bbox[0]) - pad)
-                top = max(0, int(bbox[1]) - pad)
-                right = min(int(img.size[0]), int(bbox[2]) + pad)
-                bottom = min(int(img.size[1]), int(bbox[3]) + pad)
-                if right > left and bottom > top:
-                    img = img.crop((left, top, right, bottom))
-        except Exception:
-            pass
+        if bool(trim_whitespace):
+            try:
+                bg = Image.new('RGB', img.size, 'white')
+                diff = ImageChops.difference(img, bg)
+                bbox = diff.getbbox()
+                if bbox:
+                    pad = 4
+                    left = max(0, int(bbox[0]) - pad)
+                    top = max(0, int(bbox[1]) - pad)
+                    right = min(int(img.size[0]), int(bbox[2]) + pad)
+                    bottom = min(int(img.size[1]), int(bbox[3]) + pad)
+                    if right > left and bottom > top:
+                        img = img.crop((left, top, right, bottom))
+            except Exception:
+                pass
 
         orientation_text = str(orientation or 'Landscape').strip().title()
         if orientation_text not in ('Landscape', 'Portrait'):
@@ -4345,16 +4346,27 @@ def direct_print_image_file(img_path, printer_name=None, copies=1, orientation="
         scale = min(safe_w / float(img.size[0]), safe_h / float(img.size[1]))
         scaled = img.resize((max(1, int(img.size[0] * scale)), max(1, int(img.size[1] * scale))), Image.LANCZOS)
         dib = ImageWin.Dib(scaled)
-        # On this landscape print path the image is rotated before printing,
-        # so a "top-aligned" starter sheet needs to anchor on the leading edge
-        # after rotation. That means using the X position for landscape starter
-        # alignment instead of only changing Y.
+        # Starter sheets are rendered landscape and then rotated on the shared
+        # landscape print path. On paper, the physical top/bottom axis maps to the
+        # rotated image X axis, while the physical left/right axis maps to Y.
+        # So for align_top=True we must anchor X to the top margin while keeping Y
+        # centered so the printed sheet is top-aligned and still centered horizontally.
         if align_top and orientation_text == 'Landscape':
             x = int(offset_x + left_margin)
             y = int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
         else:
             x = int(offset_x + left_margin + ((safe_w - scaled.size[0]) / 2))
             y = int(offset_y + top_margin) if align_top else int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
+
+        position_adjust_inches = position_adjust_inches if isinstance(position_adjust_inches, dict) else {}
+        adjust_x = max(0, int(round(float(position_adjust_inches.get("x", 0.0)) * dpi_x)))
+        adjust_y = max(0, int(round(float(position_adjust_inches.get("y", 0.0)) * dpi_y)))
+        min_x = int(offset_x + left_margin)
+        min_y = int(offset_y + top_margin)
+        max_x = int(offset_x + left_margin + max(0, safe_w - scaled.size[0]))
+        max_y = int(offset_y + top_margin + max(0, safe_h - scaled.size[1]))
+        x = max(min_x, min(max_x, int(x + adjust_x)))
+        y = max(min_y, min(max_y, int(y + adjust_y)))
 
         dc.StartDoc(img_path)
         for _ in range(max(1, int(copies or 1))):
@@ -4403,7 +4415,7 @@ def _print_layout_data_to_default_printer(data, copies=5):
             pass
 
 
-def _print_starter_sheet_data_to_default_printer(data, copies=1):
+def _print_starter_sheet_data_to_default_printer(data, copies=1, printer_name=None):
     data = data if isinstance(data, dict) else {}
     img = make_starter_sheet_image_from_data(data)
     import tempfile
@@ -4411,14 +4423,21 @@ def _print_starter_sheet_data_to_default_printer(data, copies=1):
     os.close(fd)
     try:
         img.save(path, format='PNG', dpi=(300, 300))
-        return direct_print_image_file(path, copies=max(1, int(copies or 1)), orientation='Landscape', align_top=True)
+        starter_sheet_margins = {"left": 0.05, "top": 0.05, "right": 0.05, "bottom": 0.375}
+        return direct_print_image_file(
+            path,
+            printer_name=printer_name,
+            copies=max(1, int(copies or 1)),
+            orientation='Landscape',
+            margins_inches=starter_sheet_margins,
+            align_top=True,
+            trim_whitespace=True,
+        )
     finally:
         try:
             os.remove(path)
         except Exception:
             pass
-
-
 def print_layout_json_to_default_printer(json_path, copies=5):
     data = safe_read_json(json_path)
     if not isinstance(data, dict):
@@ -5214,234 +5233,11 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
 
 
     def _make_starter_sheet_image(format_name, fields):
-        try:
-            from PIL import Image, ImageDraw
-        except Exception:
-            raise RuntimeError("Pillow is required for starter sheet printing. Please install pillow (pip install pillow).")
-
-        publication = str(fields.get("publication", "") or "").strip()
-        issue_date = str(fields.get("issue_date", "") or "").strip()
-        color_pages = str(fields.get("color_pages", "") or "").strip()
-        plates = str(fields.get("plates", "") or "").strip()
-        total_pages = str(fields.get("total_pages", "") or "").strip()
-        fmt_key = (format_name or "Standard").strip().upper()
-        if fmt_key not in {"STANDARD", "USAT", "NYT"}:
-            fmt_key = "STANDARD"
-
-        # Render exactly for 8.5 x 11 landscape at 300 DPI.
-        page_w, page_h = 3300, 2550
-        margin = 110
-        gap = 36
-        img = Image.new("RGB", (page_w, page_h), "white")
-        draw = ImageDraw.Draw(img)
-
-        common_fields = [
-            {"label": "Issue Date", "value": issue_date, "handwritten": False},
-            {"label": "Color Pages", "value": color_pages, "handwritten": False},
-            {"label": "Number of Plates", "value": plates, "handwritten": False},
-            {"label": "Total Pages", "value": total_pages, "handwritten": False},
-            {"label": "Last Image", "value": "", "handwritten": True},
-            {"label": "Last Plate", "value": "", "handwritten": True},
-        ]
-        color_change_fields = [
-            {"label": "Color Addition", "value": "", "handwritten": True},
-            {"label": "Color Drop", "value": "", "handwritten": True},
-        ]
-        extra_fields_map = {
-            "STANDARD": [],
-            "USAT": [
-                {"label": "First Image", "value": "", "handwritten": True},
-            ],
-            "NYT": [
-                {"label": "Kills", "value": "", "handwritten": True},
-                {"label": "PS (Postscripts)", "value": "", "handwritten": True},
-                {"label": "Closed", "value": "", "handwritten": True},
-            ],
-        }
-        extra_fields = extra_fields_map.get(fmt_key, [])
-
-        def _measure(draw_obj, text, font):
-            content = text or ""
-            try:
-                left, top, right, bottom = draw_obj.textbbox((0, 0), content, font=font)
-                return max(0, right - left), max(0, bottom - top)
-            except Exception:
-                return draw_obj.textsize(content, font=font)
-
-        def _wrap_lines(text, font, max_width, max_lines=2):
-            content = str(text or "").strip()
-            if not content:
-                return [""]
-            words = content.split()
-            if len(words) <= 1:
-                return [content]
-            lines = []
-            current = words[0]
-            for word in words[1:]:
-                candidate = f"{current} {word}"
-                if _measure(draw, candidate, font)[0] <= max_width:
-                    current = candidate
-                else:
-                    lines.append(current)
-                    current = word
-            lines.append(current)
-            while len(lines) > max_lines:
-                lines[-2] = f"{lines[-2]} {lines[-1]}".strip()
-                lines.pop()
-            return lines
-
-        def _fit_text_lines(text, max_width, max_height, max_size, min_size=28, bold=False, max_lines=2):
-            content = str(text or "").strip()
-            if not content:
-                return [""], _render_load_starter_font(max_size, bold=bold)
-            for size in range(int(max_size), int(min_size) - 1, -2):
-                font = _render_load_starter_font(size, bold=bold)
-                lines = _wrap_lines(content, font, max_width, max_lines=max_lines)
-                sizes = [_measure(draw, line, font) for line in lines]
-                widths = [w for w, _h in sizes] or [0]
-                heights = [h for _w, h in sizes] or [0]
-                line_gap = max(10, int(size * 0.18))
-                total_h = sum(heights) + line_gap * max(0, len(lines) - 1)
-                if max(widths) <= max_width and total_h <= max_height:
-                    return lines, font
-            font = _render_load_starter_font(min_size, bold=bold)
-            return _wrap_lines(content, font, max_width, max_lines=max_lines), font
-
-        def _draw_centered_lines(lines, font, box, fill="black"):
-            x0, y0, x1, y1 = [int(v) for v in box]
-            lines = list(lines or [""])
-            sizes = [_measure(draw, line, font) for line in lines]
-            heights = [h for _w, h in sizes] or [0]
-            font_size = getattr(font, "size", 48)
-            line_gap = max(10, int(font_size * 0.18))
-            total_h = sum(heights) + line_gap * max(0, len(lines) - 1)
-            y = y0 + max(0, int(((y1 - y0) - total_h) / 2))
-            for line, (width, height) in zip(lines, sizes):
-                x = x0 + max(0, int(((x1 - x0) - width) / 2))
-                draw.text((x, y), line or "", fill=fill, font=font)
-                y += height + line_gap
-
-        def _draw_field_block(box, label, value="", handwritten=False, label_max_size=56, value_max_size=88):
-            x0, y0, x1, y1 = [int(v) for v in box]
-            radius = 26
-            border = 6
-            label_band_h = max(104, int((y1 - y0) * 0.28))
-            draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, outline="black", width=border)
-            draw.rounded_rectangle((x0 + border, y0 + border, x1 - border, y0 + label_band_h), radius=max(8, radius - 8), fill="#f2f2f2")
-            draw.line((x0 + border, y0 + label_band_h, x1 - border, y0 + label_band_h), fill="black", width=4)
-
-            label_lines, label_font = _fit_text_lines(
-                label,
-                max_width=max(100, (x1 - x0) - 70),
-                max_height=max(40, label_band_h - 26),
-                max_size=label_max_size,
-                min_size=26,
-                bold=True,
-                max_lines=2,
-            )
-            _draw_centered_lines(label_lines, label_font, (x0 + 24, y0 + 10, x1 - 24, y0 + label_band_h - 10))
-
-            content_box = (x0 + 34, y0 + label_band_h + 18, x1 - 34, y1 - 30)
-            if handwritten:
-                line_y = y1 - 78
-                draw.line((content_box[0] + 8, line_y, content_box[2] - 8, line_y), fill="black", width=5)
-            else:
-                value_lines, value_font = _fit_text_lines(
-                    value,
-                    max_width=max(100, content_box[2] - content_box[0]),
-                    max_height=max(40, content_box[3] - content_box[1]),
-                    max_size=value_max_size,
-                    min_size=32,
-                    bold=True,
-                    max_lines=2,
-                )
-                _draw_centered_lines(value_lines, value_font, content_box)
-
-        publication_box = (margin, 70, page_w - margin, 310)
-        _draw_field_block(
-            publication_box,
-            "Publication",
-            publication,
-            handwritten=False,
-            label_max_size=62,
-            value_max_size=116,
-        )
-
-        common_top = 360
-        common_field_h = 300
-        common_rows = 3
-        common_cols = 2
-        common_field_w = int((page_w - (2 * margin) - gap) / common_cols)
-        common_fields_for_draw = list(common_fields)
-        for index, field in enumerate(common_fields_for_draw):
-            row = index // common_cols
-            col = index % common_cols
-            x0 = margin + col * (common_field_w + gap)
-            y0 = common_top + row * (common_field_h + gap)
-            x1 = x0 + common_field_w
-            y1 = y0 + common_field_h
-            _draw_field_block(
-                (x0, y0, x1, y1),
-                field.get("label", ""),
-                field.get("value", ""),
-                handwritten=bool(field.get("handwritten")),
-                label_max_size=58,
-                value_max_size=88,
-            )
-
-        color_change_top = common_top + common_rows * (common_field_h + gap)
-        for index, field in enumerate(color_change_fields):
-            col = index % common_cols
-            x0 = margin + col * (common_field_w + gap)
-            y0 = color_change_top
-            x1 = x0 + common_field_w
-            y1 = y0 + common_field_h
-            _draw_field_block(
-                (x0, y0, x1, y1),
-                field.get("label", ""),
-                field.get("value", ""),
-                handwritten=True,
-                label_max_size=58,
-                value_max_size=88,
-            )
-
-        extras_top = color_change_top + common_field_h + gap + 10
-        if fmt_key == "USAT" and extra_fields:
-            field = extra_fields[0]
-            extra_box = (margin, extras_top, margin + common_field_w, extras_top + common_field_h)
-            _draw_field_block(
-                extra_box,
-                field.get("label", ""),
-                field.get("value", ""),
-                handwritten=True,
-                label_max_size=58,
-                value_max_size=88,
-            )
-        elif fmt_key == "NYT" and extra_fields:
-            draw.line((margin, extras_top + 78, page_w - margin, extras_top + 78), fill="black", width=4)
-            nyt_top = extras_top + 110
-            nyt_row1_y0 = nyt_top
-            nyt_row1_y1 = nyt_row1_y0 + common_field_h
-            nyt_row2_y0 = nyt_row1_y1 + gap
-            nyt_row2_y1 = nyt_row2_y0 + common_field_h
-            nyt_positions = [
-                (margin, nyt_row1_y0, margin + common_field_w, nyt_row1_y1),
-                (margin + common_field_w + gap, nyt_row1_y0, page_w - margin, nyt_row1_y1),
-                (margin, nyt_row2_y0, page_w - margin, nyt_row2_y1),
-            ]
-            nyt_label_sizes = [46, 46, 50]
-            nyt_value_sizes = [80, 80, 84]
-            for field, box, label_size, value_size in zip(extra_fields, nyt_positions, nyt_label_sizes, nyt_value_sizes):
-                _draw_field_block(
-                    box,
-                    field.get("label", ""),
-                    field.get("value", ""),
-                    handwritten=True,
-                    label_max_size=label_size,
-                    value_max_size=value_size,
-                )
-
-        return img
+        data = collect_layout_data(ctx)
+        data = data if isinstance(data, dict) else {}
+        if format_name:
+            data["starter_format"] = str(format_name or "").strip()
+        return make_starter_sheet_image_from_data(data, format_name=format_name)
 
     def _show_print_dialog(dialog_title="Print", default_copies=1):
         try:
@@ -5510,185 +5306,30 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     def _show_starter_printer_dialog():
         return _show_print_dialog("Print", default_copies=1)
 
-    def _direct_print_image(img_path, printer_name, copies, orientation="Landscape", margins_inches=None, align_top=False):
-        try:
-            import win32ui
-            import win32con
-            import win32print
-            from PIL import Image, ImageWin, ImageChops
-            import traceback
-        except Exception as e:
-            raise RuntimeError(f"Missing dependency: {e}")
-
-        dc = None
-        printer_handle = None
-        try:
-            img = Image.open(img_path)
-            img.load()
-            if img.mode == 'RGBA' or (hasattr(img, 'getbands') and 'A' in img.getbands()):
-                rgba = img.convert('RGBA')
-                white_bg = Image.new('RGB', rgba.size, 'white')
-                white_bg.paste(rgba, mask=rgba.getchannel('A'))
-                img = white_bg
-            elif img.mode != 'RGB':
-                img = img.convert('RGB')
-
-            # Trim white outer padding so the print fills the page more tightly
-            # while still respecting the requested printer margins.
-            try:
-                bg = Image.new('RGB', img.size, 'white')
-                diff = ImageChops.difference(img, bg)
-                bbox = diff.getbbox()
-                if bbox:
-                    pad = 4
-                    left = max(0, int(bbox[0]) - pad)
-                    top = max(0, int(bbox[1]) - pad)
-                    right = min(int(img.size[0]), int(bbox[2]) + pad)
-                    bottom = min(int(img.size[1]), int(bbox[3]) + pad)
-                    if right > left and bottom > top:
-                        img = img.crop((left, top, right, bottom))
-            except Exception:
-                pass
-
-            orientation_text = str(orientation or 'Landscape').strip().title()
-            if orientation_text not in ('Landscape', 'Portrait'):
-                orientation_text = 'Landscape'
-
-            # Force every landscape print job to rotate 90 degrees so the
-            # physical print comes out in landscape on this pressroom setup.
-            if orientation_text == 'Landscape':
-                img = img.transpose(Image.ROTATE_90)
-            elif orientation_text == 'Portrait' and img.width > img.height:
-                img = img.transpose(Image.ROTATE_90)
-
-            margins_inches = margins_inches or {"left": 0.15, "top": 0.15, "right": 0.15, "bottom": 0.15}
-
-            # Force the printer DEVMODE orientation to match the requested output.
-            devmode = None
-            try:
-                printer_handle = win32print.OpenPrinter(printer_name)
-                printer_info = win32print.GetPrinter(printer_handle, 2)
-                if isinstance(printer_info, dict):
-                    devmode = printer_info.get('pDevMode')
-                if devmode is not None:
-                    requested_orientation = 1 if orientation_text == 'Landscape' else 2
-                    for attr in ('Orientation', 'dmOrientation'):
-                        try:
-                            setattr(devmode, attr, requested_orientation)
-                            break
-                        except Exception:
-                            pass
-                    for attr in ('Fields', 'dmFields'):
-                        try:
-                            setattr(devmode, attr, int(getattr(devmode, attr)) | int(win32con.DM_ORIENTATION))
-                            break
-                        except Exception:
-                            pass
-            except Exception:
-                devmode = None
-
-            dc = win32ui.CreateDC()
-            created_dc = False
-            if devmode is not None:
-                for create_args in (
-                    ("WINSPOOL", printer_name, None, devmode),
-                    (None, printer_name, None, devmode),
-                ):
-                    try:
-                        dc.CreateDC(*create_args)
-                        created_dc = True
-                        break
-                    except Exception:
-                        continue
-            if not created_dc:
-                dc.CreatePrinterDC(printer_name)
-
-            printable_area = (dc.GetDeviceCaps(win32con.HORZRES), dc.GetDeviceCaps(win32con.VERTRES))
-            offset_x = dc.GetDeviceCaps(win32con.PHYSICALOFFSETX)
-            offset_y = dc.GetDeviceCaps(win32con.PHYSICALOFFSETY)
-            dpi_x = max(1, dc.GetDeviceCaps(win32con.LOGPIXELSX))
-            dpi_y = max(1, dc.GetDeviceCaps(win32con.LOGPIXELSY))
-
-            # Keep the already-rotated image orientation stable.
-            if orientation_text == 'Portrait' and printable_area[0] > printable_area[1] and img.width > img.height:
-                img = img.transpose(Image.ROTATE_90)
-
-            left_margin = max(0, int(round(float(margins_inches.get("left", 0.15)) * dpi_x)))
-            top_margin = max(0, int(round(float(margins_inches.get("top", 0.15)) * dpi_y)))
-            right_margin = max(0, int(round(float(margins_inches.get("right", 0.15)) * dpi_x)))
-            bottom_margin = max(0, int(round(float(margins_inches.get("bottom", 0.15)) * dpi_y)))
-            safe_w = max(1, printable_area[0] - left_margin - right_margin)
-            safe_h = max(1, printable_area[1] - top_margin - bottom_margin)
-            scale = min(safe_w / float(img.size[0]), safe_h / float(img.size[1]))
-            scaled = img.resize((max(1, int(img.size[0] * scale)), max(1, int(img.size[1] * scale))), Image.LANCZOS)
-            dib = ImageWin.Dib(scaled)
-            # On this landscape print path the image is rotated before printing,
-            # so a "top-aligned" starter sheet needs to anchor on the leading edge
-            # after rotation. That means using the X position for landscape starter
-            # alignment instead of only changing Y.
-            if align_top and orientation_text == 'Landscape':
-                x = int(offset_x + left_margin)
-                y = int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
-            else:
-                x = int(offset_x + left_margin + ((safe_w - scaled.size[0]) / 2))
-                y = int(offset_y + top_margin) if align_top else int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
-
-            dc.StartDoc(img_path)
-            for _ in range(max(1, int(copies or 1))):
-                dc.StartPage()
-                dib.draw(dc.GetHandleOutput(), (x, y, x + scaled.size[0], y + scaled.size[1]))
-                dc.EndPage()
-            dc.EndDoc()
-            return True
-        except Exception as e:
-            try:
-                err = traceback.format_exc()
-            except Exception:
-                err = str(e)
-            raise RuntimeError(err)
-        finally:
-            try:
-                if dc is not None:
-                    dc.DeleteDC()
-            except Exception:
-                pass
-            try:
-                if printer_handle is not None:
-                    win32print.ClosePrinter(printer_handle)
-            except Exception:
-                pass
+    def _direct_print_image(img_path, printer_name, copies, orientation="Landscape", margins_inches=None, align_top=False, position_adjust_inches=None):
+        return direct_print_image_file(
+            img_path,
+            printer_name=printer_name,
+            copies=copies,
+            orientation=orientation,
+            margins_inches=margins_inches,
+            align_top=align_top,
+            position_adjust_inches=position_adjust_inches,
+        )
 
     def print_starter_sheet():
         if template_mode:
             return
         format_name = starter_format_var.get().strip() or "Standard"
         try:
-            img = _make_starter_sheet_image(format_name, _starter_sheet_fields())
-            import tempfile
-            fd, path = tempfile.mkstemp(suffix=".png")
-            os.close(fd)
-            img.save(path, format="PNG", dpi=(300, 300))
-        except Exception as e:
-            messagebox.showerror("Starter Sheet", str(e))
-            return
-        try:
-            printed = False
-            error_message = None
-            if os.name == 'nt':
-                try:
-                    selection = _show_print_dialog("Print", default_copies=1)
-                    if selection:
-                        printer_name, copies = selection
-                        printed = _direct_print_image(path, printer_name, copies, orientation="Landscape", align_top=True)
-                except Exception as e:
-                    error_message = str(e)
-            if not printed:
-                if error_message:
-                    messagebox.showwarning("Starter Sheet", f"Direct print failed:\n{error_message}\n\nOpening image preview instead.")
-                try:
-                    os.startfile(path)
-                except Exception:
-                    messagebox.showinfo("Starter Sheet", f"Saved starter sheet preview to:\n{path}\nPlease open this file and print it in landscape mode.")
+            selection = _show_print_dialog("Print", default_copies=1) if os.name == 'nt' else None
+            if not selection:
+                return
+            printer_name, copies = selection
+            data = collect_layout_data(ctx)
+            data = data if isinstance(data, dict) else {}
+            data["starter_format"] = format_name
+            _print_starter_sheet_data_to_default_printer(data, copies=copies, printer_name=printer_name)
         except Exception as e:
             messagebox.showerror("Starter Sheet", str(e))
 
