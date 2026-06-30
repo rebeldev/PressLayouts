@@ -1,6 +1,27 @@
 {
-  "current_version": "1.3.26",
+  "current_version": "1.3.27",
   "versions": [
+    {
+      "version": "1.3.27",
+      "released": "6-29-2026",
+      "summary": "Makes the main launcher Live/Test database label clickable and remembers the selected database mode between launches.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added click-to-toggle behavior to the main launcher Live/Test database label so admins can switch between the LIVE and TEST database configs directly from the top status area.",
+            "Added per-user persistence for the selected database mode so Press Layouts starts with the last selected LIVE or TEST config on the next launch."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Removed the startup Live/Test database selection prompt and replaced it with silent loading of the persisted database mode, defaulting safely to LIVE when no saved selection exists.",
+            "Changed database switching to clear launcher caches and force the PostgreSQL backend to reconnect using the newly selected config before refreshing the launcher list."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.3.26",
       "released": "6-24-2026",
@@ -1432,7 +1453,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.3.26",
+    "current_release": "1.3.27",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",

@@ -1,17 +1,23 @@
-# ===== BEGIN: original press_layout_core.py =====
-import os
-import json
-import glob
-import re
-import sys
 import getpass
-import subprocess
+import glob
 import importlib
 import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
 import threading
-from datetime import datetime
 import tkinter as tk
+
+from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
+
+
+# =============================================================================
+# Runtime setup and shared paths
+# Application-wide dependency checks, icon handling, shared executable paths, and database selection startup helpers.
+# =============================================================================
 
 _RUNTIME_DEPENDENCY_CHECK_COMPLETE = False
 WINDOW_ICON_FILENAME = "l:\\icon.ico"
@@ -93,7 +99,7 @@ def ensure_runtime_dependencies(parent=None, force=False, prompt_user=True):
     _RUNTIME_DEPENDENCY_CHECK_COMPLETE = True
     return True
 
-# ===== BEGIN: config.py =====
+
 MAIN_DIR = os.path.dirname(os.path.abspath(__file__))
 SHARED_ROOT_DIR = "L:\\"
 SHARED_WORKING_ROOT_DIR = "L:\\working"
@@ -156,136 +162,148 @@ def get_selected_db_config_path():
 def get_selected_db_config_label():
     return str(SELECTED_DB_CONFIG_LABEL or "Live")
 
-def prompt_admin_db_config_selection():
-    selected_path = SHARED_LIVE_DB_CONFIG_PATH
-    selected_label = "Live"
-    if not is_admin():
-        _set_selected_db_config_path(selected_path, selected_label)
-        return True
 
-    dialog = None
-    result = {"selection": None}
+_DB_MODE_PREFERENCE_FILENAME = "db_mode.json"
+
+
+def _db_mode_preference_file_path():
+    """Return the per-user file used to remember the selected Live/Test database mode."""
+    base = (
+        os.environ.get("LOCALAPPDATA")
+        or os.environ.get("APPDATA")
+        or os.path.expanduser("~")
+    )
+    folder = os.path.join(base, "Press Layout")
     try:
-        dialog = tk.Tk()
-        set_window_icon(dialog)
-        dialog.withdraw()
-        dialog.title("Select Database")
-        dialog.resizable(False, False)
+        os.makedirs(folder, exist_ok=True)
+    except Exception:
+        folder = MAIN_DIR
+    return os.path.join(folder, _DB_MODE_PREFERENCE_FILENAME)
 
-        body = ttk.Frame(dialog, padding=16)
-        body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=1)
 
-        ttk.Label(body, text="Select Database", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
-        message = (
-            "Choose which database Press Layouts should use for this launch.\n\n"
-            f"TEST: {SHARED_TEST_DB_CONFIG_PATH}\n"
-            f"LIVE: {SHARED_LIVE_DB_CONFIG_PATH}"
-        )
-        ttk.Label(body, text=message, justify="left", wraplength=420).grid(row=1, column=0, sticky="w", pady=(10, 0))
+def _normalize_db_config_label(value):
+    """Normalize a database mode label to either Live or Test."""
+    text = str(value or "").strip().lower()
+    return "Test" if text == "test" else "Live"
 
-        button_row = ttk.Frame(body)
-        button_row.grid(row=2, column=0, sticky="e", pady=(18, 0))
 
-        def _close_with(value):
-            result["selection"] = value
-            try:
-                dialog.quit()
-            except Exception:
-                pass
+def _db_config_path_for_label(label):
+    """Return the configured database JSON path for a normalized Live/Test label."""
+    normalized = _normalize_db_config_label(label)
+    return SHARED_TEST_DB_CONFIG_PATH if normalized == "Test" else SHARED_LIVE_DB_CONFIG_PATH
 
-        ttk.Button(button_row, text="TEST", width=12, command=lambda: _close_with("test")).pack(side="left", padx=(0, 8))
-        ttk.Button(button_row, text="LIVE", width=12, command=lambda: _close_with("live")).pack(side="left", padx=(0, 8))
-        ttk.Button(button_row, text="Cancel", width=12, command=lambda: _close_with(None)).pack(side="left")
 
-        dialog.protocol("WM_DELETE_WINDOW", lambda: _close_with(None))
-        dialog.update_idletasks()
-        req_w = max(440, int(dialog.winfo_reqwidth()))
-        req_h = max(180, int(dialog.winfo_reqheight()))
-        vroot_x = int(dialog.winfo_vrootx())
-        vroot_y = int(dialog.winfo_vrooty())
-        vroot_w = int(dialog.winfo_vrootwidth())
-        vroot_h = int(dialog.winfo_vrootheight())
-        if vroot_w <= 0:
-            vroot_w = int(dialog.winfo_screenwidth())
-        if vroot_h <= 0:
-            vroot_h = int(dialog.winfo_screenheight())
-        x = int(vroot_x + max(0, (vroot_w - req_w) / 2))
-        y = int(vroot_y + max(0, (vroot_h - req_h) / 2))
-        default_geometry = f"{req_w}x{req_h}+{x}+{y}"
-        try:
-            remember_window_geometry(
-                dialog,
-                "db_config_selection_dialog",
-                default_geometry=default_geometry,
-                minsize=(req_w, req_h),
-            )
-        except Exception:
-            dialog.geometry(default_geometry)
-        try:
-            dialog.deiconify()
-        except Exception:
-            pass
-        try:
-            dialog.lift()
-        except Exception:
-            pass
-        try:
-            dialog.attributes("-topmost", True)
-            dialog.after(250, lambda: dialog.attributes("-topmost", False))
-        except Exception:
-            pass
-        try:
-            dialog.focus_force()
-        except Exception:
-            pass
-        register_single_instance_window(dialog)
-        try:
-            dialog.mainloop()
-        except Exception:
-            pass
-    finally:
-        if dialog is not None:
-            try:
-                unregister_single_instance_window(dialog)
-            except Exception:
-                pass
-            try:
-                dialog.destroy()
-            except Exception:
-                pass
+def _save_selected_db_config_preference(label=None):
+    """Persist the selected database mode so the next launch starts in the same mode."""
+    normalized = _normalize_db_config_label(label or get_selected_db_config_label())
+    payload = {
+        "mode": normalized,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        path = _db_mode_preference_file_path()
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+        return path
+    except Exception:
+        return None
 
-    selection = result.get("selection")
-    if selection is None:
-        return False
-    if str(selection).strip().lower() == "test":
-        selected_path = SHARED_TEST_DB_CONFIG_PATH
-        selected_label = "Test"
 
-    if not os.path.exists(selected_path):
-        error_parent = None
-        try:
-            error_parent = tk.Tk()
-            error_parent.withdraw()
-            set_window_icon(error_parent)
-        except Exception:
-            error_parent = None
-        try:
-            messagebox.showerror(
-                "Database Config Missing",
-                f"Could not find the selected database config:\n{selected_path}",
-                parent=error_parent,
-            )
-        finally:
-            if error_parent is not None:
-                try:
-                    error_parent.destroy()
-                except Exception:
-                    pass
-        return False
+def _load_selected_db_config_preference():
+    """Load the remembered Live/Test mode, defaulting safely to Live."""
+    mode = "Live"
+    try:
+        path = _db_mode_preference_file_path()
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                mode = _normalize_db_config_label(data.get("mode"))
+    except Exception:
+        mode = "Live"
+    return mode
 
-    _set_selected_db_config_path(selected_path, selected_label)
+
+def load_persisted_db_config_selection():
+    """Apply the remembered Live/Test database selection without showing a startup dialog."""
+    mode = _load_selected_db_config_preference()
+    _set_selected_db_config_path(_db_config_path_for_label(mode), mode)
     return True
+
+
+def _reset_database_backend_after_config_switch():
+    """Force the next database operation to use the newly selected config and reload launcher caches."""
+    global _DB_BOOTSTRAPPED
+    try:
+        _DB_BOOTSTRAPPED = False
+    except Exception:
+        pass
+    for cache_name in ("_TEMPLATE_CACHE", "_REGULAR_CACHE", "_LAYOUT_CACHE"):
+        cache = globals().get(cache_name)
+        if isinstance(cache, dict):
+            cache["signature"] = None
+            cache["rows"] = []
+    try:
+        _PREVIEW_IMAGE_CACHE.clear()
+    except Exception:
+        pass
+
+
+def _db_mode_label_text():
+    return f"Database: {get_selected_db_config_label().upper()}"
+
+
+def _db_mode_label_style():
+    return "DatabaseModeTest.TLabel" if get_selected_db_config_label().strip().lower() == "test" else "DatabaseModeLive.TLabel"
+
+
+def _update_db_mode_label_widget(label_widget):
+    if label_widget is None:
+        return
+    try:
+        label_widget.configure(text=_db_mode_label_text(), style=_db_mode_label_style())
+    except Exception:
+        pass
+
+
+def toggle_database_config_from_launcher(label_widget=None, refresh_callback=None, clear_preview_callback=None):
+    """Toggle Live/Test from the main launcher label and remember the choice for future launches."""
+    current = _normalize_db_config_label(get_selected_db_config_label())
+    new_mode = "Test" if current == "Live" else "Live"
+    _set_selected_db_config_path(_db_config_path_for_label(new_mode), new_mode)
+    _save_selected_db_config_preference(new_mode)
+    _reset_database_backend_after_config_switch()
+    _update_db_mode_label_widget(label_widget)
+
+    if callable(clear_preview_callback):
+        try:
+            clear_preview_callback()
+        except Exception:
+            pass
+    if callable(refresh_callback):
+        try:
+            refresh_callback(False)
+        except TypeError:
+            try:
+                refresh_callback()
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                messagebox.showerror("Database Switch Failed", str(exc))
+            except Exception:
+                pass
+    return new_mode
+
+def prompt_admin_db_config_selection():
+    """Compatibility wrapper: startup now loads the persisted Live/Test selection without prompting."""
+    return load_persisted_db_config_selection()
+
+
+# =============================================================================
+# Press configuration constants
+# Directory placeholders and Press 1/Press 2 format definitions used by the layout builders.
+# =============================================================================
 
 LAYOUTS_DIR = "__DB_LAYOUTS__"
 TEMPLATE_DIR = "__DB_TEMPLATES__"
@@ -388,9 +406,11 @@ CONFIG_MAP = {
     ("Press 2", "8 up"): PRESS_2_8UP,
 }
 
-# ===== END: config.py =====
+# =============================================================================
+# General utility helpers
+# Reusable file, JSON, username, admin, date, naming, validation, imposition, and focus-order helpers.
+# =============================================================================
 
-# ===== BEGIN: helpers.py =====
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 def safe_read_json(path):
@@ -1208,6 +1228,12 @@ def enable_arrow_navigation(focus_list, units, press_name):
         w.bind("<KP_Right>", on_right)
         w.bind("<KP_Up>", on_up)
         w.bind("<KP_Down>", on_down)
+
+# =============================================================================
+# Editor widget and navigation helpers
+# Reusable Tk widgets for press units, overlays, color swatches, scroll areas, sizing, tab order, and arrow-key navigation.
+# =============================================================================
+
 def overlay_render_cell(overlay: tk.Canvas, text: str, circled: bool):
     """Render the cell's text and optional red circle on top."""
     overlay.delete("all")
@@ -1499,6 +1525,10 @@ def create_press_unit(
 
     return unit_frame, section_entry, grid_entries, cell_overlays
 
+# =============================================================================
+# Preview image cache and capture helpers
+# Preview image pathing, cache signatures, loading, resizing, screen capture fallback, and preview image saves.
+# =============================================================================
 
 _PREVIEW_IMAGE_CACHE = {}
 
@@ -1750,6 +1780,10 @@ def save_window_preview_image(win, json_path: str, scale=0.75):
         pass
     return out_path
 
+# =============================================================================
+# Window and treeview state memory
+# Per-user window geometry, monitor placement, tree expansion, selection, sort order, scroll position, and column width persistence.
+# =============================================================================
 
 WINDOW_STATE_DIRNAME = "Press Layout"
 WINDOW_STATE_FILENAME = "window_state.json"
@@ -2359,9 +2393,11 @@ def remember_window_geometry(win, state_key: str, default_geometry=None, minsize
     track_window_geometry(win, state_key)
     return state_key
 
-# ===== END: helpers.py =====
+# =============================================================================
+# Save, validation, and persistence helpers
+# Editor data normalization, required-field validation, layout/template/regular saves, and preview maintenance.
+# =============================================================================
 
-# ===== BEGIN: persistence.py =====
 def _set_widget_value(widget, value):
     """Set Entry/Combobox-like widget text safely."""
     value = "" if value is None else str(value).strip()
@@ -2460,7 +2496,6 @@ def _save_preview_for_saved_template(ctx, template_path):
         cfg = CONFIG_MAP.get((press, fmt))
         if not cfg:
             return
-        # single-file build: render_layout_preview_image_from_data is already in this module
         image = render_layout_preview_image_from_data(
             data,
             dict(cfg),
@@ -2925,7 +2960,7 @@ def do_save_as(win, ctx):
         ctx["file_path"] = path
         ctx["layout_name"] = data["name"]
         win.title(f"{ctx['title_base']}  —  {os.path.basename(path)}")
-        
+
         # If saving a layout (not template mode) and imposition doesn't match existing template, ask to save as template
         if (not ctx.get("template_mode", False)) and ctx.get("prompt_save_template", True):
             if not _template_exists_for_imposition(ctx):
@@ -2938,7 +2973,7 @@ def do_save_as(win, ctx):
                     parent=win
                 ):
                     save_template_from_layout(ctx)
-        
+
         return True
     except Exception as e:
         messagebox.showerror("Save As Failed", str(e))
@@ -3098,20 +3133,20 @@ def save_template_from_layout(ctx):
     """Save the current layout as a template (without issue_date, product, color_cells)."""
     try:
         ensure_dir(TEMPLATE_DIR)
-        
+
         # Collect data but strip layout-specific fields
         data = collect_layout_data(ctx)
         data = _normalize_template_data(data)
-        
+
         # Remove layout-specific fields
         data.pop("issue_date", None)
         data.pop("product", None)
         data.pop("color_cells", None)
-        
+
         # Generate template filename
         template_filename = build_filename_suggestion(ctx)
         template_path = os.path.join(TEMPLATE_DIR, template_filename)
-        
+
         # Make filename unique if it exists
         if os.path.exists(template_path):
             base, ext = os.path.splitext(template_filename)
@@ -3120,23 +3155,21 @@ def save_template_from_layout(ctx):
                 counter += 1
             template_filename = f"{base}_{counter}{ext}"
             template_path = os.path.join(TEMPLATE_DIR, template_filename)
-        
+
         # Use template filename as template name
         data["name"] = os.path.splitext(template_filename)[0]
-        
+
         safe_write_json(template_path, data)
         _save_preview_for_saved_template(ctx, template_path)
         messagebox.showinfo("Template Saved", f"Template saved as:\n{template_filename}")
     except Exception as e:
         messagebox.showerror("Save Template Failed", f"Could not save template:\n{str(e)}")
 
-# ===== END: persistence.py =====
 
 # Expose this single-file module under the original module name so intra-project imports keep working.
 import sys as _single_file_sys
 _single_file_sys.modules.setdefault('press_layout_core', _single_file_sys.modules[__name__])
 
-# ===== BEGIN: original press_layout_ui.py =====
 import os
 import glob
 import json
@@ -3151,7 +3184,12 @@ ensure_runtime_dependencies(prompt_user=True)
 from PIL import Image
 
 helpers_mod = sys.modules[__name__]
-# single-file build: core symbols are already in this module
+
+
+# =============================================================================
+# Tree sorting and launcher UI constants
+# Shared display constants and grouped treeview sorting helpers used by the launcher and editor lists.
+# =============================================================================
 
 SORT_ASCENDING_INDICATOR = " ▲"
 SORT_DESCENDING_INDICATOR = " ▼"
@@ -3168,7 +3206,12 @@ def _last_changed_by_display(value):
     text = str(value or "").strip()
     return text if text else "Unknown"
 
-# ===== BEGIN: layout_builder.py =====
+
+# =============================================================================
+# Layout editor, rendering, starter-sheet, and print workflow
+# Calendar picker, editor construction, layout rendering, starter-sheet rendering, print helpers, and editor actions.
+# =============================================================================
+
 def _shift_calendar_month(year, month, delta):
     month_index = (int(year) * 12 + (int(month) - 1)) + int(delta)
     new_year, zero_based_month = divmod(month_index, 12)
@@ -6138,9 +6181,11 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         pass
     return units
 
-# ===== END: layout_builder.py =====
+# =============================================================================
+# Launcher, macros, changelog, and single-instance control
+# Launcher UI, monthly macros, changelog/update prompts, database maintenance dialogs, and one-instance activation behavior.
+# =============================================================================
 
-# ===== BEGIN: launchers.py =====
 WINDOW_SIZE_STATE_FILE = os.path.join(os.path.expanduser("~"), ".press_layout_launcher_sizes.json")
 
 
@@ -6535,27 +6580,27 @@ def get_cached_templates(force=False):
     return rows, changed
 
 
-def list_matching_templates(press_name, format_name, section_count=None, section_pages=None):    
-    """    
-    Templates live in TEMPLATE_DIR and are matched by cached JSON metadata.    
-    In the New Layout launcher, we additionally filter by section_count & section_pages.    
-    """    
+def list_matching_templates(press_name, format_name, section_count=None, section_pages=None):
+    """
+    Templates live in TEMPLATE_DIR and are matched by cached JSON metadata.
+    In the New Layout launcher, we additionally filter by section_count & section_pages.
+    """
     rows, _changed = get_cached_templates(force=False)
-    results = []    
-    for row in rows:    
+    results = []
+    for row in rows:
         stem = os.path.splitext(os.path.basename(row.get("path") or ""))[0]
         if not row.get("valid", False):
             results.append((row.get("name") or stem, row.get("path")))
             continue
-        if row.get("press") != press_name or row.get("format") != format_name:    
-            continue    
-        if section_count is not None:    
+        if row.get("press") != press_name or row.get("format") != format_name:
+            continue
+        if section_count is not None:
             file_section_count = row.get("section_count")
             file_section_pages = row.get("section_pages", [])
-            if file_section_count != section_count:    
-                continue    
-            if len(file_section_pages) < section_count:    
-                continue    
+            if file_section_count != section_count:
+                continue
+            if len(file_section_pages) < section_count:
+                continue
             mismatch = False
             for i in range(section_count):
                 try:
@@ -6568,7 +6613,7 @@ def list_matching_templates(press_name, format_name, section_count=None, section
             if mismatch:
                 continue
         results.append((row.get("name") or stem, row.get("path")))
-    return results    
+    return results
 
 
 def _coerce_section_pages_for_display(data):
@@ -7107,55 +7152,55 @@ def open_new_template(parent):
     dialog.transient(parent)
     dialog.grab_set()
     remember_window_geometry(dialog, "new_template_dialog", default_geometry="400x150", minsize=(400, 150))
-    
+
     frame = ttk.Frame(dialog, padding=16)
     frame.pack(fill="both", expand=True)
-    
+
     ttk.Label(frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", pady=8, padx=(0, 8))
     press_var = tk.StringVar(value="Press 1")
     press_combo = ttk.Combobox(frame, textvariable=press_var, values=["Press 1", "Press 2"], state="readonly", width=20)
     press_combo.grid(row=0, column=1, sticky="ew", padx=(0, 0))
-    
+
     ttk.Label(frame, text="Format:", font=(None, 11, "bold")).grid(row=1, column=0, sticky="w", pady=8, padx=(0, 8))
     format_var = tk.StringVar(value="Broadsheet")
     format_combo = ttk.Combobox(frame, textvariable=format_var, values=["Broadsheet", "Tab", "8 up"], state="readonly", width=20)
     format_combo.grid(row=1, column=1, sticky="ew", padx=(0, 0))
-    
+
     frame.columnconfigure(1, weight=1)
-    
+
     result = {"ok": False}
-    
+
     def on_ok():
         result["ok"] = True
         dialog.destroy()
-    
+
     def on_cancel():
         dialog.destroy()
-    
+
     btn_frame = ttk.Frame(frame)
     btn_frame.grid(row=2, column=0, columnspan=2, pady=(16, 0), sticky="ew")
     btn_frame.columnconfigure(0, weight=1)
-    
+
     ttk.Button(btn_frame, text="Create", command=on_ok, width=12).pack(side="left", padx=(0, 8))
     ttk.Button(btn_frame, text="Cancel", command=on_cancel, width=12).pack(side="left")
-    
+
     dialog.wait_window(dialog)
-    
+
     if not result["ok"]:
         return
-    
+
     press = press_var.get()
     fmt = format_var.get()
     base_cfg = CONFIG_MAP.get((press, fmt))
     if not base_cfg:
         messagebox.showerror("Not Configured", f"{press} - {fmt} is not configured yet.")
         return
-    
+
     cfg = dict(base_cfg)
     cfg["section_count"] = 1
     cfg["section_pages"] = [min_pages_for_format(fmt)]
     cfg["template_mode"] = True
-    
+
     win = tk.Toplevel(parent)
     set_window_icon(win)
     win.withdraw()
@@ -10875,18 +10920,18 @@ def unregister_single_instance_window(win):
             _SINGLE_INSTANCE_ACTIVE_WINDOW = None
 
 
-def build_main_launcher():  
-    ensure_dir(LAYOUTS_DIR)  
-    ensure_dir(TEMPLATE_DIR)  
-    ensure_dir(REGULAR_DIR)  
-    root = tk.Tk()  
+def build_main_launcher():
+    ensure_dir(LAYOUTS_DIR)
+    ensure_dir(TEMPLATE_DIR)
+    ensure_dir(REGULAR_DIR)
+    root = tk.Tk()
     set_window_icon(root)
     register_single_instance_window(root)
-    root.title("Press Layouts")  
-    root.geometry("1100x760")  
-    root.minsize(980, 680)  
+    root.title("Press Layouts")
+    root.geometry("1100x760")
+    root.minsize(980, 680)
     remember_window_geometry(root, "main_launcher", default_geometry="1100x760", minsize=(980, 680))
-    _bind_window_size_memory(root, "main_launcher")  
+    _bind_window_size_memory(root, "main_launcher")
     allow_launcher_maintenance_actions = is_admin()
     style = ttk.Style(root)
     style.configure("LauncherVersion.TLabel", foreground="#1a73e8")
@@ -10919,9 +10964,17 @@ def build_main_launcher():
         username_label.bind("<Button-1>", lambda _event: show_launcher_macro_dialog(root, launcher_username=launcher_username))
     if allow_launcher_maintenance_actions:
         ttk.Label(status_frame, text="(ADMIN)", style="AdminFlag.TLabel").pack(side="right", padx=(0, 12))
-        db_mode_label_text = f"Database: {get_selected_db_config_label().upper()}"
-        db_mode_style = "DatabaseModeTest.TLabel" if get_selected_db_config_label().strip().lower() == "test" else "DatabaseModeLive.TLabel"
-        ttk.Label(status_frame, text=db_mode_label_text, style=db_mode_style, anchor="e", justify="right").pack(side="right", padx=(0, 12))
+        db_mode_label = ttk.Label(status_frame, text=_db_mode_label_text(), style=_db_mode_label_style(), anchor="e", justify="right")
+        db_mode_label.pack(side="right", padx=(0, 12))
+        db_mode_label.configure(cursor="hand2")
+        db_mode_label.bind(
+            "<Button-1>",
+            lambda _event: toggle_database_config_from_launcher(
+                db_mode_label,
+                refresh_callback=refresh,
+                clear_preview_callback=close_preview,
+            ),
+        )
     search_frame = ttk.Frame(frame)
     search_frame.grid(row=1, column=0, sticky="ew", pady=(8, 4))
     search_frame.columnconfigure(1, weight=1)
@@ -10979,9 +11032,9 @@ def build_main_launcher():
     bind_treeview_state_memory(root, "main_launcher", "layout_tree", tree, columns=("#0",) + tuple(columns))
     row_by_iid = {}
     group_by_iid = {}
-    sort_state = load_treeview_sort_state("main_launcher", "layout_tree", "product")  
-    refresh_job = {"id": None}  
-    auto_refresh_ms = 5000    
+    sort_state = load_treeview_sort_state("main_launcher", "layout_tree", "product")
+    refresh_job = {"id": None}
+    auto_refresh_ms = 5000
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
@@ -11036,27 +11089,27 @@ def build_main_launcher():
             preview_state["request_id"] = int(preview_state.get("request_id", 0)) + 1
             close_preview()
         root.after_idle(_close_if_really_inactive)
-    def sort_rows(rows):  
-        col = sort_state.get("col")  
-        if not col:  
-            return rows  
-        def keyfunc(r):  
-            if col == "saved":  
-                return r["saved_dt"] or datetime.min  
-            if col == "product":  
-                return (r["product"] or "").lower()  
-            if col == "press":  
-                return (r["press"] or "").lower()  
-            if col == "format":  
-                return (r["format"] or "").lower()  
+    def sort_rows(rows):
+        col = sort_state.get("col")
+        if not col:
+            return rows
+        def keyfunc(r):
+            if col == "saved":
+                return r["saved_dt"] or datetime.min
+            if col == "product":
+                return (r["product"] or "").lower()
+            if col == "press":
+                return (r["press"] or "").lower()
+            if col == "format":
+                return (r["format"] or "").lower()
             if col == "pages":
                 return tuple(r.get("section_pages_sort", (0, 0, 0, 0)))
             if col == "color_pages":
                 return int(r.get("color_pages", 0) or 0)
             if col == "plates":
                 return int(r.get("plates", 0) or 0)
-            return ""  
-        return sorted(rows, key=keyfunc, reverse=sort_state["desc"])  
+            return ""
+        return sorted(rows, key=keyfunc, reverse=sort_state["desc"])
     def load_rows_into_tree(rows, preserve_selection=None, preserve_focus=None, preserve_yview=None):
         reload_state, has_saved_tree_state = get_treeview_reload_state(tree, "main_launcher", "layout_tree", columns=("#0",) + tuple(columns))
         preserve_selection = tuple(reload_state.get("selected_iids") or preserve_selection or ())
@@ -11201,20 +11254,20 @@ def build_main_launcher():
         rows = sort_rows(rows)
         load_rows_into_tree(rows, preserve_selection=selected, preserve_focus=focused, preserve_yview=yview)
         update_sort_headings()
-    def schedule_refresh():  
-        try:  
-            if refresh_job["id"] is not None:  
-                root.after_cancel(refresh_job["id"])  
-        except Exception:  
-            pass  
-        refresh_job["id"] = root.after(auto_refresh_ms, auto_refresh_tick)  
-    def auto_refresh_tick():  
-        refresh_job["id"] = None  
-        try:  
-            refresh(preserve_state=True)  
-        finally:  
-            if root.winfo_exists():  
-                schedule_refresh()  
+    def schedule_refresh():
+        try:
+            if refresh_job["id"] is not None:
+                root.after_cancel(refresh_job["id"])
+        except Exception:
+            pass
+        refresh_job["id"] = root.after(auto_refresh_ms, auto_refresh_tick)
+    def auto_refresh_tick():
+        refresh_job["id"] = None
+        try:
+            refresh(preserve_state=True)
+        finally:
+            if root.winfo_exists():
+                schedule_refresh()
     def sort_by(col):
         if sort_state["col"] == col:
             sort_state["desc"] = not sort_state["desc"]
@@ -11290,92 +11343,92 @@ def build_main_launcher():
             messagebox.showerror("Delete Failed", f"Could not delete {name}:\n{exc}")
             return
         refresh(preserve_state=False)
-    def templates():  
+    def templates():
         close_preview()
-        build_template_editor_launcher(root)  
+        build_template_editor_launcher(root)
     def regulars():
         close_preview()
         build_regular_editor_launcher(root)
-    def cleanup_old_layouts():  
-        today = datetime.now().date()  
-        all_rows, _changed = get_cached_layout_rows(force=False)  
-        if not all_rows:  
-            messagebox.showinfo("Cleanup", "No layouts are currently available.")  
-            return  
-        all_rows.sort(key=lambda r: (r.get("issue_dt") or datetime.max, (r.get("product") or "").lower()))  
-        dialog = tk.Toplevel(root)  
+    def cleanup_old_layouts():
+        today = datetime.now().date()
+        all_rows, _changed = get_cached_layout_rows(force=False)
+        if not all_rows:
+            messagebox.showinfo("Cleanup", "No layouts are currently available.")
+            return
+        all_rows.sort(key=lambda r: (r.get("issue_dt") or datetime.max, (r.get("product") or "").lower()))
+        dialog = tk.Toplevel(root)
         set_window_icon(dialog)
-        dialog.title("Cleanup Layouts")  
-        dialog.transient(root)  
-        dialog.geometry("920x420")  
-        dialog.minsize(820, 360)  
-        remember_window_geometry(dialog, "cleanup_dialog", default_geometry="920x420", minsize=(820, 360))  
-        dialog.grab_set()  
-        outer = ttk.Frame(dialog, padding=16)  
-        outer.pack(fill="both", expand=True)  
-        outer.rowconfigure(1, weight=1)  
-        outer.columnconfigure(0, weight=1)  
-        ttk.Label(  
-            outer,  
-            text="All layouts are shown below. Layouts with an issue date of today or earlier are pre-selected for deletion (double-click a row to keep/remove it from deletion):",  
-            font=(None, 10, "bold")  
-        ).grid(row=0, column=0, sticky="w")  
-        cleanup_columns = ("delete", "issue", "product", "press", "format", "saved")  
-        cleanup_tree = ttk.Treeview(outer, columns=cleanup_columns, show="headings", selectmode="browse")  
-        cleanup_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))  
-        cleanup_vsb = ttk.Scrollbar(outer, orient="vertical", command=cleanup_tree.yview)  
-        cleanup_vsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))  
-        cleanup_tree.configure(yscrollcommand=cleanup_vsb.set)  
-        cleanup_tree.heading("delete", text="Delete")  
-        cleanup_tree.heading("issue", text="Issue Date")  
-        cleanup_tree.heading("product", text="Product")  
-        cleanup_tree.heading("press", text="Press")  
-        cleanup_tree.heading("format", text="Format")  
-        cleanup_tree.heading("saved", text="Last Saved")  
-        cleanup_tree.column("delete", width=70, anchor="center")  
-        cleanup_tree.column("issue", width=110, anchor="center")  
-        cleanup_tree.column("product", width=280, anchor="w")  
-        cleanup_tree.column("press", width=90, anchor="center")  
-        cleanup_tree.column("format", width=120, anchor="center")  
-        cleanup_tree.column("saved", width=170, anchor="center")  
-        delete_state = {  
-            row["path"]: bool(row.get("issue_dt") and row.get("issue_dt").date() <= today)  
-            for row in all_rows  
-        }  
-        def checkbox_value(path):  
-            return "☑" if delete_state.get(path, False) else "☐"  
-        def populate_cleanup_tree():  
-            cleanup_tree.delete(*cleanup_tree.get_children())  
-            for row in all_rows:  
-                path = row["path"]  
-                cleanup_tree.insert("", "end", iid=path, values=(  
-                    checkbox_value(path),  
-                    row["issue_disp"],  
-                    row["product"],  
-                    row["press"],  
-                    row["format"],  
-                    row["saved_disp"],  
-                ))  
-        def toggle_cleanup_item(path):  
-            if not path or path not in delete_state:  
-                return  
-            delete_state[path] = not delete_state[path]  
-            row = cleanup_tree.item(path, "values")  
-            if row:  
-                cleanup_tree.item(path, values=(checkbox_value(path),) + tuple(row[1:]))  
-            cleanup_tree.selection_set(path)  
-            cleanup_tree.focus(path)  
-        def toggle_from_event(event=None):  
-            path = cleanup_tree.identify_row(event.y) if event is not None else cleanup_tree.focus()  
-            toggle_cleanup_item(path)  
-            return "break"  
-        cleanup_tree.bind("<Double-Button-1>", toggle_from_event)  
-        cleanup_tree.bind("<space>", toggle_from_event)  
-        populate_cleanup_tree()  
+        dialog.title("Cleanup Layouts")
+        dialog.transient(root)
+        dialog.geometry("920x420")
+        dialog.minsize(820, 360)
+        remember_window_geometry(dialog, "cleanup_dialog", default_geometry="920x420", minsize=(820, 360))
+        dialog.grab_set()
+        outer = ttk.Frame(dialog, padding=16)
+        outer.pack(fill="both", expand=True)
+        outer.rowconfigure(1, weight=1)
+        outer.columnconfigure(0, weight=1)
+        ttk.Label(
+            outer,
+            text="All layouts are shown below. Layouts with an issue date of today or earlier are pre-selected for deletion (double-click a row to keep/remove it from deletion):",
+            font=(None, 10, "bold")
+        ).grid(row=0, column=0, sticky="w")
+        cleanup_columns = ("delete", "issue", "product", "press", "format", "saved")
+        cleanup_tree = ttk.Treeview(outer, columns=cleanup_columns, show="headings", selectmode="browse")
+        cleanup_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        cleanup_vsb = ttk.Scrollbar(outer, orient="vertical", command=cleanup_tree.yview)
+        cleanup_vsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
+        cleanup_tree.configure(yscrollcommand=cleanup_vsb.set)
+        cleanup_tree.heading("delete", text="Delete")
+        cleanup_tree.heading("issue", text="Issue Date")
+        cleanup_tree.heading("product", text="Product")
+        cleanup_tree.heading("press", text="Press")
+        cleanup_tree.heading("format", text="Format")
+        cleanup_tree.heading("saved", text="Last Saved")
+        cleanup_tree.column("delete", width=70, anchor="center")
+        cleanup_tree.column("issue", width=110, anchor="center")
+        cleanup_tree.column("product", width=280, anchor="w")
+        cleanup_tree.column("press", width=90, anchor="center")
+        cleanup_tree.column("format", width=120, anchor="center")
+        cleanup_tree.column("saved", width=170, anchor="center")
+        delete_state = {
+            row["path"]: bool(row.get("issue_dt") and row.get("issue_dt").date() <= today)
+            for row in all_rows
+        }
+        def checkbox_value(path):
+            return "☑" if delete_state.get(path, False) else "☐"
+        def populate_cleanup_tree():
+            cleanup_tree.delete(*cleanup_tree.get_children())
+            for row in all_rows:
+                path = row["path"]
+                cleanup_tree.insert("", "end", iid=path, values=(
+                    checkbox_value(path),
+                    row["issue_disp"],
+                    row["product"],
+                    row["press"],
+                    row["format"],
+                    row["saved_disp"],
+                ))
+        def toggle_cleanup_item(path):
+            if not path or path not in delete_state:
+                return
+            delete_state[path] = not delete_state[path]
+            row = cleanup_tree.item(path, "values")
+            if row:
+                cleanup_tree.item(path, values=(checkbox_value(path),) + tuple(row[1:]))
+            cleanup_tree.selection_set(path)
+            cleanup_tree.focus(path)
+        def toggle_from_event(event=None):
+            path = cleanup_tree.identify_row(event.y) if event is not None else cleanup_tree.focus()
+            toggle_cleanup_item(path)
+            return "break"
+        cleanup_tree.bind("<Double-Button-1>", toggle_from_event)
+        cleanup_tree.bind("<space>", toggle_from_event)
+        populate_cleanup_tree()
         status_var = tk.StringVar(value="Ready.")
         ttk.Label(outer, textvariable=status_var, foreground="#555555").grid(row=2, column=0, sticky="w", pady=(12, 0))
-        btns = ttk.Frame(outer)  
-        btns.grid(row=3, column=0, pady=(12, 0), sticky="e")  
+        btns = ttk.Frame(outer)
+        btns.grid(row=3, column=0, pady=(12, 0), sticky="e")
 
         def _regen_preview_for_path(path, template_mode=False, default_dir=None, prompt_save_template=None):
             try:
@@ -11521,36 +11574,36 @@ def build_main_launcher():
                     parent=dialog,
                 )
 
-        def delete_selected_cleanup():  
-            to_delete = [path for path, checked in delete_state.items() if checked]  
-            if not to_delete:  
-                messagebox.showinfo("Cleanup", "No layouts are selected for deletion.", parent=dialog)  
-                return  
-            if not messagebox.askyesno(  
-                "Delete Layouts",  
-                f"Delete {len(to_delete)} selected layout file(s)?",  
-                parent=dialog,  
-            ):  
-                return  
-            errors = []  
-            for path in to_delete:  
-                try:  
+        def delete_selected_cleanup():
+            to_delete = [path for path, checked in delete_state.items() if checked]
+            if not to_delete:
+                messagebox.showinfo("Cleanup", "No layouts are selected for deletion.", parent=dialog)
+                return
+            if not messagebox.askyesno(
+                "Delete Layouts",
+                f"Delete {len(to_delete)} selected layout file(s)?",
+                parent=dialog,
+            ):
+                return
+            errors = []
+            for path in to_delete:
+                try:
                     remove_preview_image_for_json(path)
-                    os.remove(path)  
-                except Exception as exc:  
-                    errors.append(f"{os.path.basename(path)}: {exc}")  
-            refresh(preserve_state=False)  
-            if errors:  
-                messagebox.showerror(  
-                    "Cleanup",  
-                    "Some files could not be deleted:\n\n" + "\n".join(errors),  
-                    parent=dialog,  
-                )  
-            dialog.destroy()  
+                    os.remove(path)
+                except Exception as exc:
+                    errors.append(f"{os.path.basename(path)}: {exc}")
+            refresh(preserve_state=False)
+            if errors:
+                messagebox.showerror(
+                    "Cleanup",
+                    "Some files could not be deleted:\n\n" + "\n".join(errors),
+                    parent=dialog,
+                )
+            dialog.destroy()
         ttk.Button(btns, text="Touch ALL", command=touch_all_cleanup, width=12).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="Regen ALL Previews", command=regen_all_previews_cleanup, width=18).pack(side="left", padx=(0, 8))
-        ttk.Button(btns, text="Delete", command=delete_selected_cleanup, width=12).pack(side="left", padx=(0, 8))  
-        ttk.Button(btns, text="Cancel", command=dialog.destroy, width=12).pack(side="left")  
+        ttk.Button(btns, text="Delete", command=delete_selected_cleanup, width=12).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="Cancel", command=dialog.destroy, width=12).pack(side="left")
 
     def _find_postgres_client_tool(executable_name):
         try:
@@ -12121,12 +12174,12 @@ def build_main_launcher():
             except Exception:
                 pass
 
-    def on_close():  
-        try:  
-            if refresh_job["id"] is not None:  
-                root.after_cancel(refresh_job["id"])  
-        except Exception:  
-            pass  
+    def on_close():
+        try:
+            if refresh_job["id"] is not None:
+                root.after_cancel(refresh_job["id"])
+        except Exception:
+            pass
         try:
             if version_check_job["id"] is not None:
                 root.after_cancel(version_check_job["id"])
@@ -12141,27 +12194,31 @@ def build_main_launcher():
         _persist_bound_preview_panes(root)
         close_preview()
         unregister_single_instance_window(root)
-        root.destroy()  
+        root.destroy()
     root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
     root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
-    root.protocol("WM_DELETE_WINDOW", on_close)  
-    refresh(preserve_state=False)  
-    schedule_refresh()  
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    refresh(preserve_state=False)
+    schedule_refresh()
     schedule_version_check()
     root.mainloop()
 
-# ===== END: launchers.py =====
 
 # Expose this single-file module under the original UI module name for the original entry-point import.
 _single_file_sys.modules.setdefault('press_layout_ui', _single_file_sys.modules[__name__])
 
 
-# ===== BEGIN: PostgreSQL database conversion (v1.2.0) =====
 import io
 import socket
 import threading
 from contextlib import contextmanager
 from tkinter import simpledialog
+
+
+# =============================================================================
+# PostgreSQL data backend adapters
+# PostgreSQL-backed replacements for former file-style layout/template/regular, preview, and edit-lock operations.
+# =============================================================================
 
 _DB_CONFIG_FILENAME = "press_layouts_db.json"
 _DB_COLLECTION_ROOTS = {
@@ -12929,6 +12986,10 @@ def _db_os_remove(path):
 os.path.exists = _db_os_path_exists
 os.remove = _db_os_remove
 
+# =============================================================================
+# Application entry point
+# Startup bootstrap for database selection, update/runtime checks, launcher creation, and the final Tk mainloop.
+# =============================================================================
 
 def main():
     if not ensure_single_main_launcher_instance():
@@ -12941,7 +13002,6 @@ def main():
     finally:
         release_single_main_launcher_instance()
 
-# ===== END: PostgreSQL database conversion (v1.2.0) =====
 
 if __name__ == '__main__':
     main()
