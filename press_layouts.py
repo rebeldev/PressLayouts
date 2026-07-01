@@ -8808,6 +8808,8 @@ def restart_press_layout_program(root=None):
     raise RuntimeError(f"Could not relaunch Press Layouts from the launcher.\n\n{restart_error}")
 
 def show_restart_required_dialog(parent, running_version, latest_version):
+    force_restart_seconds = 10 * 60
+
     def _raise_restart_dialog(target_dialog, force_focus=False):
         if target_dialog is None:
             return
@@ -8855,7 +8857,7 @@ def show_restart_required_dialog(parent, running_version, latest_version):
     except Exception:
         pass
     dialog.resizable(False, False)
-    remember_window_geometry(dialog, "restart_required_dialog", default_geometry="520x230", minsize=(520, 230))
+    remember_window_geometry(dialog, "restart_required_dialog", default_geometry="520x270", minsize=(520, 270))
 
     body = ttk.Frame(dialog, padding=16)
     body.pack(fill="both", expand=True)
@@ -8873,10 +8875,47 @@ def show_restart_required_dialog(parent, running_version, latest_version):
     )
     ttk.Label(body, text=message, justify="left", wraplength=460).grid(row=1, column=0, sticky="w", pady=(10, 0))
 
+    countdown_var = tk.StringVar(value="")
+    countdown_label = ttk.Label(body, textvariable=countdown_var, justify="left", wraplength=460, foreground="#c62828")
+    countdown_label.grid(row=2, column=0, sticky="w", pady=(12, 0))
+
     button_row = ttk.Frame(body)
-    button_row.grid(row=2, column=0, sticky="e", pady=(18, 0))
+    button_row.grid(row=3, column=0, sticky="e", pady=(18, 0))
+
+    timer_state = {
+        "after_id": None,
+        "remaining": force_restart_seconds,
+        "acknowledged": False,
+        "restart_started": False,
+    }
+
+    def _format_countdown(seconds_remaining):
+        try:
+            total_seconds = max(0, int(seconds_remaining))
+        except Exception:
+            total_seconds = 0
+        minutes, seconds = divmod(total_seconds, 60)
+        return f"{minutes}:{seconds:02d}"
+
+    def _set_button_state(state):
+        for button in (restart_button, cancel_button):
+            try:
+                button.configure(state=state)
+            except Exception:
+                pass
+
+    def _cancel_restart_timer():
+        after_id = timer_state.get("after_id")
+        timer_state["after_id"] = None
+        if after_id is not None:
+            try:
+                dialog.after_cancel(after_id)
+            except Exception:
+                pass
 
     def _close_dialog():
+        timer_state["acknowledged"] = True
+        _cancel_restart_timer()
         try:
             dialog.attributes("-topmost", False)
         except Exception:
@@ -8893,23 +8932,72 @@ def show_restart_required_dialog(parent, running_version, latest_version):
             parent._restart_required_dialog = None
 
     def _restart_now():
+        if timer_state.get("restart_started"):
+            return
+        timer_state["acknowledged"] = True
+        timer_state["restart_started"] = True
+        _cancel_restart_timer()
         _close_dialog()
         try:
             restart_press_layout_program(parent)
         except Exception as exc:
             messagebox.showerror("Restart Failed", f"Could not restart Press Layouts.\n\n{exc}")
 
+    def _force_restart_now():
+        if timer_state.get("acknowledged") or timer_state.get("restart_started"):
+            return
+        timer_state["restart_started"] = True
+        _cancel_restart_timer()
+        countdown_var.set("Restarting Press Layouts now...")
+        _set_button_state("disabled")
+        try:
+            dialog.update_idletasks()
+        except Exception:
+            pass
+        try:
+            restart_press_layout_program(parent)
+        except Exception as exc:
+            timer_state["restart_started"] = False
+            countdown_var.set("Automatic restart failed. Please restart Press Layouts manually.")
+            _set_button_state("normal")
+            messagebox.showerror("Restart Failed", f"Could not restart Press Layouts.\n\n{exc}")
+
+    def _countdown_tick():
+        timer_state["after_id"] = None
+        if timer_state.get("acknowledged") or timer_state.get("restart_started"):
+            return
+        try:
+            if not dialog.winfo_exists():
+                return
+        except Exception:
+            return
+        remaining = max(0, int(timer_state.get("remaining", 0)))
+        countdown_var.set(
+            "If this dialog is not acknowledged, Press Layouts will restart automatically in "
+            f"{_format_countdown(remaining)}."
+        )
+        if remaining <= 0:
+            _force_restart_now()
+            return
+        timer_state["remaining"] = remaining - 1
+        try:
+            timer_state["after_id"] = dialog.after(1000, _countdown_tick)
+        except Exception:
+            timer_state["after_id"] = None
+
     restart_button_text = "Restart" if (_launcher_restart_available() or _launcher_managed_restart_enabled()) else "Close"
-    ttk.Button(button_row, text=restart_button_text, command=_restart_now, width=12).pack(side="left", padx=(0, 8))
-    ttk.Button(button_row, text="Cancel", command=_close_dialog, width=12).pack(side="left")
+    restart_button = ttk.Button(button_row, text=restart_button_text, command=_restart_now, width=12)
+    restart_button.pack(side="left", padx=(0, 8))
+    cancel_button = ttk.Button(button_row, text="Cancel", command=_close_dialog, width=12)
+    cancel_button.pack(side="left")
 
     dialog.protocol("WM_DELETE_WINDOW", _close_dialog)
     dialog.bind("<Escape>", lambda _event: _close_dialog())
     dialog.bind("<Map>", lambda _event: dialog.after_idle(lambda: _raise_restart_dialog(dialog, force_focus=False)), add="+")
     dialog.bind("<Visibility>", lambda _event: dialog.after_idle(lambda: _raise_restart_dialog(dialog, force_focus=False)), add="+")
+    _countdown_tick()
     _raise_restart_dialog(dialog, force_focus=True)
     return dialog
-
 def check_for_required_restart(parent, running_version):
     latest_version = _get_changelog_current_version_value()
     if _is_version_newer(latest_version, running_version):
