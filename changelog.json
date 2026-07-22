@@ -1,6 +1,584 @@
 {
-  "current_version": "1.3.28",
+  "current_version": "1.4.8",
   "versions": [
+    {
+      "version": "1.4.8",
+      "released": "7-22-2026",
+      "summary": "Adds a DB Maintenance action to refresh stale record-open locks.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a Refresh Record Locks button to DB Maintenance for administrators to clear stale database edit locks when a record is reported open by a user who no longer has it open.",
+            "Added a lock-refresh confirmation and detailed maintenance log showing which locks were removed."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Changed active editor lock heartbeats so if a maintenance refresh clears the lock table, any truly open editor window re-registers its own lock automatically on its next heartbeat."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.7",
+      "released": "7-22-2026",
+      "summary": "Fixes Template Editor treeview resizing when the preview split is dragged.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the Template Editor layout so the template treeview row receives the vertical resize weight instead of the button row.",
+            "Changed the Template Editor preview split behavior so dragging the sash grows and shrinks the treeview like the main launcher, New Layout window, and Regular Editor."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.6",
+      "released": "7-22-2026",
+      "summary": "Fixes template Save As so it creates a renamed copy and leaves the original template intact.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed Template Editor Save As so the saved copy always updates the template name to the newly entered record name instead of keeping the source template name.",
+            "Changed Save As copy handling to strip database identity metadata before writing the new record, ensuring the new template is saved as a separate copy while the original template remains intact.",
+            "Changed database edit-lock switching after Save As so the editor releases the old record lock and continues tracking the newly saved copy."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.5",
+      "released": "7-21-2026",
+      "summary": "Moves the Plan entry point into the New Layout window.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Moved the Plan button from the main launcher to the New Layout window.",
+            "Placed the Plan button before the From Regular / Standard Mode toggle in the New Layout window.",
+            "Changed the Plan button so it closes the New Layout window before opening the Layout Planning wizard.",
+            "The Plan button is available to all users and is not restricted to admin users."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.4",
+      "released": "7-21-2026",
+      "summary": "Normalizes template page numbers when saving templates from layouts.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed Save as Template so each template section is saved with contiguous page numbers starting at 1, independent of the original layout page numbers.",
+            "Layouts with non-1 starts, such as pages 3-16, now save into templates as pages 1-14.",
+            "Split or non-contiguous layouts, such as pages 1-12 and 29-40, now save into templates as pages 1-24 for that section.",
+            "Updated template section page counts to match the number of unique pages saved into each template section."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.3",
+      "released": "7-21-2026",
+      "summary": "Fixes Plan-generated impositions by clearing empty press-unit section assignments.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed Layout Planning wizard generated layouts assigning section letters to template press units that contained no pages.",
+            "Changed generated layout page remapping so a press unit only receives the planned section name when at least one page is assigned to that unit.",
+            "Cleared section assignments from empty generated units so the imposition name matches the same layout created manually."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.2",
+      "released": "7-21-2026",
+      "summary": "Improves Plan template matching for split sections with non-contiguous page ranges.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed final Plan template color matching to compare planned split pages by relative template position instead of requiring the actual page number to exist in the template.",
+            "Changed generated Plan layouts so templates with relative pages such as 1-24 are remapped to the actual split pages, such as 1-12 and 29-40, when the layout is generated.",
+            "Kept color-position matching strict by requiring the corresponding relative template positions for planned color pages to land on color-capable press units."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.1",
+      "released": "7-21-2026",
+      "summary": "Refines Cleanup Layouts tree defaults and delete progress feedback.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed Cleanup Layouts so issue-date groups are collapsed by default when the dialog opens.",
+            "Added a determinate progress bar and status text while Cleanup Layouts removes selected layout files.",
+            "Changed the cleanup delete loop to update progress for each removed layout and show the current file being removed."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.0",
+      "released": "7-21-2026",
+      "summary": "Adds the Layout Planning wizard and improves previews and cleanup selection.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added the Layout Planning wizard for building planned sections, splitting sections into legal signatures, selecting color pages, assigning sections/subsections to press runs, choosing matching templates, and generating/opening finished layouts.",
+            "Added final Plan wizard template previews that appear while hovering over the open template dropdown list or the selected template picker."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Changed launcher/template/regular preview panes so previews stay visible when their window loses focus and only change when a different item is selected or the window is closed.",
+            "Changed Cleanup Layouts to use an issue-date grouped tree with no default selections.",
+            "Changed Cleanup Layouts so selecting an issue-date group selects or clears all layouts under that issue date while still allowing individual layout selection."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.55",
+      "released": "7-21-2026",
+      "summary": "Adds Plan template hover previews and opens generated layouts directly.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Added a hover preview popup to the final Plan template selection screen so hovering over a template picker shows a preview of the currently selected template.",
+            "Changed Plan Finish so it no longer shows the created-layout confirmation dialog.",
+            "Changed Plan Finish to generate the layout JSON files and immediately open each generated layout as a new layout window.",
+            "Kept error dialogs only for failure cases where a generated layout cannot be opened."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.54",
+      "released": "7-21-2026",
+      "summary": "Improves Plan final screen section labels and generated color-cell mapping.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Changed the Plan final screen Sections labels to separate section names from page counts, such as B1 - 6p, B2 - 6p, so subsection names do not run into the page count.",
+            "Fixed generated Plan layouts not circling planned color pages by calculating color_cells from the selected template before overwriting template section names with planned section names.",
+            "Kept selected template matching behavior unchanged while ensuring the final generated layout receives the planned color cells for the chosen template."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.53",
+      "released": "7-21-2026",
+      "summary": "Fixes Plan final-screen color-state lookup error.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the Plan final template-selection screen going blank with a NameError by moving the color-page state lookup helper into the shared Plan wizard scope.",
+            "Kept the page-two local color drawing behavior intact while allowing later wizard screens to evaluate selected color pages for template matching and generated layout color_cells."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.52",
+      "released": "7-21-2026",
+      "summary": "Makes Plan template matching and generated layouts honor planned color pages.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed Plan template suggestions so matching templates must have every planned color page available on a color-capable unit/cell for that press run.",
+            "Fixed generated Plan layouts so selected color pages are written into the layout color_cells list when a matching template is used.",
+            "Changed Plan color matching to account for split subsections, double-truck color groups, template section names, and press-specific K-only units.",
+            "Kept the (NEW) fallback when no template matches the press, format, page counts, and planned color positions."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.51",
+      "released": "7-21-2026",
+      "summary": "Adds Plan press-run and template-selection screens.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a Next button to the Plan color-page screen that opens a new Press Runs screen.",
+            "Added a Press Runs screen that defaults to one Press 1 run, allows adding/deleting runs, picking Press 1 or Press 2, and assigning sections or split subsections to one or more runs.",
+            "Added a final Template screen that lists each press run, defaults to the first matching template when available, and shows (NEW) when no template matches.",
+            "Added Finish behavior that creates one layout JSON for each press run, cloning the selected template when one is chosen and stamping the wizard issue date, publication, press, format, section names, and page counts."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.50",
+      "released": "7-21-2026",
+      "summary": "Fixes Plan validation flicker and Split dialog freeze.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed rapid Plan validation/status flicker after choosing an Issue Date by stopping validation from rewriting Issue Date and Publication variables while validation is running.",
+            "Fixed validation event storms by debouncing first-screen validation updates and preventing recursive validation calls.",
+            "Fixed the Split button freeze caused by the validation loop monopolizing the Tk event loop before the signature-count dialog could open.",
+            "Changed the Plan status bar setter so it only updates the Tk variable when the displayed validation text actually changes."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.49",
+      "released": "7-21-2026",
+      "summary": "Adds Plan date picker, live Next validation, and parented color-page subsections.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the Plan first-screen Issue Date field so clicking it opens the same calendar date picker used by the layout editor.",
+            "Changed the Plan Next button so it stays disabled while required fields or section values are invalid, including on initial window creation.",
+            "Added required validation for Issue Date and Publication before the Plan wizard can advance to color-page selection.",
+            "Changed first-screen validation to show a non-modal red status bar immediately for invalid starting values such as the default empty or zero A-section page count.",
+            "Changed the Plan color-page screen so split subsections display as children under their parent section and inherit the parent section color."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.48",
+      "released": "7-21-2026",
+      "summary": "Adds live split recalculation and calculated page-range labels in Plan.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the Plan first-page #Start with column to a calculated Pages label column that displays page ranges such as 1-12, 1-6 / 7-12, or 1-12, 37-48 for wrapped Tab signatures.",
+            "Changed split subsections so editing one subsection page count recalculates the matching signature counts and page ranges on the fly without interrupting typing.",
+            "Added a non-modal red status bar on the Plan first page that explains illegal live split states while still allowing the user to continue typing a valid value.",
+            "Changed Plan validation so it recalculates all split parents before continuing and only blocks Next if the split state is still illegal.",
+            "Kept split page-range calculation format-aware so Broadsheet remains contiguous and Tab / 8 up signatures continue to wrap from outside pages inward."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.47",
+      "released": "7-21-2026",
+      "summary": "Refines Plan split display, header alignment, and signature limits.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the first Plan wizard page header row to use fixed header positions so #Pages, #Start with, Split, and Format align over their matching controls.",
+            "Changed Plan split behavior so the original section remains visible and generated signatures are inserted beneath it as connected subsections.",
+            "Changed split subsections to reuse the original section color so the parent and generated signatures visually stay grouped together.",
+            "Changed valid signature counts to 2 through 4 only, since one signature is not a split and more than four signatures are not used.",
+            "Changed validation for the next Plan step so a split parent section is kept for display but its generated legal subsections are what continue forward."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.46",
+      "released": "7-21-2026",
+      "summary": "Adds Plan section split button and aligned first-page headers.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the first Plan wizard page so column headers sit in the same padded grid as the section rows, keeping Section, #Pages, #Start with, Split, Format, and Delete aligned.",
+            "Changed the Plan Split control from a checkbox to a Split button that validates the section page count before opening a signature-count confirmation dialog.",
+            "Changed Split confirmation so it creates the requested subsection signatures with legal page counts for Broadsheet, Tab, and 8 up formats.",
+            "Added balanced legal split handling so uneven Broadsheet splits use valid page counts such as 6 and 4 instead of illegal 5 and 5.",
+            "Added wrapped page grouping for Tab and 8 up splits so outside signatures receive the first and last page ranges while later signatures move inward."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.45",
+      "released": "7-10-2026",
+      "summary": "Makes Plan double-truck page selection section-specific.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed Plan wizard color-page selection so the two-page selection limit is enforced per section instead of globally across all sections.",
+            "Changed the double-truck right-click action so it only evaluates the clicked row\u2019s section and never crosses sections.",
+            "Changed Set Double Truck (DT) so after the pair is created, selection is cleared for that section instead of leaving the new DT row selected.",
+            "Kept support for separate DT pairs in the same section and independent selections in different sections."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.44",
+      "released": "7-10-2026",
+      "summary": "Limits Plan double trucks to exactly two pages and tightens the right-click menu.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed Plan wizard double-truck selection so only two single pages can be selected at a time; selecting a third page keeps the first selected page and replaces the second selected page.",
+            "Changed Set Double Truck (DT) so it is available only when exactly two single pages in the same section are selected.",
+            "Changed the right-click menu so Single Pages appears only when right-clicking an existing DT row, and no menu appears when the clicked row is not eligible for an action.",
+            "Kept support for multiple separate double trucks in the same section, such as 1/10 and 2/9, by setting each pair separately."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.43",
+      "released": "7-10-2026",
+      "summary": "Adds multi-select double-truck controls to Plan color pages.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added multi-select behavior on the Plan wizard color-page list so multiple page rows can be selected by clicking the row text/background.",
+            "Added a right-click menu with Set Double Truck (DT) and Single Pages actions for selected color-page rows.",
+            "Added double-truck grouping so selected pages, including non-consecutive paired pages such as 2/9 or 1/10, display as one combined DT row with one shared color/BW state."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Changed color-box clicks to continue toggling color/BW for the clicked single page or DT group, while row clicks manage selection for double-truck actions."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.42",
+      "released": "7-10-2026",
+      "summary": "Shortens Plan color-page section and page labels.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed Plan wizard color-page section headers to omit the word Section, abbreviate Broadsheet to BS, and shorten pages to pgs.",
+            "Changed Plan wizard color-page row labels to show only the page number plus K or 4C status, instead of prefixing each row with Page."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.41",
+      "released": "7-10-2026",
+      "summary": "Fixes initial Plan color-page scroll setup.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the Plan wizard color-selection page so the scrollbar and mouse-wheel scrolling initialize immediately when the page first opens, without requiring a window resize.",
+            "Added an after-idle color-page layout pass that updates the canvas/list dimensions and then binds mouse-wheel scrolling after all page rows have been rendered."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.40",
+      "released": "7-10-2026",
+      "summary": "Fixes Plan color-page scrolling and applies section colors to planning rows.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the Plan wizard color-selection page so taller page lists are no longer clipped and can scroll with the scrollbar and mouse wheel.",
+            "Fixed unused vertical space on the color-selection page by clearing the previous wizard row weight and letting the color list area use all available space between the title and bottom buttons."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the color-selection section grid to stretch only when content is shorter than the available viewport, while preserving natural height and scrolling when page lists are taller.",
+            "Changed the first Plan wizard page so each section row uses the same pastel color sequence as the color-selection panels."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.39",
+      "released": "7-10-2026",
+      "summary": "Expands Plan color panels and adds pastel section backgrounds.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the Plan wizard color-selection page so the section grid stretches to fill the available space above the bottom buttons instead of leaving unused whitespace below the page lists.",
+            "Changed the color-selection section panels to use pastel backgrounds: pink, blue, green, and purple, repeating for additional sections.",
+            "Kept each section panel arranged in the up-to-four-column layout with pages listed vertically inside each section."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.38",
+      "released": "7-10-2026",
+      "summary": "Tightens Plan wizard input alignment and color-page space usage.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the first Plan wizard page so section labels and inputs use the same grid columns, keeping Section, #Pages, #Start with, Split, Format, and Delete controls aligned.",
+            "Removed the instructional text from the Plan wizard color-selection page so section panels use the full available area above the bottom buttons.",
+            "Kept the color-selection section panels in the up-to-four-column layout with pages listed vertically inside each section."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.37",
+      "released": "7-10-2026",
+      "summary": "Arranges Plan wizard color sections in up to four columns.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the Plan wizard color page so section panels flow left-to-right in up to four columns before wrapping to the next row.",
+            "Kept the pages inside each section panel listed vertically while preserving the per-section All Color and All B/W controls."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.36",
+      "released": "7-10-2026",
+      "summary": "Refines Plan wizard entry formatting, spacing, color controls, and scrolling.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the Plan wizard Issue Date field to normalize to mm/dd/yyyy on Enter, focus-out, and Next, matching the layout editor date format behavior.",
+            "Changed the Plan wizard Publication and Section fields to uppercase automatically while typing.",
+            "Widened the Plan wizard window and spread the first-page section columns further apart for easier entry.",
+            "Changed the color selection page so each section displays as a vertical list of pages.",
+            "Added per-section All controls with clickable 4-color and black boxes to set all pages in that section to color or black-and-white.",
+            "Added mouse-wheel scrolling support to the Plan wizard scrollable section and color-list areas."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.35",
+      "released": "7-10-2026",
+      "summary": "Adds the first two Plan wizard pages to the main launcher.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a Plan button between New and Open on the main launcher.",
+            "Added the first Plan wizard page with Issue Date, Publication, section name, #Pages, #Start with, Split, and per-section format controls.",
+            "Added + Add Section and x Delete controls, with new sections defaulting to the next section name such as A to B.",
+            "Added validation before continuing so Broadsheet sections require page counts in multiples of 2, Tab in multiples of 4, and 8 up in multiples of 8.",
+            "Added the second Plan wizard page that lists pages by section and lets each page toggle between black-only and 4-color, including All Color and All B/W buttons."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.34",
+      "released": "7-10-2026",
+      "summary": "Fixes the Template Editor stale Issue Date filter reference.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Removed a stale Template Editor layout-filter helper that referenced issue_date_var even though the Template Editor does not define an Issue Date filter.",
+            "Cleared the Pylance reportUndefinedVariable warning for issue_date_var while leaving the main launcher Issue Date filter behavior unchanged."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.33",
+      "released": "7-10-2026",
+      "summary": "Treats templates as matching by imposition even when page numbers differ.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Changed the save-layout template prompt check so an existing template with the same imposition is recognized even when the actual page numbers or section page totals are different.",
+            "Added a page-number-independent imposition signature that compares section count, unit section assignments, and occupied grid-cell positions instead of exact page values."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.32",
+      "released": "7-10-2026",
+      "summary": "Fixes the Template Editor Pages filter startup error.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed a Template Editor startup NameError caused by the Pages filter check referencing pages_filter before it was defined.",
+            "Added the missing Pages filter control to the Template Editor and keeps its values in sync with the displayed template rows."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.31",
+      "released": "7-10-2026",
+      "summary": "Fixes the main launcher Pages filter startup error.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed a startup NameError in the main launcher by placing the Pages-filter helper functions inside the main launcher scope before the initial refresh runs."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.30",
+      "released": "7-10-2026",
+      "summary": "Adds Pages filters to launcher and New Layout lists and consolidates New Layout filters.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a Pages filter to the main launcher tree that lists the page combinations currently available from the displayed layouts.",
+            "Added a Pages filter to the New Layout window for both template and regular layout selection."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the New Layout filter area so Search is on the first line and Press, Format, Sections, and Pages share the second line, matching the main launcher filter layout."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.3.29",
+      "released": "7-10-2026",
+      "summary": "Shows the weekday on main launcher issue-date group rows.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added the day of the week to each dated issue-date folder row in the main launcher tree and styled those issue-date rows in green for quicker scanning."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.3.28",
       "released": "6-30-2026",
@@ -1472,7 +2050,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.3.28",
+    "current_release": "1.4.8",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",

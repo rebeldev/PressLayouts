@@ -2453,6 +2453,65 @@ def _normalize_template_data(data):
         else:
             updated["section"] = ""
         normalized_units.append(updated)
+
+    # Templates should be page-number independent.  When a layout is saved as a
+    # template, remap every populated section to 1..N based on that section's
+    # actual page order.  Examples: 3-16 becomes 1-14, and 1-12 plus 29-40
+    # becomes 1-24.
+    pages_by_section = {f"S{i+1}": set() for i in range(section_count)}
+    for unit in normalized_units:
+        if not isinstance(unit, dict):
+            continue
+        section_name = str(unit.get("section") or "").strip().upper()
+        if section_name not in pages_by_section:
+            continue
+        for row in (unit.get("grid") or []):
+            if not isinstance(row, list):
+                continue
+            for cell_value in row:
+                try:
+                    page_number = int(str(cell_value or "").strip())
+                except Exception:
+                    continue
+                pages_by_section[section_name].add(page_number)
+
+    page_maps = {}
+    normalized_section_pages = []
+    source_pages = normalized.get("section_pages") if isinstance(normalized.get("section_pages"), list) else []
+    for i in range(section_count):
+        section_name = f"S{i+1}"
+        ordered_pages = sorted(pages_by_section.get(section_name, set()))
+        page_maps[section_name] = {page_number: str(idx + 1) for idx, page_number in enumerate(ordered_pages)}
+        if ordered_pages:
+            normalized_section_pages.append(len(ordered_pages))
+        else:
+            try:
+                normalized_section_pages.append(int(source_pages[i]))
+            except Exception:
+                normalized_section_pages.append(0)
+
+    for unit in normalized_units:
+        if not isinstance(unit, dict):
+            continue
+        section_name = str(unit.get("section") or "").strip().upper()
+        remap = page_maps.get(section_name) or {}
+        if not remap:
+            continue
+        grid = unit.get("grid") or []
+        if not isinstance(grid, list):
+            continue
+        for row in grid:
+            if not isinstance(row, list):
+                continue
+            for cell_index, cell_value in enumerate(row):
+                try:
+                    page_number = int(str(cell_value or "").strip())
+                except Exception:
+                    continue
+                if page_number in remap:
+                    row[cell_index] = remap[page_number]
+
+    normalized["section_pages"] = normalized_section_pages
     normalized["units"] = normalized_units
     return normalized
 
@@ -2953,8 +3012,12 @@ def do_save_as(win, ctx):
     try:
         if ctx.get("template_mode", False):
             data = _normalize_template_data(data)
-        if not data.get("name"):
-            data["name"] = os.path.splitext(os.path.basename(path))[0]
+        data = dict(data)
+        for _copy_key in ("_db_record_id", "_db_record_type", "_file_path", "_layout_name"):
+            data.pop(_copy_key, None)
+        # Save As is a copy operation: the new record should carry the new
+        # record/template name, even when the source already had a name.
+        data["name"] = os.path.splitext(os.path.basename(path))[0]
         safe_write_json(path, data)
         _save_preview_for_current_window(win, path)
         ctx["file_path"] = path
@@ -2997,6 +3060,35 @@ def _imposition_name_matches(existing_name: str, target_name: str) -> bool:
     return bool(re.fullmatch(rf"{re.escape(target)}_\d+", existing))
 
 
+def _template_imposition_signature_from_data(data):
+    """Return a page-number-independent template/imposition signature.
+
+    Section count, unit labels, unit section assignments, and occupied grid-cell
+    positions define the imposition. The actual page numbers and section page
+    totals are intentionally ignored so the same structure still matches when a
+    layout uses a different page run.
+    """
+    normalized = _normalize_template_data(data if isinstance(data, dict) else {})
+    try:
+        section_count = max(1, min(4, int(normalized.get("section_count", 1))))
+    except Exception:
+        section_count = 1
+    unit_signatures = []
+    for unit in (normalized.get("units", []) or []):
+        if not isinstance(unit, dict):
+            continue
+        label = str(unit.get("label") or "").strip()
+        section = str(unit.get("section") or "").strip().upper()
+        grid = unit.get("grid", []) or []
+        occupancy = []
+        for row in grid:
+            row_values = row if isinstance(row, list) else []
+            occupancy.append(tuple(bool(str(cell or "").strip()) for cell in row_values))
+        unit_signatures.append((label, section, tuple(occupancy)))
+    unit_signatures.sort(key=lambda item: item[0].lower())
+    return (section_count, tuple(unit_signatures))
+
+
 def _template_exists_for_imposition(ctx) -> bool:
     """Check if a template with the same imposition already exists.
 
@@ -3004,7 +3096,10 @@ def _template_exists_for_imposition(ctx) -> bool:
     the PostgreSQL-backed virtual template collection. The prompt shown to the
     user is about imposition matching, so the primary comparison is the
     generated imposition/template name. As a fallback, we also do a structural
-    match against the template JSON in case a template was renamed manually.
+    match against the template JSON in case a template was renamed manually. The
+    structural comparison deliberately ignores page numbers and section page
+    totals so a template still counts as the same imposition when only page
+    numbers are different.
     """
     ensure_dir(TEMPLATE_DIR)
     press = ctx.get("press_name", "")
@@ -3016,13 +3111,7 @@ def _template_exists_for_imposition(ctx) -> bool:
     current_data.pop("color_cells", None)
 
     target_imposition_name = build_imposition_text(ctx)
-    current_section_count = current_data.get("section_count")
-    current_section_pages = current_data.get("section_pages")
-    current_units_by_label = {
-        str(unit.get("label") or ""): unit.get("grid", [])
-        for unit in (current_data.get("units", []) or [])
-        if isinstance(unit, dict)
-    }
+    current_signature = _template_imposition_signature_from_data(current_data)
 
     template_candidates = []
     try:
@@ -3068,18 +3157,7 @@ def _template_exists_for_imposition(ctx) -> bool:
         if _imposition_name_matches(template_name, target_imposition_name) or _imposition_name_matches(template_stem, target_imposition_name):
             return True
 
-        normalized_template = _normalize_template_data(tmpl_data)
-        if normalized_template.get("section_count") != current_section_count:
-            continue
-        if normalized_template.get("section_pages") != current_section_pages:
-            continue
-
-        template_units_by_label = {
-            str(unit.get("label") or ""): unit.get("grid", [])
-            for unit in (normalized_template.get("units", []) or [])
-            if isinstance(unit, dict)
-        }
-        if template_units_by_label == current_units_by_label:
+        if _template_imposition_signature_from_data(tmpl_data) == current_signature:
             return True
 
     return False
@@ -7279,8 +7357,8 @@ def build_new_layout_launcher(parent):
     paned.pack(fill="both", expand=True)
     frame = ttk.Frame(paned, padding=(16, 16, 16, 4))
     paned.add(frame, stretch="always", minsize=220)
-    frame.columnconfigure(1, weight=1)
-    frame.rowconfigure(4, weight=1)
+    frame.columnconfigure(0, weight=1)
+    frame.rowconfigure(3, weight=1)
 
     new_layout_saved_state = load_window_state_map().get("new_layout_launcher")
     if not isinstance(new_layout_saved_state, dict):
@@ -7317,42 +7395,54 @@ def build_new_layout_launcher(parent):
 
     mode_bar = ttk.Frame(frame)
     mode_bar.grid(row=0, column=0, columnspan=12, sticky="ew", pady=(0, 8))
-    mode_bar.columnconfigure(1, weight=1)
+    mode_bar.columnconfigure(2, weight=1)
+    def open_plan_from_new_layout():
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        build_plan_wizard(parent)
+    ttk.Button(mode_bar, text="Plan", command=open_plan_from_new_layout, width=12).grid(row=0, column=0, sticky="w", padx=(0, 8))
     mode_button = ttk.Button(mode_bar, text="From Regular", width=16)
-    mode_button.grid(row=0, column=0, sticky="w")
+    mode_button.grid(row=0, column=1, sticky="w")
     mode_note_var = tk.StringVar(value="Guided mode: filter templates, then pick one or create a blank layout from a specific press / format / section setup.")
-    ttk.Label(mode_bar, textvariable=mode_note_var).grid(row=0, column=1, sticky="w", padx=(12, 0))
+    ttk.Label(mode_bar, textvariable=mode_note_var).grid(row=0, column=2, sticky="w", padx=(12, 0))
 
-    ttk.Label(frame, text="Press:", font=(None, 11, "bold")).grid(row=1, column=0, sticky="w", pady=8, padx=(0, 8))
+    search_frame = ttk.Frame(frame)
+    search_frame.grid(row=1, column=0, columnspan=12, sticky="ew", pady=(0, 4))
+    search_frame.columnconfigure(1, weight=1)
+    ttk.Label(search_frame, text="Search:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 8))
+    new_layout_search_var = tk.StringVar(value="")
+    ttk.Entry(search_frame, textvariable=new_layout_search_var).grid(row=0, column=1, sticky="ew")
+
+    filter_frame = ttk.Frame(frame)
+    filter_frame.grid(row=2, column=0, columnspan=12, sticky="ew", pady=(4, 8))
+    ttk.Label(filter_frame, text="Press:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 8))
     press_var = tk.StringVar(value="All")
-    press_combo = ttk.Combobox(frame, textvariable=press_var, values=["All", "Press 1", "Press 2"], state="readonly", width=16)
-    press_combo.grid(row=1, column=1, sticky="w", padx=(0, 24))
-
-    ttk.Label(frame, text="Format:", font=(None, 11, "bold")).grid(row=2, column=0, sticky="w", pady=8, padx=(0, 8))
+    press_combo = ttk.Combobox(filter_frame, textvariable=press_var, values=["All", "Press 1", "Press 2"], state="readonly", width=12)
+    press_combo.grid(row=0, column=1, sticky="w", padx=(0, 12))
+    ttk.Label(filter_frame, text="Format:", font=(None, 11, "bold")).grid(row=0, column=2, sticky="w", padx=(0, 8))
     format_var = tk.StringVar(value="All")
-    format_combo = ttk.Combobox(frame, textvariable=format_var, values=["All", "Broadsheet", "Tab", "8 up"], state="readonly", width=16)
-    format_combo.grid(row=2, column=1, sticky="w", padx=(0, 24))
-
-    section_frame = ttk.Frame(frame)
-    section_frame.grid(row=3, column=0, columnspan=12, sticky="ew")
-    ttk.Label(section_frame, text="Sections:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w", pady=8, padx=(0, 8))
+    format_combo = ttk.Combobox(filter_frame, textvariable=format_var, values=["All", "Broadsheet", "Tab", "8 up"], state="readonly", width=12)
+    format_combo.grid(row=0, column=3, sticky="w", padx=(0, 12))
+    section_label = ttk.Label(filter_frame, text="Sections:", font=(None, 11, "bold"))
+    section_label.grid(row=0, column=4, sticky="w", padx=(0, 8))
     section_count_var = tk.StringVar(value="All")
-    section_count_combo = ttk.Combobox(section_frame, textvariable=section_count_var, values=["All", "1", "2", "3", "4"], state="readonly", width=8)
-    section_count_combo.grid(row=0, column=1, sticky="w", padx=(0, 24))
+    section_count_combo = ttk.Combobox(filter_frame, textvariable=section_count_var, values=["All", "1", "2", "3", "4"], state="readonly", width=8)
+    section_count_combo.grid(row=0, column=5, sticky="w", padx=(0, 12))
+    ttk.Label(filter_frame, text="Pages:", font=(None, 11, "bold")).grid(row=0, column=6, sticky="w", padx=(0, 8))
+    pages_filter_var = tk.StringVar(value="All")
+    pages_filter_combo = ttk.Combobox(filter_frame, textvariable=pages_filter_var, values=["All"], state="readonly", width=14)
+    pages_filter_combo.grid(row=0, column=7, sticky="w", padx=(0, 0))
 
     template_container = ttk.Frame(frame)
-    template_container.grid(row=4, column=0, columnspan=12, sticky="nsew", pady=(8, 0))
+    template_container.grid(row=3, column=0, columnspan=12, sticky="nsew", pady=(8, 0))
     template_container.columnconfigure(0, weight=1)
-    template_container.rowconfigure(2, weight=1)
+    template_container.rowconfigure(1, weight=1)
     ttk.Label(template_container, text="Templates:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="nw")
-    template_search_row = ttk.Frame(template_container)
-    template_search_row.grid(row=1, column=0, sticky="ew", pady=(6, 8))
-    template_search_row.columnconfigure(1, weight=1)
-    ttk.Label(template_search_row, text="Search:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-    template_search_var = tk.StringVar(value="")
-    ttk.Entry(template_search_row, textvariable=template_search_var).grid(row=0, column=1, sticky="ew")
+    template_search_var = new_layout_search_var
     templates_frame = ttk.Frame(template_container)
-    templates_frame.grid(row=2, column=0, sticky="nsew")
+    templates_frame.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
     templates_frame.rowconfigure(0, weight=1)
     templates_frame.columnconfigure(0, weight=1)
     template_columns = ("sections", "pages", "changed_by", "saved")
@@ -7377,16 +7467,11 @@ def build_new_layout_launcher(parent):
 
     regular_container = ttk.Frame(frame)
     regular_container.columnconfigure(0, weight=1)
-    regular_container.rowconfigure(2, weight=1)
+    regular_container.rowconfigure(1, weight=1)
     ttk.Label(regular_container, text="Regular Layouts:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="nw")
-    regular_search_row = ttk.Frame(regular_container)
-    regular_search_row.grid(row=1, column=0, sticky="ew", pady=(6, 8))
-    regular_search_row.columnconfigure(1, weight=1)
-    ttk.Label(regular_search_row, text="Search:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-    regular_search_var = tk.StringVar(value="")
-    ttk.Entry(regular_search_row, textvariable=regular_search_var).grid(row=0, column=1, sticky="ew")
+    regular_search_var = new_layout_search_var
     regular_frame = ttk.Frame(regular_container)
-    regular_frame.grid(row=2, column=0, sticky="nsew")
+    regular_frame.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
     regular_frame.rowconfigure(0, weight=1)
     regular_frame.columnconfigure(0, weight=1)
     regular_columns = ("pages", "color_pages", "plates", "changed_by", "saved")
@@ -7409,7 +7494,7 @@ def build_new_layout_launcher(parent):
     apply_treeview_column_width_state(regular_tree, ("#0",) + tuple(regular_columns), "new_layout_launcher", "regular_tree")
     bind_treeview_state_memory(root, "new_layout_launcher", "regular_tree", regular_tree, columns=("#0",) + tuple(regular_columns))
     btn_row = ttk.Frame(frame)
-    btn_row.grid(row=5, column=0, columnspan=12, pady=(12, 0), sticky="w")
+    btn_row.grid(row=4, column=0, columnspan=12, pady=(12, 0), sticky="w")
     action_button = ttk.Button(btn_row, text="New / Open", width=14)
     action_button.pack(side="left", padx=(0, 8))
     refresh_button = ttk.Button(btn_row, text="Refresh Templates", width=16)
@@ -7472,8 +7557,6 @@ def build_new_layout_launcher(parent):
                 return
             if current_preview_path() != _path:
                 return
-            if not _launcher_is_active():
-                return
             if preview_state.get("path") == _path and preview_state.get("photo") is not None:
                 return
             close_preview()
@@ -7492,6 +7575,23 @@ def build_new_layout_launcher(parent):
             return max(1, min(4, int(value)))
         except Exception:
             return None
+    def _active_pages_filter():
+        value = (pages_filter_var.get() or "All").strip()
+        return None if value == "All" else value
+    def _page_display_sort_key(value):
+        text = str(value or "")
+        numbers = []
+        for part in re.findall(r"\d+", text):
+            try:
+                numbers.append(int(part))
+            except Exception:
+                pass
+        return (numbers, text.lower())
+    def _update_new_layout_pages_filter_values(rows):
+        values = ["All"] + sorted({str(row.get("pages_disp") or "").strip() for row in rows if str(row.get("pages_disp") or "").strip()}, key=_page_display_sort_key)
+        pages_filter_combo.configure(values=values)
+        if pages_filter_var.get() not in values:
+            pages_filter_var.set("All")
     def update_launcher_template_sort_headings():
         templates_tree.heading("#0", text=_treeview_sort_heading_text("Template Name", launcher_template_sort_state, "name"), command=lambda: sort_launcher_templates_by("name"))
         for col in template_columns:
@@ -7550,7 +7650,7 @@ def build_new_layout_launcher(parent):
             launcher_regular_sort_state["desc"] = False
         save_treeview_sort_state("new_layout_launcher", "regular_tree", launcher_regular_sort_state)
         refresh_regulars()
-    def _matches_template_filters(row):
+    def _matches_template_filters_base(row):
         search_text = (template_search_var.get() or "").strip().lower()
         press_filter = (press_var.get() or "All").strip()
         format_filter = (format_var.get() or "All").strip()
@@ -7574,7 +7674,14 @@ def build_new_layout_launcher(parent):
         if active_count is not None and int(row.get("section_count") or 0) != active_count:
             return False
         return True
-    def _matches_regular_filters(row):
+    def _matches_template_filters(row):
+        if not _matches_template_filters_base(row):
+            return False
+        pages_filter = _active_pages_filter()
+        if pages_filter is not None and row.get("pages_disp", "") != pages_filter:
+            return False
+        return True
+    def _matches_regular_filters_base(row):
         search_text = (regular_search_var.get() or "").strip().lower()
         press_filter = (press_var.get() or "All").strip()
         format_filter = (format_var.get() or "All").strip()
@@ -7585,6 +7692,13 @@ def build_new_layout_launcher(parent):
         if press_filter != "All" and row.get("press", "") != press_filter:
             return False
         if format_filter != "All" and row.get("format", "") != format_filter:
+            return False
+        return True
+    def _matches_regular_filters(row):
+        if not _matches_regular_filters_base(row):
+            return False
+        pages_filter = _active_pages_filter()
+        if pages_filter is not None and row.get("pages_disp", "") != pages_filter:
             return False
         return True
     def refresh_templates(*_):
@@ -7600,13 +7714,17 @@ def build_new_layout_launcher(parent):
         launcher_template_group_by_iid.clear()
         templates_tree.delete(*templates_tree.get_children())
         cached_rows, _changed = get_cached_templates(force=False)
+        candidate_rows = []
         rows = []
         for cached in cached_rows:
             if not bool(cached.get("valid", False)):
                 continue
             row = {"path": cached.get("path"), "name": cached.get("name") or os.path.splitext(os.path.basename(cached.get("path") or ""))[0], "press": cached.get("press") or "", "format": cached.get("format") or "", "section_count": int(cached.get("section_count") or 0), "section_pages_sort": tuple(([int(v) for v in (cached.get("section_pages") or []) if str(v).strip() != "" and int(v) > 0] + [0, 0, 0, 0])[:4]), "pages_disp": _format_section_pages_for_display({"section_pages": cached.get("section_pages") or [], "section_count": cached.get("section_count") or 0}), "last_changed_by": cached.get("last_changed_by") or "Unknown", "saved_dt": cached.get("saved_dt"), "saved_disp": cached.get("saved_disp") or ""}
+            if _matches_template_filters_base(row):
+                candidate_rows.append(row)
             if _matches_template_filters(row):
                 rows.append(row)
+        _update_new_layout_pages_filter_values(candidate_rows)
         rows = sort_launcher_template_rows(rows)
         press_order = ["Press 1", "Press 2"]
         format_order = ["Broadsheet", "Tab", "8 up"]
@@ -7668,7 +7786,9 @@ def build_new_layout_launcher(parent):
         saved_yview = tree_state.get("yview") if isinstance(tree_state.get("yview"), list) else None
         open_iids = set(str(iid) for iid in (tree_state.get("open_iids") or []))
         rows, _changed = get_cached_regular_rows(force=False)
-        rows = [row for row in rows if _matches_regular_filters(row)]
+        candidate_rows = [row for row in rows if _matches_regular_filters_base(row)]
+        _update_new_layout_pages_filter_values(candidate_rows)
+        rows = [row for row in candidate_rows if _matches_regular_filters(row)]
         rows = sort_launcher_regular_rows(rows)
         regular_tree.delete(*regular_tree.get_children())
         regular_rows.clear()
@@ -7725,16 +7845,18 @@ def build_new_layout_launcher(parent):
             close_preview()
     def update_mode_widgets():
         if mode_state["regular"]:
-            section_frame.grid_remove()
+            section_label.grid_remove()
+            section_count_combo.grid_remove()
             template_container.grid_remove()
-            regular_container.grid(row=4, column=0, columnspan=12, sticky="nsew", pady=(8, 0))
+            regular_container.grid(row=3, column=0, columnspan=12, sticky="nsew", pady=(8, 0))
             action_button.configure(text="Clone Regular")
             refresh_button.configure(text="Refresh Regulars", command=refresh_regulars)
             mode_button.configure(text="Standard Mode")
             mode_note_var.set("Regular mode: filter regular layouts, then clone the selected regular into a new layout dated tomorrow.")
         else:
             regular_container.grid_remove()
-            section_frame.grid()
+            section_label.grid()
+            section_count_combo.grid()
             template_container.grid()
             action_button.configure(text="New / Open")
             refresh_button.configure(text="Refresh Templates", command=refresh_templates)
@@ -7804,11 +7926,11 @@ def build_new_layout_launcher(parent):
             return
         _create_blank_or_template_layout()
 
-    template_search_var.trace_add("write", lambda *_: refresh_templates())
-    regular_search_var.trace_add("write", lambda *_: refresh_regulars())
+    new_layout_search_var.trace_add("write", lambda *_: (refresh_templates(), refresh_regulars()))
     press_var.trace_add("write", lambda *_: (refresh_templates(), refresh_regulars()))
     format_var.trace_add("write", lambda *_: (refresh_templates(), refresh_regulars()))
     section_count_var.trace_add("write", lambda *_: refresh_templates())
+    pages_filter_var.trace_add("write", lambda *_: (refresh_templates(), refresh_regulars()))
     def _on_new_layout_template_select(event=None):
         if mode_state["regular"]:
             close_preview()
@@ -7866,7 +7988,6 @@ def build_new_layout_launcher(parent):
     regular_cache_watcher = _bind_cache_watcher(root, get_cached_regular_rows, lambda: refresh_regulars())
     update_mode_widgets()
     root.bind("<FocusIn>", lambda e: show_preview(current_preview_path()), add="+")
-    root.bind("<FocusOut>", lambda e: close_preview(), add="+")
     root.protocol("WM_DELETE_WINDOW", lambda: (_persist_bound_preview_panes(root), _cancel_cache_watcher(root, template_cache_watcher), _cancel_cache_watcher(root, regular_cache_watcher), close_preview(), root.destroy()))
     return root
 def build_template_editor_launcher(parent):
@@ -7882,12 +8003,15 @@ def build_template_editor_launcher(parent):
     paned.pack(fill="both", expand=True)
     frame = ttk.Frame(paned, padding=16)
     paned.add(frame, stretch="always", minsize=220)
-    frame.rowconfigure(2, weight=1)
+    # The list/tree row must own the vertical resize weight so dragging the
+    # preview sash grows and shrinks the treeview, matching the main launcher
+    # and the regular editor.
+    frame.rowconfigure(1, weight=1)
     frame.columnconfigure(0, weight=1)
 
     filter_frame = ttk.Frame(frame)
     filter_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-    filter_frame.columnconfigure(3, weight=1)
+    filter_frame.columnconfigure(1, weight=1)
     ttk.Label(filter_frame, text="Filter:", font=(None, 11, "bold")).grid(row=0, column=0, sticky="w")
     search_var = tk.StringVar(value="")
     search_entry = ttk.Entry(filter_frame, textvariable=search_var)
@@ -7899,10 +8023,15 @@ def build_template_editor_launcher(parent):
     ttk.Label(filter_frame, text="Format:", font=(None, 11, "bold")).grid(row=0, column=4, sticky="w")
     format_var = tk.StringVar(value="All")
     format_combo = ttk.Combobox(filter_frame, textvariable=format_var, values=["All", "Broadsheet", "Tab", "8 up"], state="readonly", width=12)
-    format_combo.grid(row=0, column=5, sticky="w", padx=(8, 0))
+    format_combo.grid(row=0, column=5, sticky="w", padx=(8, 8))
+    ttk.Label(filter_frame, text="Pages:", font=(None, 11, "bold")).grid(row=0, column=6, sticky="w")
+    pages_filter_var = tk.StringVar(value="All")
+    pages_filter_combo = ttk.Combobox(filter_frame, textvariable=pages_filter_var, values=["All"], state="readonly", width=14)
+    pages_filter_combo.grid(row=0, column=7, sticky="w", padx=(8, 0))
     search_var.trace_add("write", lambda *_: refresh())
     press_var.trace_add("write", lambda *_: refresh())
     format_var.trace_add("write", lambda *_: refresh())
+    pages_filter_var.trace_add("write", lambda *_: refresh())
 
     list_frame = ttk.Frame(frame)
     list_frame.grid(row=1, column=0, sticky="nsew")
@@ -7974,8 +8103,6 @@ def build_template_editor_launcher(parent):
             if _request_id != preview_state.get("request_id"):
                 return
             if _current_preview_path() != _path:
-                return
-            if not _launcher_is_active():
                 return
             if preview_state.get("path") == _path and preview_state.get("photo") is not None:
                 return
@@ -8075,12 +8202,12 @@ def build_template_editor_launcher(parent):
             except Exception:
                 pass
 
-    def _matches_template_filter(row):
+    def _matches_template_filter_no_pages(row):
         search_text = (search_var.get() or "").strip().lower()
         press_filter = (press_var.get() or "All").strip()
         format_filter = (format_var.get() or "All").strip()
         if search_text:
-            searchable = " ".join([row.get("name", ""), row.get("press", ""), row.get("format", ""), row.get("last_changed_by", "")]).lower()
+            searchable = " ".join([row.get("name", ""), row.get("press", ""), row.get("format", ""), row.get("pages_disp", ""), row.get("last_changed_by", "")]).lower()
             if search_text not in searchable:
                 return False
         if press_filter != "All" and row.get("press", "") != press_filter:
@@ -8088,6 +8215,34 @@ def build_template_editor_launcher(parent):
         if format_filter != "All" and row.get("format", "") != format_filter:
             return False
         return True
+
+    def _matches_template_filter(row):
+        if not _matches_template_filter_no_pages(row):
+            return False
+        pages_filter = (pages_filter_var.get() or "All").strip()
+        if pages_filter != "All" and row.get("pages_disp", "") != pages_filter:
+            return False
+        return True
+
+    def _pages_display_sort_key(value):
+        text = str(value or "")
+        numbers = []
+        for part in re.findall(r"\d+", text):
+            try:
+                numbers.append(int(part))
+            except Exception:
+                pass
+        return (numbers, text.lower())
+
+    def _update_template_pages_filter_values(rows):
+        page_values = sorted({str(row.get("pages_disp") or "").strip() for row in rows if str(row.get("pages_disp") or "").strip()}, key=_pages_display_sort_key)
+        values = ["All"] + page_values
+        try:
+            pages_filter_combo.configure(values=values)
+        except Exception:
+            pass
+        if (pages_filter_var.get() or "All") not in values:
+            pages_filter_var.set("All")
 
     def update_sort_headings():
         tree.heading("#0", text=_treeview_sort_heading_text("Template Name", sort_state, "name"), command=lambda: sort_by("name"))
@@ -8099,6 +8254,7 @@ def build_template_editor_launcher(parent):
     def refresh():
         template_rows.clear()
         cached_rows, _changed = get_cached_templates(force=False)
+        all_rows = []
         for cached in cached_rows:
             row = {
                 "path": cached.get("path"),
@@ -8112,6 +8268,9 @@ def build_template_editor_launcher(parent):
                 "saved_disp": cached.get("saved_disp") or "",
                 "last_changed_by": cached.get("last_changed_by") or "Unknown",
             }
+            all_rows.append(row)
+        _update_template_pages_filter_values([row for row in all_rows if _matches_template_filter_no_pages(row)])
+        for row in all_rows:
             if _matches_template_filter(row):
                 template_rows.append(row)
         load_rows(sort_rows(list(template_rows)))
@@ -8223,7 +8382,6 @@ def build_template_editor_launcher(parent):
     refresh()
     template_cache_watcher = _bind_cache_watcher(root, get_cached_templates, lambda: refresh())
     root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
-    root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
     root.protocol("WM_DELETE_WINDOW", lambda: (_persist_bound_preview_panes(root), _cancel_cache_watcher(root, template_cache_watcher), close_preview(), root.destroy()))
     return root
 
@@ -11008,6 +11166,1802 @@ def unregister_single_instance_window(win):
             _SINGLE_INSTANCE_ACTIVE_WINDOW = None
 
 
+
+def build_plan_wizard(parent):
+    """Open the first two pages of the layout planning wizard."""
+    dialog = tk.Toplevel(parent)
+    set_window_icon(dialog)
+    dialog.title("Plan Layout")
+    dialog.geometry("900x660")
+    dialog.minsize(820, 560)
+    remember_window_geometry(dialog, "plan_layout_wizard", default_geometry="900x660", minsize=(820, 560))
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+
+    format_multiples = {"Broadsheet": 2, "Tab": 4, "8 up": 8}
+    format_values = list(format_multiples.keys())
+    sections = []
+    page_color_state = {}
+    page_group_state = {}
+    split_status_var = tk.StringVar(value="")
+    split_recalc_state = {"active": False}
+    plan_validation_state = {"active": False, "after_id": None}
+    section_palette = ("#f9d6df", "#d7e8ff", "#d9f2df", "#eadcff")
+
+    outer = ttk.Frame(dialog, padding=16)
+    outer.pack(fill="both", expand=True)
+    outer.columnconfigure(0, weight=1)
+    outer.rowconfigure(1, weight=1)
+    header_var = tk.StringVar(value="Plan Layout")
+    ttk.Label(outer, textvariable=header_var, font=(None, 13, "bold")).grid(row=0, column=0, sticky="w")
+    body = ttk.Frame(outer)
+    body.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+    body.columnconfigure(0, weight=1)
+    body.rowconfigure(0, weight=1)
+    footer = ttk.Frame(outer)
+    footer.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+    footer.columnconfigure(0, weight=1)
+    footer_left = ttk.Frame(footer)
+    footer_left.grid(row=0, column=0, sticky="w")
+    footer_right = ttk.Frame(footer)
+    footer_right.grid(row=0, column=1, sticky="e")
+
+    issue_date_var = tk.StringVar(value="")
+    publication_var = tk.StringVar(value="")
+
+    def _clear_frame(frame):
+        for child in frame.winfo_children():
+            child.destroy()
+
+    def _clear_footer():
+        _clear_frame(footer_left)
+        _clear_frame(footer_right)
+
+    def _uppercase_var_trace(var):
+        state = {"updating": False}
+        def _apply(*_args):
+            if state["updating"]:
+                return
+            current = str(var.get() or "")
+            upper = current.upper()
+            if current == upper:
+                return
+            state["updating"] = True
+            try:
+                var.set(upper)
+            finally:
+                state["updating"] = False
+        var.trace_add("write", _apply)
+        return _apply
+
+    def _format_issue_date_var(*_args):
+        raw = (issue_date_var.get() or "").strip()
+        if not raw:
+            return
+        dt = parse_issue_date_flexible(raw)
+        if dt:
+            normalized = dt.strftime("%m/%d/%Y")
+            if normalized != raw:
+                issue_date_var.set(normalized)
+
+    def _bind_issue_date_formatting(widget):
+        widget.bind("<FocusOut>", lambda _event: (_format_issue_date_var(), _sync_page_one_validation()), add="+")
+        widget.bind("<Return>", lambda _event: (_format_issue_date_var(), _sync_page_one_validation(), "break")[-1], add="+")
+
+    def _open_plan_issue_date_picker(widget):
+        selected_value = ask_issue_date_with_calendar(
+            dialog,
+            initial_text=issue_date_var.get().strip(),
+            anchor_widget=widget,
+            title="Select Issue Date",
+        )
+        if selected_value:
+            issue_date_var.set(selected_value)
+            _format_issue_date_var()
+            _sync_page_one_validation()
+        try:
+            widget.focus_set()
+            widget.selection_range(0, "end")
+            widget.icursor("end")
+        except Exception:
+            pass
+        return "break"
+
+    def _bind_mousewheel_to_canvas(widget, canvas):
+        def _on_mousewheel(event):
+            try:
+                if getattr(event, "num", None) == 4:
+                    canvas.yview_scroll(-1, "units")
+                elif getattr(event, "num", None) == 5:
+                    canvas.yview_scroll(1, "units")
+                else:
+                    delta = int(getattr(event, "delta", 0) or 0)
+                    if delta:
+                        canvas.yview_scroll(int(-1 * (delta / 120)), "units")
+            except Exception:
+                pass
+            return "break"
+        try:
+            widget.bind("<MouseWheel>", _on_mousewheel, add="+")
+            widget.bind("<Button-4>", _on_mousewheel, add="+")
+            widget.bind("<Button-5>", _on_mousewheel, add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            _bind_mousewheel_to_canvas(child, canvas)
+
+    _uppercase_var_trace(publication_var)
+
+    def _next_section_name(previous_name):
+        value = str(previous_name or "A").strip().upper()
+        if not value:
+            return "A"
+        match = re.match(r"^([A-Z]+)(\d*)$", value)
+        if match and match.group(2):
+            return f"{match.group(1)}{int(match.group(2)) + 1}"
+        if match:
+            letters = list(match.group(1))
+            idx = len(letters) - 1
+            carry = True
+            while idx >= 0 and carry:
+                if letters[idx] == "Z":
+                    letters[idx] = "A"
+                    idx -= 1
+                else:
+                    letters[idx] = chr(ord(letters[idx]) + 1)
+                    carry = False
+            if carry:
+                letters.insert(0, "A")
+            return "".join(letters)
+        return value + "1"
+
+    section_uid_counter = {"value": 0}
+
+    def _next_section_uid():
+        section_uid_counter["value"] = int(section_uid_counter.get("value", 0)) + 1
+        return f"section_{section_uid_counter['value']}"
+
+    def _make_section(name="A", pages="", start="1", fmt="Broadsheet", page_numbers=None, parent_id=None, color_index=None, is_split_parent=False):
+        name_var = tk.StringVar(value=str(name or "A").upper())
+        _uppercase_var_trace(name_var)
+        stored_page_numbers = []
+        if page_numbers is not None:
+            for page_number in page_numbers:
+                try:
+                    stored_page_numbers.append(int(page_number))
+                except Exception:
+                    pass
+        return {
+            "uid": _next_section_uid(),
+            "name_var": name_var,
+            "pages_var": tk.StringVar(value=pages),
+            "start_var": tk.StringVar(value=start),
+            "format_var": tk.StringVar(value=fmt if fmt in format_values else "Broadsheet"),
+            "pages_label_var": tk.StringVar(value=""),
+            "page_numbers": stored_page_numbers,
+            "_trace_ids": [],
+            "parent_id": parent_id,
+            "split_children": [],
+            "is_split_parent": bool(is_split_parent),
+            "color_index": color_index,
+        }
+
+    sections.append(_make_section(color_index=0))
+
+    def _is_subsection(section):
+        return bool(section.get("parent_id"))
+
+    def _section_has_subsections(section):
+        uid = section.get("uid")
+        return any(child.get("parent_id") == uid for child in sections)
+
+    def _top_level_sections():
+        return [section for section in sections if not _is_subsection(section)]
+
+    def _section_color_index(section, fallback_index=0):
+        try:
+            value = section.get("color_index")
+            if value is not None:
+                return int(value)
+        except Exception:
+            pass
+        if _is_subsection(section):
+            parent_id = section.get("parent_id")
+            for candidate in sections:
+                if candidate.get("uid") == parent_id:
+                    return _section_color_index(candidate, fallback_index)
+        try:
+            section["color_index"] = int(fallback_index)
+            return int(fallback_index)
+        except Exception:
+            return 0
+
+    def _remove_subsections_for_parent(parent_section):
+        parent_uid = parent_section.get("uid")
+        if not parent_uid:
+            return
+        sections[:] = [section for section in sections if section.get("parent_id") != parent_uid]
+        parent_section["split_children"] = []
+        parent_section["is_split_parent"] = False
+        _set_split_status("")
+
+    def _parent_for_subsection(section):
+        parent_id = section.get("parent_id")
+        if not parent_id:
+            return None
+        for candidate in sections:
+            if candidate.get("uid") == parent_id:
+                return candidate
+        return None
+
+    def _split_children(parent_section):
+        parent_uid = parent_section.get("uid")
+        if not parent_uid:
+            return []
+        return [section for section in sections if section.get("parent_id") == parent_uid]
+
+    def _set_split_status(message=""):
+        try:
+            new_value = str(message or "")
+            if (split_status_var.get() or "") != new_value:
+                split_status_var.set(new_value)
+        except Exception:
+            pass
+
+    def _format_page_ranges(page_numbers):
+        values = []
+        for page_number in page_numbers or []:
+            try:
+                values.append(int(page_number))
+            except Exception:
+                pass
+        if not values:
+            return ""
+        ranges = []
+        start = prev = values[0]
+        for value in values[1:]:
+            if value == prev + 1:
+                prev = value
+                continue
+            ranges.append(str(start) if start == prev else f"{start}-{prev}")
+            start = prev = value
+        ranges.append(str(start) if start == prev else f"{start}-{prev}")
+        return ", ".join(ranges)
+
+    def _refresh_section_page_labels():
+        for section in sections:
+            try:
+                snap = _section_snapshot(section)
+                try:
+                    pages = int(snap.get("pages") or 0)
+                except Exception:
+                    pages = 0
+                try:
+                    start_page = int(snap.get("start") or 1)
+                except Exception:
+                    start_page = 1
+                page_numbers = _section_page_numbers_from_snapshot(snap, start_page, pages) if pages > 0 else []
+                if len(page_numbers) == pages:
+                    section["page_numbers"] = list(page_numbers)
+                label_var = section.get("pages_label_var")
+                if label_var is not None:
+                    label_var.set(_format_page_ranges(page_numbers))
+            except Exception:
+                pass
+
+    def _coerce_positive_int(value):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = int(text)
+        except Exception:
+            return None
+        return parsed if parsed > 0 else None
+
+    def _recalculate_split_for_parent(parent_section, edited_child=None, refresh_labels=True):
+        if parent_section is None or not _section_has_subsections(parent_section):
+            _set_split_status("")
+            if refresh_labels:
+                _refresh_section_page_labels()
+            return True
+        if split_recalc_state.get("active"):
+            return True
+        children = _split_children(parent_section)
+        if len(children) < 2:
+            _set_split_status("")
+            return True
+        split_recalc_state["active"] = True
+        try:
+            parent_snap = _section_snapshot(parent_section)
+            parent_name = parent_snap.get("name") or "Section"
+            fmt = parent_snap.get("format") if parent_snap.get("format") in format_multiples else "Broadsheet"
+            multiple = format_multiples.get(fmt, 1)
+            parent_pages = _coerce_positive_int(parent_snap.get("pages"))
+            parent_start = _coerce_positive_int(parent_snap.get("start")) or 1
+            if parent_pages is None:
+                _set_split_status(f"{parent_name}: parent page count must be a positive number.")
+                return False
+            if parent_pages % multiple != 0:
+                _set_split_status(f"{parent_name}: parent page count must be a multiple of {multiple} for {fmt}.")
+                return False
+            if edited_child in children:
+                edit_index = children.index(edited_child)
+                adjust_index = len(children) - 1 if edit_index != len(children) - 1 else len(children) - 2
+                fixed_total = 0
+                for idx, child in enumerate(children):
+                    if idx == adjust_index:
+                        continue
+                    child_name = str(child["name_var"].get() or f"subsection {idx + 1}").strip()
+                    value = _coerce_positive_int(child["pages_var"].get())
+                    if value is None:
+                        _set_split_status(f"{child_name}: page count must be a positive number.")
+                        return False
+                    fixed_total += value
+                remainder = parent_pages - fixed_total
+                if remainder <= 0:
+                    _set_split_status(f"{parent_name}: subsection page counts exceed the parent total of {parent_pages} pages.")
+                    return False
+                try:
+                    children[adjust_index]["pages_var"].set(str(remainder))
+                except Exception:
+                    pass
+            counts = []
+            errors = []
+            for child in children:
+                child_name = str(child["name_var"].get() or "Subsection").strip()
+                value = _coerce_positive_int(child["pages_var"].get())
+                if value is None:
+                    errors.append(f"{child_name}: page count must be a positive number.")
+                    continue
+                if value % multiple != 0:
+                    errors.append(f"{child_name}: page count must be a multiple of {multiple} for {fmt}.")
+                counts.append(value or 0)
+            if len(counts) == len(children) and sum(counts) != parent_pages:
+                errors.append(f"{parent_name}: subsection page counts must add up to {parent_pages} pages.")
+            if errors:
+                _set_split_status(" ".join(errors))
+                if refresh_labels:
+                    _refresh_section_page_labels()
+                return False
+            page_groups = _split_page_number_groups(parent_start, parent_pages, fmt, counts)
+            for child, page_group in zip(children, page_groups):
+                child["page_numbers"] = list(page_group)
+                if page_group:
+                    try:
+                        child["start_var"].set(str(min(page_group)))
+                    except Exception:
+                        pass
+                try:
+                    child["format_var"].set(fmt)
+                except Exception:
+                    pass
+            parent_section["page_numbers"] = list(range(parent_start, parent_start + parent_pages))
+            _set_split_status("")
+            if refresh_labels:
+                _refresh_section_page_labels()
+            return True
+        finally:
+            split_recalc_state["active"] = False
+
+    def _recalculate_all_splits(refresh_labels=True):
+        ok = True
+        _set_split_status("")
+        for parent_section in list(sections):
+            if parent_section.get("is_split_parent") and _section_has_subsections(parent_section):
+                if not _recalculate_split_for_parent(parent_section, refresh_labels=False):
+                    ok = False
+                    break
+        if refresh_labels:
+            _refresh_section_page_labels()
+        return ok
+
+    def _bind_split_recalc_trace(section):
+        if section.get("_split_trace_bound"):
+            return
+        def _schedule_recalc(*_args):
+            if split_recalc_state.get("active"):
+                return
+            parent_section = _parent_for_subsection(section) if _is_subsection(section) else section
+            try:
+                dialog.after_idle(lambda p=parent_section, s=section: _recalculate_split_for_parent(p, edited_child=(s if _is_subsection(s) else None)))
+            except Exception:
+                _recalculate_split_for_parent(parent_section, edited_child=(section if _is_subsection(section) else None))
+        for var_key in ("pages_var", "format_var"):
+            try:
+                trace_id = section[var_key].trace_add("write", _schedule_recalc)
+                section.setdefault("_trace_ids", []).append((var_key, trace_id))
+            except Exception:
+                pass
+        section["_split_trace_bound"] = True
+
+    def _section_snapshot(section):
+        return {
+            "name": str(section["name_var"].get() or "").strip().upper(),
+            "pages": str(section["pages_var"].get() or "").strip(),
+            "start": str(section["start_var"].get() or "").strip(),
+            "format": str(section["format_var"].get() or "Broadsheet").strip(),
+            "page_numbers": list(section.get("page_numbers") or []),
+        }
+
+    def _section_page_numbers_from_snapshot(snap, start_page, pages):
+        stored = []
+        for page_number in (snap.get("page_numbers") or []):
+            try:
+                stored.append(int(page_number))
+            except Exception:
+                pass
+        if len(stored) == int(pages):
+            return stored
+        return list(range(int(start_page), int(start_page) + int(pages)))
+
+    def _balanced_legal_page_counts(total_pages, signature_count, multiple):
+        total_units = int(total_pages) // int(multiple)
+        signature_count = int(signature_count)
+        if signature_count < 1 or signature_count > total_units:
+            return None
+        base_units, remainder = divmod(total_units, signature_count)
+        return [int(multiple) * (base_units + (1 if idx < remainder else 0)) for idx in range(signature_count)]
+
+    def _split_page_number_groups(start_page, total_pages, format_name, signature_counts):
+        all_pages = list(range(int(start_page), int(start_page) + int(total_pages)))
+        fmt = str(format_name or "Broadsheet").strip()
+        if fmt == "Broadsheet":
+            groups = []
+            cursor = 0
+            for count in signature_counts:
+                groups.append(all_pages[cursor:cursor + int(count)])
+                cursor += int(count)
+            return groups
+        groups = []
+        low = 0
+        high = len(all_pages)
+        for count in signature_counts:
+            count = int(count)
+            outer_each_side = count // 2
+            front = all_pages[low:low + outer_each_side]
+            back = all_pages[high - outer_each_side:high]
+            groups.append(front + back)
+            low += outer_each_side
+            high -= outer_each_side
+        return groups
+
+    def _ask_signature_count(section_name, pages, max_signatures):
+        result = {"value": None}
+        prompt = tk.Toplevel(dialog)
+        set_window_icon(prompt)
+        prompt.title("Split Section")
+        try:
+            prompt.transient(dialog)
+            prompt.grab_set()
+        except Exception:
+            pass
+        prompt.resizable(False, False)
+        content = ttk.Frame(prompt, padding=16)
+        content.pack(fill="both", expand=True)
+        ttk.Label(
+            content,
+            text=f"Split section {section_name} ({pages} pages) into how many signatures?",
+            font=(None, 10, "bold"),
+            wraplength=360,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(content, text=f"Enter a number from 2 to {max_signatures}.").grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 10))
+        count_var = tk.StringVar(value="2")
+        count_entry = ttk.Entry(content, textvariable=count_var, width=8)
+        count_entry.grid(row=2, column=0, sticky="w")
+        error_var = tk.StringVar(value="")
+        ttk.Label(content, textvariable=error_var, foreground="#c62828").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        buttons = ttk.Frame(content)
+        buttons.grid(row=4, column=0, columnspan=2, sticky="e", pady=(14, 0))
+
+        def _confirm():
+            raw = (count_var.get() or "").strip()
+            try:
+                value = int(raw)
+            except Exception:
+                error_var.set("Type a whole number.")
+                return
+            if value < 2 or value > int(max_signatures):
+                error_var.set(f"Use a number from 2 to {max_signatures}.")
+                return
+            result["value"] = value
+            try:
+                prompt.destroy()
+            except Exception:
+                pass
+
+        ttk.Button(buttons, text="Cancel", command=prompt.destroy, width=10).pack(side="right")
+        ttk.Button(buttons, text="Confirm", command=_confirm, width=10).pack(side="right", padx=(0, 8))
+        count_entry.bind("<Return>", lambda _event: (_confirm(), "break")[-1])
+        try:
+            prompt.update_idletasks()
+            x = dialog.winfo_rootx() + max(40, (dialog.winfo_width() - prompt.winfo_reqwidth()) // 2)
+            y = dialog.winfo_rooty() + max(40, (dialog.winfo_height() - prompt.winfo_reqheight()) // 2)
+            prompt.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+        count_entry.focus_set()
+        try:
+            dialog.wait_window(prompt)
+        except Exception:
+            pass
+        return result.get("value")
+
+    def split_section(section):
+        snap = _section_snapshot(section)
+        name = snap["name"] or "A"
+        fmt = snap["format"] if snap["format"] in format_multiples else "Broadsheet"
+        multiple = format_multiples.get(fmt, 1)
+        try:
+            pages = int(snap["pages"])
+        except Exception:
+            pages = 0
+        try:
+            start_page = int(snap["start"])
+        except Exception:
+            start_page = 0
+        if pages <= 0 or start_page <= 0:
+            messagebox.showerror("Split Section", f"Section {name} needs a valid page count and start page before it can be split.", parent=dialog)
+            return
+        if pages % multiple != 0:
+            messagebox.showerror("Split Section", f"Section {name}: #Pages must be a multiple of {multiple} for {fmt} before it can be split.", parent=dialog)
+            return
+        if _is_subsection(section):
+            messagebox.showinfo("Split Section", "Subsections are already signatures and cannot be split again.", parent=dialog)
+            return
+        max_signatures = min(4, pages // multiple)
+        if max_signatures < 2:
+            messagebox.showinfo("Split Section", f"Section {name} is already at the minimum legal size for {fmt}.", parent=dialog)
+            return
+        signature_count = _ask_signature_count(name, pages, max_signatures)
+        if signature_count is None:
+            return
+        signature_counts = _balanced_legal_page_counts(pages, signature_count, multiple)
+        if not signature_counts:
+            messagebox.showerror("Split Section", f"Section {name} cannot be split into {signature_count} legal {fmt} signatures.", parent=dialog)
+            return
+        page_groups = _split_page_number_groups(start_page, pages, fmt, signature_counts)
+        try:
+            section_index = sections.index(section)
+        except Exception:
+            return
+        _remove_subsections_for_parent(section)
+        try:
+            section_index = sections.index(section)
+        except Exception:
+            return
+        base_color_index = _section_color_index(section, section_index)
+        new_sections = []
+        child_ids = []
+        for idx, page_group in enumerate(page_groups, start=1):
+            if not page_group:
+                continue
+            subsection_name = f"{name}{idx}"
+            child = _make_section(
+                name=subsection_name,
+                pages=str(len(page_group)),
+                start=str(min(page_group)),
+                fmt=fmt,
+                page_numbers=page_group,
+                parent_id=section.get("uid"),
+                color_index=base_color_index,
+            )
+            new_sections.append(child)
+            child_ids.append(child.get("uid"))
+        section["is_split_parent"] = True
+        section["split_children"] = child_ids
+        sections[section_index + 1:section_index + 1] = new_sections
+        _recalculate_split_for_parent(section, refresh_labels=True)
+        show_page_one()
+
+    def _build_plan_display_groups():
+        groups = []
+        top_index = 0
+        for section in sections:
+            if _is_subsection(section):
+                continue
+            color_index = _section_color_index(section, top_index)
+            top_index += 1
+            snap = _section_snapshot(section)
+            parent_name = snap.get("name") or chr(ord("A") + min(top_index - 1, 25))
+            children = _split_children(section) if section.get("is_split_parent") and _section_has_subsections(section) else [section]
+            child_items = []
+            for child in children:
+                child_snap = _section_snapshot(child)
+                child_name = child_snap.get("name") or parent_name
+                try:
+                    pages = int(child_snap.get("pages") or 0)
+                except Exception:
+                    pages = 0
+                try:
+                    start_page = int(child_snap.get("start") or snap.get("start") or 1)
+                except Exception:
+                    start_page = 1
+                fmt = child_snap.get("format") if child_snap.get("format") in format_multiples else (snap.get("format") if snap.get("format") in format_multiples else "Broadsheet")
+                child_items.append({
+                    "name": child_name,
+                    "pages": pages,
+                    "start": start_page,
+                    "format": fmt,
+                    "page_numbers": _section_page_numbers_from_snapshot(child_snap, start_page, pages) if pages > 0 else [],
+                    "is_subsection": _is_subsection(child),
+                    "parent_name": parent_name,
+                    "color_index": color_index,
+                })
+            groups.append({
+                "name": parent_name,
+                "format": snap.get("format") if snap.get("format") in format_multiples else "Broadsheet",
+                "pages": _coerce_positive_int(snap.get("pages")) or 0,
+                "color_index": color_index,
+                "sections": child_items,
+                "is_split": bool(section.get("is_split_parent") and _section_has_subsections(section)),
+            })
+        return groups
+
+    def _collect_plan_page_one_errors(update_status=True):
+        errors = []
+        issue_text = (issue_date_var.get() or "").strip()
+        publication_text = normalize_publication_name(publication_var.get())
+        if not issue_text:
+            errors.append("Issue Date is required.")
+        elif parse_issue_date_flexible(issue_text) is None:
+            errors.append("Issue Date must be a valid date.")
+        if not publication_text:
+            errors.append("Publication is required.")
+        split_ok = _recalculate_all_splits(refresh_labels=True)
+        split_message = (split_status_var.get() or "").strip()
+        if not split_ok and split_message:
+            errors.append(split_message)
+        if not sections:
+            errors.append("Add at least one section.")
+        for index, section in enumerate(sections, start=1):
+            if section.get("is_split_parent") and _section_has_subsections(section):
+                continue
+            snap = _section_snapshot(section)
+            name = snap["name"] or chr(ord("A") + min(index - 1, 25))
+            fmt = snap["format"] if snap["format"] in format_multiples else "Broadsheet"
+            multiple = format_multiples.get(fmt, 1)
+            try:
+                pages = int(snap["pages"])
+            except Exception:
+                pages = None
+            if pages is None or pages <= 0:
+                errors.append(f"Section {name}: #Pages must be a positive number.")
+            elif pages % multiple != 0:
+                errors.append(f"Section {name}: #Pages must be a multiple of {multiple} for {fmt}.")
+        if update_status:
+            _set_split_status(" ".join(errors[:3]))
+        return errors
+
+    def _validate_plan_inputs():
+        errors = _collect_plan_page_one_errors(update_status=True)
+        if errors:
+            messagebox.showerror("Plan Check", "Please fix the following before continuing:\n\n" + "\n".join(f"• {item}" for item in errors), parent=dialog)
+            return None
+        normalized = []
+        issue_text = normalize_issue_date_mmddyyyy((issue_date_var.get() or "").strip())
+        product_text = normalize_publication_name(publication_var.get())
+        issue_date_var.set(issue_text)
+        publication_var.set(product_text)
+        for index, section in enumerate(sections, start=1):
+            if section.get("is_split_parent") and _section_has_subsections(section):
+                continue
+            snap = _section_snapshot(section)
+            name = snap["name"] or chr(ord("A") + min(index - 1, 25))
+            try:
+                section["name_var"].set(name)
+            except Exception:
+                pass
+            fmt = snap["format"] if snap["format"] in format_multiples else "Broadsheet"
+            try:
+                pages = int(snap["pages"])
+            except Exception:
+                pages = 0
+            try:
+                start_page = int(snap["start"])
+            except Exception:
+                start_page = 1
+            if start_page <= 0:
+                start_page = 1
+            normalized.append({
+                "name": name,
+                "pages": pages,
+                "start": start_page,
+                "format": fmt,
+                "page_numbers": _section_page_numbers_from_snapshot(snap, start_page, pages),
+                "is_subsection": _is_subsection(section),
+                "parent_name": (_parent_for_subsection(section)["name_var"].get() if _is_subsection(section) and _parent_for_subsection(section) else ""),
+                "color_index": _section_color_index(section, index - 1),
+            })
+        display_groups = _build_plan_display_groups()
+        return {"issue_date": issue_text, "publication": product_text, "sections": normalized, "section_groups": display_groups}
+
+    def _bind_page_one_validation_trace(var):
+        try:
+            if getattr(var, "_plan_validation_trace", False):
+                return
+        except Exception:
+            pass
+        def _schedule(*_args):
+            if plan_validation_state.get("active"):
+                return
+            prior_after_id = plan_validation_state.get("after_id")
+            if prior_after_id is not None:
+                try:
+                    dialog.after_cancel(prior_after_id)
+                except Exception:
+                    pass
+                plan_validation_state["after_id"] = None
+            try:
+                plan_validation_state["after_id"] = dialog.after(80, _sync_page_one_validation)
+            except Exception:
+                _sync_page_one_validation()
+        try:
+            var.trace_add("write", _schedule)
+            var._plan_validation_trace = True
+        except Exception:
+            pass
+
+    def _sync_page_one_validation():
+        if plan_validation_state.get("active"):
+            return False
+        plan_validation_state["after_id"] = None
+        plan_validation_state["active"] = True
+        try:
+            next_button = getattr(dialog, "_plan_next_button", None)
+            errors = _collect_plan_page_one_errors(update_status=True)
+            if next_button is not None:
+                try:
+                    next_button.state(["disabled"] if errors else ["!disabled"])
+                except Exception:
+                    try:
+                        next_button.configure(state=("disabled" if errors else "normal"))
+                    except Exception:
+                        pass
+            return not errors
+        finally:
+            plan_validation_state["active"] = False
+
+    def show_page_one():
+        header_var.set("Plan Layout - Sections")
+        _clear_frame(body)
+        _clear_footer()
+        body.rowconfigure(0, weight=0)
+        body.rowconfigure(1, weight=1)
+        body.columnconfigure(0, weight=1)
+        top = ttk.Frame(body)
+        top.grid(row=0, column=0, sticky="ew")
+        top.columnconfigure(1, weight=1)
+        top.columnconfigure(3, weight=1)
+        ttk.Label(top, text="Issue Date:", font=(None, 10, "bold")).grid(row=0, column=0, sticky="w")
+        issue_entry = ttk.Entry(top, textvariable=issue_date_var, width=18)
+        issue_entry.grid(row=0, column=1, sticky="ew", padx=(8, 24))
+        _bind_issue_date_formatting(issue_entry)
+        issue_entry.bind("<Button-1>", lambda _event, w=issue_entry: _open_plan_issue_date_picker(w), add="+")
+        _bind_page_one_validation_trace(issue_date_var)
+        _bind_page_one_validation_trace(publication_var)
+        ttk.Label(top, text="Publication:", font=(None, 10, "bold")).grid(row=0, column=2, sticky="w")
+        ttk.Entry(top, textvariable=publication_var, width=34).grid(row=0, column=3, sticky="ew", padx=(8, 0))
+
+        canvas = tk.Canvas(body, highlightthickness=0, bd=0, background="#f7f7f7")
+        canvas.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns", pady=(14, 0))
+        canvas.configure(yscrollcommand=scrollbar.set)
+        section_frame = tk.Frame(canvas, background="#f7f7f7", bd=0, highlightthickness=0)
+        section_window = canvas.create_window((0, 0), window=section_frame, anchor="nw")
+        section_frame.columnconfigure(0, weight=1)
+        section_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(section_window, width=e.width))
+
+        column_settings = (
+            (0, 14, 18),
+            (1, 12, 18),
+            (2, 28, 18),
+            (3, 8, 24),
+            (4, 16, 18),
+            (5, 12, 0),
+        )
+        header_positions = {
+            "Section": 6,
+            "#Pages": 110,
+            "Pages": 204,
+            "Split": 430,
+            "Format": 510,
+        }
+        _recalculate_all_splits(refresh_labels=True)
+        for col, _width, _pad in column_settings:
+            try:
+                section_frame.columnconfigure(col, weight=0)
+            except Exception:
+                pass
+        header_frame = tk.Frame(section_frame, background="#f7f7f7", bd=0, highlightthickness=0, height=24)
+        header_frame.grid(row=0, column=0, columnspan=6, sticky="ew", pady=(0, 5))
+        header_frame.grid_propagate(False)
+        for title, xpos in header_positions.items():
+            label = tk.Label(header_frame, text=title, font=(None, 10, "bold"), anchor="w", background="#f7f7f7")
+            label.place(x=xpos, y=2)
+
+        def delete_section(section):
+            remaining_top_level = [candidate for candidate in sections if candidate is not section and not _is_subsection(candidate)]
+            if (not _is_subsection(section)) and not remaining_top_level:
+                messagebox.showinfo("Plan Layout", "At least one section is required.", parent=dialog)
+                return
+            if section in sections:
+                if not _is_subsection(section):
+                    _remove_subsections_for_parent(section)
+                else:
+                    parent_id = section.get("parent_id")
+                    for candidate in sections:
+                        if candidate.get("uid") == parent_id:
+                            candidate["split_children"] = [uid for uid in candidate.get("split_children", []) if uid != section.get("uid")]
+                            if not any(child.get("parent_id") == parent_id and child is not section for child in sections):
+                                candidate["is_split_parent"] = False
+                            break
+                try:
+                    sections.remove(section)
+                except ValueError:
+                    pass
+            show_page_one()
+
+        top_level_seen = 0
+        for row_index, section in enumerate(sections, start=1):
+            if not _is_subsection(section):
+                color_index = _section_color_index(section, top_level_seen)
+                top_level_seen += 1
+            else:
+                color_index = _section_color_index(section, row_index - 1)
+            row_bg = section_palette[color_index % len(section_palette)]
+            row_frame = tk.Frame(section_frame, background=row_bg, bd=0, highlightthickness=0, padx=6, pady=4)
+            row_frame.grid(row=row_index, column=0, columnspan=6, sticky="ew", pady=(0, 2 if _is_subsection(section) else 5))
+            for col, _width, _pad in column_settings:
+                try:
+                    row_frame.columnconfigure(col, weight=0)
+                except Exception:
+                    pass
+            section_cell = tk.Frame(row_frame, background=row_bg, bd=0, highlightthickness=0)
+            section_cell.grid(row=0, column=0, sticky="w", padx=(0, 18))
+            if _is_subsection(section):
+                tk.Label(section_cell, text="↳", background=row_bg, font=(None, 10, "bold"), width=2, anchor="w").pack(side="left")
+                tk.Entry(section_cell, textvariable=section["name_var"], width=11).pack(side="left")
+            else:
+                tk.Entry(section_cell, textvariable=section["name_var"], width=14).pack(side="left")
+            _bind_split_recalc_trace(section)
+            _bind_page_one_validation_trace(section["pages_var"])
+            _bind_page_one_validation_trace(section["format_var"])
+            tk.Entry(row_frame, textvariable=section["pages_var"], width=12).grid(row=0, column=1, sticky="w", padx=(0, 18))
+            tk.Label(row_frame, textvariable=section["pages_label_var"], background=row_bg, width=28, anchor="w").grid(row=0, column=2, sticky="w", padx=(0, 18))
+            split_button = ttk.Button(row_frame, text=("ReSplit..." if section.get("is_split_parent") and _section_has_subsections(section) else "Split..."), command=lambda s=section: split_section(s), width=8)
+            split_button.grid(row=0, column=3, sticky="w", padx=(0, 24))
+            if _is_subsection(section):
+                try:
+                    split_button.state(["disabled"])
+                except Exception:
+                    split_button.configure(state="disabled")
+            ttk.Combobox(row_frame, textvariable=section["format_var"], values=format_values, state="readonly", width=14).grid(row=0, column=4, sticky="w", padx=(0, 18))
+            ttk.Button(row_frame, text="x Delete", command=lambda s=section: delete_section(s), width=10).grid(row=0, column=5, sticky="w")
+
+        def add_section():
+            top_sections = _top_level_sections()
+            previous = top_sections[-1]["name_var"].get() if top_sections else "A"
+            sections.append(_make_section(name=_next_section_name(previous), color_index=len(top_sections)))
+            show_page_one()
+
+        status_bar = tk.Label(body, textvariable=split_status_var, background="#c62828", foreground="white", anchor="w", padx=8, pady=4)
+        def _sync_status_bar(*_args):
+            message = (split_status_var.get() or "").strip()
+            if message:
+                try:
+                    status_bar.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+                except Exception:
+                    pass
+            else:
+                try:
+                    status_bar.grid_remove()
+                except Exception:
+                    pass
+        split_status_var.trace_add("write", _sync_status_bar)
+        _sync_status_bar()
+
+        ttk.Button(footer_left, text="+ Add Section", command=add_section, width=16).pack(side="left", padx=(0, 8))
+        ttk.Button(footer_right, text="Cancel", command=dialog.destroy, width=12).pack(side="right")
+        next_button = ttk.Button(footer_right, text="Next", command=show_page_two_from_validation, width=12)
+        next_button.pack(side="right", padx=(0, 8))
+        dialog._plan_next_button = next_button
+        try:
+            dialog.after_idle(_sync_page_one_validation)
+        except Exception:
+            _sync_page_one_validation()
+        _bind_mousewheel_to_canvas(canvas, canvas)
+        _bind_mousewheel_to_canvas(section_frame, canvas)
+
+    def _plan_group_color_state(group):
+        section_name, pages_tuple = group
+        if group in page_color_state:
+            return bool(page_color_state.get(group, False))
+        return any(bool(page_color_state.get((section_name, int(page)), False)) for page in pages_tuple)
+
+    # Backward-compatible shared helper used by later Plan wizard screens.
+    def _group_color_state(group):
+        return _plan_group_color_state(group)
+
+    def _draw_color_box(canvas, is_color):
+        canvas.delete("all")
+        if is_color:
+            for idx, color in enumerate(("#00aeef", "#ec008c", "#fff200", "#111111")):
+                canvas.create_rectangle(idx * 9, 0, (idx + 1) * 9, 22, fill=color, outline=color)
+            canvas.create_rectangle(0, 0, 36, 22, outline="#222222")
+        else:
+            canvas.create_rectangle(0, 0, 36, 22, fill="#111111", outline="#111111")
+
+    def show_page_two(plan):
+        header_var.set("Plan Layout - Color Pages")
+        _clear_frame(body)
+        _clear_footer()
+        body.rowconfigure(0, weight=1)
+        body.rowconfigure(1, weight=0)
+        body.columnconfigure(0, weight=1)
+        canvas = tk.Canvas(body, highlightthickness=0, bd=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas_bg = "#f7f7f7"
+        canvas.configure(yscrollcommand=scrollbar.set, background=canvas_bg)
+        list_frame = tk.Frame(canvas, background=canvas_bg, bd=0, highlightthickness=0)
+        list_window = canvas.create_window((0, 0), window=list_frame, anchor="nw")
+
+        def _sync_canvas_scroll_region(_event=None):
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            except Exception:
+                pass
+
+        page_widgets = {}
+        selected_items = []
+        section_count_for_layout = len(plan.get("section_groups") or plan.get("sections", []) or [])
+        section_row_count = max(1, int((section_count_for_layout + 3) // 4))
+
+        def _sync_list_frame_size(event=None):
+            try:
+                requested_height = int(list_frame.winfo_reqheight())
+            except Exception:
+                requested_height = 0
+            try:
+                viewport_height = int(event.height)
+                viewport_width = int(event.width)
+            except Exception:
+                try:
+                    viewport_height = int(canvas.winfo_height())
+                    viewport_width = int(canvas.winfo_width())
+                except Exception:
+                    viewport_height = requested_height
+                    viewport_width = 1
+            expand_rows = requested_height <= viewport_height
+            for grid_row in range(section_row_count):
+                try:
+                    list_frame.rowconfigure(grid_row, weight=(1 if expand_rows else 0), uniform="plan_section_rows")
+                except Exception:
+                    pass
+            try:
+                canvas.itemconfigure(list_window, width=viewport_width, height=(viewport_height if expand_rows else requested_height))
+            except Exception:
+                pass
+            _sync_canvas_scroll_region()
+
+        list_frame.bind("<Configure>", _sync_canvas_scroll_region)
+        canvas.bind("<Configure>", _sync_list_frame_size)
+        for grid_col in range(4):
+            try:
+                list_frame.columnconfigure(grid_col, weight=1, uniform="plan_section_columns")
+            except Exception:
+                pass
+        for grid_row in range(section_row_count):
+            try:
+                list_frame.rowconfigure(grid_row, weight=0, uniform="plan_section_rows")
+            except Exception:
+                pass
+
+        def _item_label(group):
+            _section_name, pages_tuple = group
+            pages_tuple = tuple(int(p) for p in pages_tuple)
+            if len(pages_tuple) > 1:
+                return "/".join(str(p) for p in pages_tuple) + " DT"
+            return str(pages_tuple[0])
+
+        def _group_color_state(group):
+            section_name, pages_tuple = group
+            if group in page_color_state:
+                return bool(page_color_state.get(group, False))
+            return any(bool(page_color_state.get((section_name, int(page)), False)) for page in pages_tuple)
+
+        def _set_group_color_state(group, value):
+            section_name, pages_tuple = group
+            page_color_state[group] = bool(value)
+            for page in pages_tuple:
+                page_color_state[(section_name, int(page))] = bool(value)
+
+        def draw_one(key):
+            widgets = page_widgets.get(key)
+            if not widgets:
+                return
+            swatch, label, row_frame, section_bg = widgets
+            is_color = _group_color_state(key)
+            selected = key in selected_items
+            row_bg = "#fff2a8" if selected else section_bg
+            try:
+                row_frame.configure(background=row_bg)
+                label.configure(background=row_bg)
+                swatch.configure(background=row_bg)
+            except Exception:
+                pass
+            _draw_color_box(swatch, is_color)
+            label.configure(text=f"{_item_label(key)} ({'4C' if is_color else 'K'})")
+
+        def draw_all():
+            for key in list(page_widgets):
+                draw_one(key)
+
+        def set_all(value):
+            for key in list(page_widgets):
+                _set_group_color_state(key, bool(value))
+            draw_all()
+
+        def set_section(section_name, value):
+            for key in list(page_widgets):
+                if key[0] == section_name:
+                    _set_group_color_state(key, bool(value))
+            draw_all()
+
+        def _selected_single_pages_for_section(section_name):
+            return [
+                key for key in selected_items
+                if key[0] == section_name and len(key[1]) == 1
+            ]
+
+        def _clear_selection_for_section(section_name):
+            selected_items[:] = [key for key in selected_items if key[0] != section_name]
+
+        def _selected_is_valid_double_truck_pair(section_name=None):
+            if section_name is None:
+                if not selected_items:
+                    return False
+                section_names = {key[0] for key in selected_items if len(key[1]) == 1}
+                if len(section_names) != 1:
+                    return False
+                section_name = next(iter(section_names))
+            section_selected = _selected_single_pages_for_section(section_name)
+            return len(section_selected) == 2
+
+        def _select_item(key, add=True):
+            section_name, pages_tuple = key
+            if not add:
+                selected_items.clear()
+            if key in selected_items:
+                selected_items.remove(key)
+            else:
+                if len(pages_tuple) > 1:
+                    _clear_selection_for_section(section_name)
+                    selected_items.append(key)
+                else:
+                    section_selected = _selected_single_pages_for_section(section_name)
+                    if len(section_selected) >= 2:
+                        try:
+                            selected_items.remove(section_selected[1])
+                        except Exception:
+                            pass
+                    selected_items[:] = [
+                        existing for existing in selected_items
+                        if not (existing[0] == section_name and len(existing[1]) > 1)
+                    ]
+                    selected_items.append(key)
+            draw_all()
+
+        def _show_context_menu(event, key):
+            section_name, pages_tuple = key
+            menu = None
+            if len(pages_tuple) > 1:
+                _clear_selection_for_section(section_name)
+                selected_items.append(key)
+                draw_all()
+                menu = tk.Menu(dialog, tearoff=0)
+                menu.add_command(label="Single Pages", command=lambda name=section_name: _set_selected_single_pages(name))
+            else:
+                if key not in selected_items:
+                    _select_item(key, add=True)
+                if _selected_is_valid_double_truck_pair(section_name):
+                    menu = tk.Menu(dialog, tearoff=0)
+                    menu.add_command(label="Set Double Truck (DT)", command=lambda name=section_name: _set_selected_double_truck(name))
+            if menu is None:
+                return "break"
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                try:
+                    menu.grab_release()
+                except Exception:
+                    pass
+            return "break"
+
+        def _set_selected_double_truck(section_name=None):
+            if section_name is None:
+                if not selected_items:
+                    return
+                section_name = selected_items[0][0]
+            if not _selected_is_valid_double_truck_pair(section_name):
+                return
+            section_selected = _selected_single_pages_for_section(section_name)
+            pages_tuple = tuple(sorted(int(key[1][0]) for key in section_selected))
+            if len(pages_tuple) != 2:
+                return
+            color_value = any(_group_color_state(group) for group in section_selected)
+            for page in pages_tuple:
+                page_group_state[(section_name, int(page))] = pages_tuple
+                page_color_state.pop((section_name, int(page)), None)
+            new_group = (section_name, pages_tuple)
+            page_color_state[new_group] = color_value
+            _clear_selection_for_section(section_name)
+            _rebuild_color_sections()
+
+        def _set_selected_single_pages(section_name=None):
+            if section_name is None:
+                if not selected_items:
+                    return
+                section_name = selected_items[0][0]
+            groups = [
+                group for group in list(selected_items)
+                if group[0] == section_name and len(group[1]) > 1
+            ]
+            if not groups:
+                return
+            _clear_selection_for_section(section_name)
+            for group in groups:
+                _section_name, pages_tuple = group
+                color_value = _group_color_state(group)
+                page_color_state.pop(group, None)
+                for page in pages_tuple:
+                    page_group_state.pop((section_name, int(page)), None)
+                    single_key = (section_name, (int(page),))
+                    page_color_state[single_key] = color_value
+            _rebuild_color_sections()
+
+        def _logical_groups_for_section(section):
+            section_name = section.get("name") or ""
+            groups = []
+            seen = set()
+            for page_number in section.get("page_numbers", []):
+                page_number = int(page_number)
+                group_pages = page_group_state.get((section_name, page_number))
+                if group_pages:
+                    group_pages = tuple(sorted(int(p) for p in group_pages))
+                else:
+                    group_pages = (page_number,)
+                key = (section_name, group_pages)
+                if key not in seen:
+                    seen.add(key)
+                    groups.append(key)
+            return groups
+
+        def _rebuild_color_sections():
+            for child in list_frame.winfo_children():
+                child.destroy()
+            page_widgets.clear()
+            display_groups = plan.get("section_groups") or [
+                {
+                    "name": section.get("name") or f"Section {idx + 1}",
+                    "format": section.get("format") or "",
+                    "pages": section.get("pages") or 0,
+                    "color_index": idx,
+                    "sections": [section],
+                    "is_split": False,
+                }
+                for idx, section in enumerate(plan.get("sections", []) or [])
+            ]
+            for section_index, group in enumerate(display_groups):
+                group_name = group.get("name") or f"Section {section_index + 1}"
+                section_grid_row = int(section_index) // 4
+                section_grid_col = int(section_index) % 4
+                section_bg = section_palette[int(group.get("color_index", section_index)) % len(section_palette)]
+                section_box = tk.Frame(list_frame, background=section_bg, bd=1, relief="solid", highlightthickness=0, padx=10, pady=10)
+                section_box.grid(row=section_grid_row, column=section_grid_col, sticky="nsew", pady=(0, 12), padx=(0, 12))
+                section_box.columnconfigure(1, weight=1)
+
+                group_format = str(group.get('format') or '').strip()
+                group_format_label = "BS" if group_format == "Broadsheet" else group_format
+                header_text = f"{group_name} - {group_format_label} - {group.get('pages')} pgs"
+                tk.Label(section_box, text=header_text, background=section_bg, font=(None, 10, "bold"), anchor="w").grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+
+                child_sections = list(group.get("sections") or [])
+                def _set_group_value(value, child_sections=child_sections):
+                    for child in child_sections:
+                        set_section(child.get("name") or "", value)
+                all_row = tk.Frame(section_box, background=section_bg, bd=0, highlightthickness=0)
+                all_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+                tk.Label(all_row, text="All:", font=(None, 10, "bold"), background=section_bg).pack(side="left", padx=(0, 8))
+                all_color = tk.Canvas(all_row, width=36, height=22, highlightthickness=1, highlightbackground="#777777", bd=0, cursor="hand2", background=section_bg)
+                all_color.pack(side="left", padx=(0, 6))
+                _draw_color_box(all_color, True)
+                tk.Label(all_row, text="Color", cursor="hand2", background=section_bg).pack(side="left", padx=(0, 14))
+                all_bw = tk.Canvas(all_row, width=36, height=22, highlightthickness=1, highlightbackground="#777777", bd=0, cursor="hand2", background=section_bg)
+                all_bw.pack(side="left", padx=(0, 6))
+                _draw_color_box(all_bw, False)
+                tk.Label(all_row, text="B/W", cursor="hand2", background=section_bg).pack(side="left")
+                all_color.bind("<Button-1>", lambda _event, fn=_set_group_value: fn(True))
+                all_bw.bind("<Button-1>", lambda _event, fn=_set_group_value: fn(False))
+
+                row_idx = 2
+                for child_section in child_sections:
+                    child_name = child_section.get("name") or group_name
+                    child_format = str(child_section.get('format') or group_format).strip()
+                    child_format_label = "BS" if child_format == "Broadsheet" else child_format
+                    child_ranges = _format_page_ranges(child_section.get("page_numbers", []))
+                    if group.get("is_split"):
+                        child_header_text = f"↳ {child_name} - {child_format_label} - {child_section.get('pages')} pgs"
+                        if child_ranges:
+                            child_header_text += f" ({child_ranges})"
+                        tk.Label(section_box, text=child_header_text, background=section_bg, font=(None, 9, "bold"), anchor="w").grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=(6, 3))
+                        row_idx += 1
+                    groups = _logical_groups_for_section(child_section)
+                    for key in groups:
+                        _set_group_color_state(key, _group_color_state(key))
+                        row_frame = tk.Frame(section_box, background=section_bg, bd=0, highlightthickness=0)
+                        row_frame.grid(row=row_idx, column=0, columnspan=2, sticky="w", pady=2, padx=(18 if group.get("is_split") else 0, 0))
+                        row_idx += 1
+                        swatch = tk.Canvas(row_frame, width=36, height=22, highlightthickness=1, highlightbackground="#777777", bd=0, cursor="hand2", background=section_bg)
+                        swatch.pack(side="left", padx=(0, 8))
+                        label = tk.Label(row_frame, text="", cursor="hand2", background=section_bg, anchor="w")
+                        label.pack(side="left")
+                        page_widgets[key] = (swatch, label, row_frame, section_bg)
+                        def toggle_color(k=key):
+                            _set_group_color_state(k, not _group_color_state(k))
+                            draw_one(k)
+                        def select_item(k=key):
+                            _select_item(k, add=True)
+                        swatch.bind("<Button-1>", lambda event, fn=toggle_color: fn())
+                        label.bind("<Button-1>", lambda event, fn=select_item: fn())
+                        row_frame.bind("<Button-1>", lambda event, fn=select_item: fn())
+                        for widget in (swatch, label, row_frame):
+                            widget.bind("<Button-3>", lambda event, k=key: _show_context_menu(event, k))
+                section_box.rowconfigure(max(1, row_idx), weight=1)
+            draw_all()
+            try:
+                if '_finish_initial_color_page_layout' in locals():
+                    canvas.after_idle(_finish_initial_color_page_layout)
+            except Exception:
+                pass
+
+        _rebuild_color_sections()
+
+        ttk.Button(footer_left, text="All Color", command=lambda: set_all(True), width=12).pack(side="left", padx=(0, 8))
+        ttk.Button(footer_left, text="All B/W", command=lambda: set_all(False), width=12).pack(side="left", padx=(0, 8))
+        ttk.Button(footer_right, text="Cancel", command=dialog.destroy, width=12).pack(side="right")
+        ttk.Button(footer_right, text="Next", command=lambda p=plan: show_page_three(p), width=12).pack(side="right", padx=(0, 8))
+        ttk.Button(footer_right, text="Back", command=show_page_one, width=12).pack(side="right", padx=(0, 8))
+        draw_all()
+
+        def _finish_initial_color_page_layout():
+            try:
+                canvas.update_idletasks()
+                list_frame.update_idletasks()
+            except Exception:
+                pass
+            try:
+                _sync_list_frame_size()
+            except Exception:
+                pass
+            _bind_mousewheel_to_canvas(canvas, canvas)
+            _bind_mousewheel_to_canvas(list_frame, canvas)
+
+        try:
+            canvas.after_idle(_finish_initial_color_page_layout)
+        except Exception:
+            _finish_initial_color_page_layout()
+
+    def _plan_assignable_sections(plan):
+        items = []
+        for group in plan.get("section_groups") or []:
+            children = group.get("sections") or []
+            if group.get("is_split"):
+                for child in children:
+                    items.append(dict(child))
+            elif children:
+                items.append(dict(children[0]))
+        if not items:
+            items = [dict(section) for section in (plan.get("sections") or [])]
+        return items
+
+    def _press_run_summary(run, assignable_sections):
+        selected = []
+        for section in assignable_sections:
+            name = section.get("name") or ""
+            var = run.get("section_vars", {}).get(name)
+            try:
+                if var is not None and var.get():
+                    selected.append(f"{name} - {section.get('pages')}p")
+            except Exception:
+                pass
+        return ", ".join(selected) if selected else "No sections assigned"
+
+    def _default_press_runs_for_plan(plan):
+        run = {
+            "name": tk.StringVar(value="Run 1"),
+            "press_var": tk.StringVar(value="Press 1"),
+            "section_vars": {},
+        }
+        for section in _plan_assignable_sections(plan):
+            run["section_vars"][section.get("name") or ""] = tk.BooleanVar(value=True)
+        return [run]
+
+    def show_page_three(plan, press_runs=None):
+        header_var.set("Plan Layout - Press Runs")
+        _clear_frame(body)
+        _clear_footer()
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+        assignable_sections = _plan_assignable_sections(plan)
+        if press_runs is None:
+            press_runs = _default_press_runs_for_plan(plan)
+        canvas = tk.Canvas(body, highlightthickness=0, bd=0, background="#f7f7f7")
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        frame = tk.Frame(canvas, background="#f7f7f7", bd=0, highlightthickness=0, padx=12, pady=12)
+        win_id = canvas.create_window((0,0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win_id, width=e.width))
+        ttk.Label(frame, text="Create press runs and assign each section or subsection to any run that needs it.", font=(None, 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+        def add_run():
+            idx = len(press_runs) + 1
+            run = {"name": tk.StringVar(value=f"Run {idx}"), "press_var": tk.StringVar(value="Press 1"), "section_vars": {}}
+            for section in assignable_sections:
+                run["section_vars"][section.get("name") or ""] = tk.BooleanVar(value=False)
+            press_runs.append(run)
+            show_page_three(plan, press_runs)
+
+        def delete_run(run):
+            if len(press_runs) <= 1:
+                messagebox.showinfo("Plan Layout", "At least one press run is required.", parent=dialog)
+                return
+            try:
+                press_runs.remove(run)
+            except Exception:
+                pass
+            show_page_three(plan, press_runs)
+
+        row = 1
+        for run_index, run in enumerate(press_runs, start=1):
+            box = ttk.LabelFrame(frame, text=f"Press Run {run_index}", padding=10)
+            box.grid(row=row, column=0, sticky="ew", pady=(0, 12))
+            box.columnconfigure(3, weight=1)
+            ttk.Label(box, text="Name:").grid(row=0, column=0, sticky="w")
+            ttk.Entry(box, textvariable=run["name"], width=18).grid(row=0, column=1, sticky="w", padx=(6, 18))
+            ttk.Label(box, text="Press:").grid(row=0, column=2, sticky="w")
+            ttk.Combobox(box, textvariable=run["press_var"], values=("Press 1", "Press 2"), state="readonly", width=10).grid(row=0, column=3, sticky="w", padx=(6, 18))
+            ttk.Button(box, text="x Delete", command=lambda r=run: delete_run(r), width=10).grid(row=0, column=4, sticky="e")
+            ttk.Label(box, text="Assign sections:", font=(None, 9, "bold")).grid(row=1, column=0, columnspan=5, sticky="w", pady=(10, 4))
+            for idx, section in enumerate(assignable_sections):
+                name = section.get("name") or ""
+                if name not in run["section_vars"]:
+                    run["section_vars"][name] = tk.BooleanVar(value=False)
+                label = f"{name} - {section.get('format')} - {section.get('pages')} pgs ({_format_page_ranges(section.get('page_numbers', []))})"
+                ttk.Checkbutton(box, text=label, variable=run["section_vars"][name]).grid(row=2 + idx, column=0, columnspan=5, sticky="w", pady=1)
+            row += 1
+        ttk.Button(footer_left, text="+ Add Press Run", command=add_run, width=18).pack(side="left", padx=(0, 8))
+        ttk.Button(footer_right, text="Cancel", command=dialog.destroy, width=12).pack(side="right")
+        ttk.Button(footer_right, text="Next", command=lambda p=plan, r=press_runs: show_page_four(p, r), width=12).pack(side="right", padx=(0, 8))
+        ttk.Button(footer_right, text="Back", command=lambda p=plan: show_page_two(p), width=12).pack(side="right", padx=(0, 8))
+        _bind_mousewheel_to_canvas(canvas, canvas)
+        _bind_mousewheel_to_canvas(frame, canvas)
+
+    def _press_run_sections(run, assignable_sections):
+        selected = []
+        for section in assignable_sections:
+            name = section.get("name") or ""
+            var = run.get("section_vars", {}).get(name)
+            try:
+                if var is not None and var.get():
+                    selected.append(dict(section))
+            except Exception:
+                pass
+        return selected
+
+    def _press_run_format(sections):
+        for section in sections:
+            fmt = str(section.get("format") or "").strip()
+            if fmt:
+                return fmt
+        return "Broadsheet"
+
+    def _planned_color_pages_for_sections(sections):
+        wanted = []
+        for section_index, section in enumerate(sections):
+            section_name = section.get("name") or ""
+            section_pages = []
+            for page_number in section.get("page_numbers", []) or []:
+                try:
+                    section_pages.append(int(page_number))
+                except Exception:
+                    pass
+            for page_offset, page_number in enumerate(section_pages, start=1):
+                group_pages = page_group_state.get((section_name, page_number))
+                if group_pages:
+                    group = (section_name, tuple(sorted(int(p) for p in group_pages)))
+                else:
+                    group = (section_name, (page_number,))
+                if _group_color_state(group):
+                    wanted.append({
+                        "section_index": int(section_index),
+                        "section_name": section_name,
+                        "page": page_number,
+                        "template_page": int(page_offset),
+                    })
+        return wanted
+
+    def _section_aliases_for_template_index(template_data, run_sections, section_index):
+        aliases = set()
+        try:
+            aliases.add(str(section_index + 1))
+            aliases.add(chr(ord('A') + int(section_index)))
+        except Exception:
+            pass
+        try:
+            run_name = str((run_sections[section_index] or {}).get("name") or "").strip()
+            if run_name:
+                aliases.add(run_name)
+        except Exception:
+            pass
+        try:
+            template_names = template_data.get("section_names") or []
+            template_name = str(template_names[section_index] or "").strip()
+            if template_name:
+                aliases.add(template_name)
+        except Exception:
+            pass
+        return {value.strip().upper() for value in aliases if str(value or "").strip()}
+
+    def _template_color_cells_for_run(template_data, press, fmt, run_sections):
+        planned_color_pages = _planned_color_pages_for_sections(run_sections)
+        if not planned_color_pages:
+            return [], True
+        cfg = CONFIG_MAP.get((press, fmt), {}) or {}
+        only_k_labels = {str(label or "") for label in cfg.get("only_k_labels", set())}
+        color_cells = []
+        for wanted in planned_color_pages:
+            section_index = int(wanted.get("section_index", 0))
+            page_number = int(wanted.get("template_page") or wanted.get("page", 0))
+            aliases = _section_aliases_for_template_index(template_data, run_sections, section_index)
+            matched = False
+            matched_color_capable = False
+            for unit in template_data.get("units", []) or []:
+                if not isinstance(unit, dict):
+                    continue
+                unit_label = str(unit.get("label") or "")
+                unit_section = str(unit.get("section") or "").strip().upper()
+                if aliases and unit_section and unit_section not in aliases:
+                    continue
+                for r, row in enumerate(unit.get("grid", []) or []):
+                    row = row if isinstance(row, list) else []
+                    for c, cell_value in enumerate(row):
+                        try:
+                            cell_page = int(str(cell_value or "").strip())
+                        except Exception:
+                            continue
+                        if cell_page != page_number:
+                            continue
+                        matched = True
+                        if unit_label not in only_k_labels:
+                            matched_color_capable = True
+                            color_cells.append({"unit": unit_label, "r": int(r), "c": int(c)})
+            if not matched or not matched_color_capable:
+                return [], False
+        # Deduplicate while preserving order.
+        seen = set()
+        unique = []
+        for item in color_cells:
+            key = (item.get("unit"), int(item.get("r", 0)), int(item.get("c", 0)))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique, True
+
+    def _apply_planned_pages_to_template_units(data, template_data, run_sections):
+        if not isinstance(data, dict):
+            return data
+        units = data.get("units") or []
+        if not isinstance(units, list):
+            return data
+        for section_index, section in enumerate(run_sections):
+            planned_pages = []
+            for page_number in section.get("page_numbers", []) or []:
+                try:
+                    planned_pages.append(int(page_number))
+                except Exception:
+                    pass
+            if not planned_pages:
+                continue
+            section_name = str(section.get("name") or "").strip().upper()
+            aliases = _section_aliases_for_template_index(template_data, run_sections, section_index)
+            for unit in units:
+                if not isinstance(unit, dict):
+                    continue
+                unit_section = str(unit.get("section") or "").strip().upper()
+                if aliases and unit_section and unit_section not in aliases:
+                    continue
+                grid = unit.get("grid") or []
+                if not isinstance(grid, list):
+                    continue
+                assigned_to_this_unit = False
+                for r, row in enumerate(grid):
+                    if not isinstance(row, list):
+                        continue
+                    for c, cell_value in enumerate(row):
+                        try:
+                            relative_page = int(str(cell_value or "").strip())
+                        except Exception:
+                            continue
+                        if 1 <= relative_page <= len(planned_pages):
+                            row[c] = str(planned_pages[relative_page - 1])
+                            assigned_to_this_unit = True
+                if assigned_to_this_unit and section_name:
+                    unit["section"] = section_name
+        # Empty units should not carry a section assignment into generated layouts.
+        # Leaving a section on an empty unit makes the imposition builder include
+        # unused units in the generated imposition name.
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            has_page = False
+            for row in (unit.get("grid") or []):
+                if not isinstance(row, list):
+                    continue
+                for cell_value in row:
+                    if str(cell_value or "").strip():
+                        has_page = True
+                        break
+                if has_page:
+                    break
+            if not has_page:
+                unit["section"] = ""
+        return data
+
+    def _template_matches_plan_colors(template_path, press, fmt, run_sections):
+        try:
+            template_data = safe_read_json(template_path) or {}
+        except Exception:
+            template_data = {}
+        if not isinstance(template_data, dict):
+            return False
+        _color_cells, ok = _template_color_cells_for_run(template_data, press, fmt, run_sections)
+        return bool(ok)
+
+    def _candidate_templates_for_run(run, sections):
+        press = run["press_var"].get()
+        fmt = _press_run_format(sections)
+        pages = [int(section.get("pages") or 0) for section in sections]
+        try:
+            matches = list_matching_templates(press, fmt, section_count=len(pages), section_pages=pages)
+        except Exception:
+            matches = []
+        return [(name, path) for name, path in matches if _template_matches_plan_colors(path, press, fmt, sections)]
+
+    def show_page_four(plan, press_runs):
+        header_var.set("Plan Layout - Templates")
+        _clear_frame(body)
+        _clear_footer()
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+        assignable_sections = _plan_assignable_sections(plan)
+        run_configs = []
+        frame = ttk.Frame(body, padding=12)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        ttk.Label(frame, text="Pick a layout template for each press run. If no matching template exists, (NEW) will be used.", font=(None, 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        template_preview_state = {"popup": None, "photo": None, "after_id": None}
+
+        def _hide_template_preview(_event=None):
+            after_id = template_preview_state.get("after_id")
+            if after_id is not None:
+                try:
+                    dialog.after_cancel(after_id)
+                except Exception:
+                    pass
+                template_preview_state["after_id"] = None
+            popup = template_preview_state.get("popup")
+            if popup is not None:
+                try:
+                    popup.destroy()
+                except Exception:
+                    pass
+            template_preview_state["popup"] = None
+            template_preview_state["photo"] = None
+
+        def _show_template_preview(widget, template_var, template_paths, selected_name=None):
+            selected_name = (selected_name if selected_name is not None else (template_var.get() or "")).strip()
+            template_path = template_paths.get(selected_name)
+            if not template_path:
+                _hide_template_preview()
+                return
+            try:
+                image, _title = open_json_preview(dialog, template_path, template_mode=True)
+            except Exception:
+                image = None
+            if image is None:
+                _hide_template_preview()
+                return
+            try:
+                from PIL import ImageTk
+                max_width = 520
+                max_height = 360
+                image = image.copy()
+                image.thumbnail((max_width, max_height))
+                photo = ImageTk.PhotoImage(image)
+            except Exception:
+                _hide_template_preview()
+                return
+            _hide_template_preview()
+            popup = tk.Toplevel(dialog)
+            try:
+                popup.overrideredirect(True)
+                popup.attributes("-topmost", True)
+            except Exception:
+                pass
+            popup.configure(background="#444444")
+            title = tk.Label(popup, text=selected_name, background="#444444", foreground="white", anchor="w", padx=6, pady=3)
+            title.pack(fill="x")
+            label = tk.Label(popup, image=photo, background="#ffffff", bd=1, relief="solid")
+            label.pack(padx=2, pady=(0, 2))
+            template_preview_state["popup"] = popup
+            template_preview_state["photo"] = photo
+            try:
+                x = widget.winfo_rootx() + widget.winfo_width() + 12
+                y = widget.winfo_rooty()
+                popup.geometry(f"+{x}+{y}")
+            except Exception:
+                pass
+
+        def _schedule_template_preview(widget, template_var, template_paths, selected_name=None, delay=350):
+            after_id = template_preview_state.get("after_id")
+            if after_id is not None:
+                try:
+                    dialog.after_cancel(after_id)
+                except Exception:
+                    pass
+            template_preview_state["after_id"] = dialog.after(delay, lambda: _show_template_preview(widget, template_var, template_paths, selected_name=selected_name))
+
+        def _bind_template_dropdown_preview(combo, template_var, template_paths):
+            def _bind_popdown():
+                try:
+                    popdown = combo.tk.call("ttk::combobox::PopdownWindow", str(combo))
+                    listbox = popdown + ".f.l"
+                except Exception:
+                    return
+                def _motion(x, y):
+                    try:
+                        index = int(combo.tk.call(listbox, "index", f"@{x},{y}"))
+                        values = list(combo.cget("values") or ())
+                        if index < 0 or index >= len(values):
+                            return
+                        hovered_name = str(values[index])
+                        if not template_paths.get(hovered_name):
+                            _hide_template_preview()
+                            return
+                        _schedule_template_preview(combo, template_var, template_paths, selected_name=hovered_name, delay=125)
+                    except Exception:
+                        pass
+                def _leave():
+                    _hide_template_preview()
+                try:
+                    combo.tk.call("bind", listbox, "<Motion>", combo.register(_motion) + " %x %y")
+                    combo.tk.call("bind", listbox, "<Leave>", combo.register(_leave))
+                except Exception:
+                    pass
+            try:
+                combo.configure(postcommand=lambda: combo.after(50, _bind_popdown))
+            except Exception:
+                pass
+
+        row = 1
+        for idx, run in enumerate(press_runs, start=1):
+            selected_sections = _press_run_sections(run, assignable_sections)
+            if not selected_sections:
+                continue
+            matches = _candidate_templates_for_run(run, selected_sections)
+            values = [name for name, _path in matches] or ["(NEW)"]
+            template_var = tk.StringVar(value=values[0])
+            path_by_name = {name: p for name, p in matches}
+            cfg = {"run": run, "sections": selected_sections, "templates": matches, "template_var": template_var, "template_paths": path_by_name}
+            run_configs.append(cfg)
+            box = ttk.LabelFrame(frame, text=f"{run['name'].get()} - {run['press_var'].get()}", padding=10)
+            box.grid(row=row, column=0, sticky="ew", pady=(0, 12))
+            box.columnconfigure(1, weight=1)
+            ttk.Label(box, text=f"Sections: {_press_run_summary(run, assignable_sections)}").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+            ttk.Label(box, text="Template:").grid(row=1, column=0, sticky="w")
+            template_combo = ttk.Combobox(box, textvariable=template_var, values=values, state="readonly", width=52)
+            template_combo.grid(row=1, column=1, sticky="ew", padx=(8, 0))
+            template_combo.bind("<Enter>", lambda _event, w=template_combo, v=template_var, p=path_by_name: _schedule_template_preview(w, v, p))
+            template_combo.bind("<Leave>", _hide_template_preview)
+            template_combo.bind("<ButtonPress-1>", lambda _event, w=template_combo, v=template_var, p=path_by_name: (_bind_template_dropdown_preview(w, v, p), _hide_template_preview()), add="+")
+            template_combo.bind("<<ComboboxSelected>>", lambda _event, w=template_combo, v=template_var, p=path_by_name: _schedule_template_preview(w, v, p), add="+")
+            _bind_template_dropdown_preview(template_combo, template_var, path_by_name)
+            row += 1
+
+        def finish():
+            if not run_configs:
+                messagebox.showerror("Plan Layout", "Assign at least one section to a press run.", parent=dialog)
+                return
+            created = []
+            created_paths = []
+            for idx, cfg in enumerate(run_configs, start=1):
+                run = cfg["run"]
+                selected_sections = cfg["sections"]
+                template_name = cfg["template_var"].get()
+                template_path = cfg["template_paths"].get(template_name)
+                press = run["press_var"].get()
+                fmt = _press_run_format(selected_sections)
+                section_pages = [int(s.get("pages") or 0) for s in selected_sections]
+                section_names = [str(s.get("name") or chr(ord('A') + i)).upper() for i, s in enumerate(selected_sections)]
+                if template_path:
+                    data = safe_read_json(template_path) or {}
+                    data = json.loads(json.dumps(data, default=str)) if isinstance(data, dict) else {}
+                    data.pop("_db_record_id", None); data.pop("_db_record_type", None); data.pop("_file_path", None); data.pop("_layout_name", None)
+                    color_template_data = json.loads(json.dumps(data, default=str))
+                else:
+                    data = {"version": 1, "units": []}
+                    color_template_data = data
+                data.update({
+                    "press": press,
+                    "format": fmt,
+                    "issue_date": plan.get("issue_date") or "",
+                    "product": plan.get("publication") or "",
+                    "section_count": len(selected_sections),
+                    "section_pages": section_pages,
+                    "section_names": section_names,
+                    "saved_at": datetime.now().isoformat(timespec="seconds"),
+                    "last_changed_by": get_windows_username(),
+                })
+                color_cells, color_ok = _template_color_cells_for_run(color_template_data, press, fmt, selected_sections)
+                data = _apply_planned_pages_to_template_units(data, color_template_data, selected_sections)
+                data["color_cells"] = color_cells if color_ok else []
+                name_base = sanitize_filename(f"P{'1' if press == 'Press 1' else '2'} {data.get('product') or 'PLAN'} {''.join(section_names)} {data.get('issue_date','').replace('/', '-')}").strip() or f"Plan Run {idx}"
+                filename = name_base + ".json"
+                target = os.path.join(LAYOUTS_DIR, filename)
+                counter = 1
+                while os.path.exists(target):
+                    counter += 1
+                    target = os.path.join(LAYOUTS_DIR, f"{name_base}_{counter}.json")
+                data["name"] = os.path.splitext(os.path.basename(target))[0]
+                safe_write_json(target, data)
+                created.append(os.path.basename(target))
+                created_paths.append(target)
+            open_parent = None
+            try:
+                open_parent = dialog.master if dialog.master is not None else dialog
+            except Exception:
+                open_parent = dialog
+            for created_path in created_paths:
+                try:
+                    open_json_in_layout(open_parent, created_path, template_mode=False, default_dir=LAYOUTS_DIR)
+                except Exception as exc:
+                    messagebox.showerror("Open Failed", f"Created layout but could not open it:\n{created_path}\n\n{exc}", parent=dialog)
+            dialog.destroy()
+
+        ttk.Button(footer_right, text="Finish", command=finish, width=12).pack(side="right", padx=(0, 8))
+        ttk.Button(footer_right, text="Back", command=lambda p=plan, r=press_runs: show_page_three(p, r), width=12).pack(side="right", padx=(0, 8))
+        ttk.Button(footer_right, text="Cancel", command=dialog.destroy, width=12).pack(side="right")
+
+    def show_page_two_from_validation():
+        plan = _validate_plan_inputs()
+        if plan is not None:
+            show_page_two(plan)
+
+    show_page_one()
+    return dialog
+
 def build_main_launcher():
     ensure_dir(LAYOUTS_DIR)
     ensure_dir(TEMPLATE_DIR)
@@ -11084,7 +13038,11 @@ def build_main_launcher():
     ttk.Label(filter_frame, text="Format:", font=(None, 11, "bold")).grid(row=0, column=4, sticky="w")
     format_var = tk.StringVar(value="All")
     format_combo = ttk.Combobox(filter_frame, textvariable=format_var, values=["All", "Broadsheet", "Tab", "8 up"], state="readonly", width=12)
-    format_combo.grid(row=0, column=5, sticky="w", padx=(8, 0))
+    format_combo.grid(row=0, column=5, sticky="w", padx=(8, 12))
+    ttk.Label(filter_frame, text="Pages:", font=(None, 11, "bold")).grid(row=0, column=6, sticky="w")
+    pages_filter_var = tk.StringVar(value="All")
+    pages_filter_combo = ttk.Combobox(filter_frame, textvariable=pages_filter_var, values=["All"], state="readonly", width=14)
+    pages_filter_combo.grid(row=0, column=7, sticky="w", padx=(8, 0))
 
     columns = ("press", "format", "pages", "color_pages", "plates", "changed_by", "saved")
     tree = ttk.Treeview(frame, columns=columns, show="tree headings", selectmode="browse")
@@ -11114,6 +13072,7 @@ def build_main_launcher():
     tree.column("saved", width=170, anchor="center")
     try:
         tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
+        tree.tag_configure("issue_group_day_row", font=(None, 10, "bold"), foreground="#2e7d32")
     except Exception:
         pass
     apply_treeview_column_width_state(tree, ("#0",) + tuple(columns), "main_launcher", "layout_tree")
@@ -11155,8 +13114,6 @@ def build_main_launcher():
             if _request_id != preview_state.get("request_id"):
                 return
             if _current_preview_path() != _path:
-                return
-            if not _launcher_is_active():
                 return
             if preview_state.get("path") == _path and preview_state.get("photo") is not None:
                 return
@@ -11238,6 +13195,16 @@ def build_main_launcher():
             focus_issue = str(preserved_focus_row.get("issue_disp") or "").strip() or "No Issue Date"
             focus_group_id = f"__issue_group__::{focus_issue}"
 
+        def issue_group_display_text(issue_label, issue_count):
+            label_text = str(issue_label or "").strip() or "No Issue Date"
+            if label_text == "No Issue Date":
+                return f"{label_text} ({issue_count})", ("group_row",)
+            issue_dt = parse_issue_date_flexible(label_text)
+            if issue_dt is None:
+                return f"{label_text} ({issue_count})", ("group_row",)
+            weekday = issue_dt.strftime("%A")
+            return f"{weekday} {label_text} ({issue_count})", ("issue_group_day_row",)
+
         for issue_label in group_labels:
             group_iid = f"__issue_group__::{issue_label}"
             default_open = (issue_label == tomorrow_issue_display)
@@ -11248,7 +13215,8 @@ def build_main_launcher():
             if group_iid == focus_group_id or group_iid in selection_group_ids:
                 should_open = True
             issue_count = len(grouped_rows.get(issue_label, []))
-            tree.insert("", "end", iid=group_iid, text=f"{issue_label} ({issue_count})", open=should_open, tags=("group_row",))
+            issue_group_text, issue_group_tags = issue_group_display_text(issue_label, issue_count)
+            tree.insert("", "end", iid=group_iid, text=issue_group_text, open=should_open, tags=issue_group_tags)
             group_by_iid[group_iid] = issue_label
             known_group_ids.add(group_iid)
             for r in grouped_rows.get(issue_label, []):
@@ -11279,6 +13247,59 @@ def build_main_launcher():
         press_filter = (press_var.get() or "All").strip()
         format_filter = (format_var.get() or "All").strip()
         issue_filter = (issue_date_var.get() or "All").strip()
+        pages_filter = (pages_filter_var.get() or "All").strip()
+        if search_text:
+            searchable = " ".join([
+                row.get("issue_disp", ""),
+                row.get("product", ""),
+                row.get("press", ""),
+                row.get("format", ""),
+                row.get("pages_disp", ""),
+                str(row.get("color_pages", "")),
+                str(row.get("plates", "")),
+                row.get("last_changed_by", ""),
+            ]).lower()
+            if search_text not in searchable:
+                return False
+        if press_filter != "All" and row.get("press", "") != press_filter:
+            return False
+        if format_filter != "All" and row.get("format", "") != format_filter:
+            return False
+        if issue_filter != "All" and row.get("issue_disp", "") != issue_filter:
+            return False
+        if pages_filter != "All" and row.get("pages_disp", "") != pages_filter:
+            return False
+        return True
+
+    def _matches_layout_filter_no_issue(row):
+        search_text = (search_var.get() or "").strip().lower()
+        press_filter = (press_var.get() or "All").strip()
+        format_filter = (format_var.get() or "All").strip()
+        pages_filter = (pages_filter_var.get() or "All").strip()
+        if search_text:
+            searchable = " ".join([
+                row.get("issue_disp", ""),
+                row.get("product", ""),
+                row.get("press", ""),
+                row.get("format", ""),
+                row.get("pages_disp", ""),
+                str(row.get("color_pages", "")),
+                str(row.get("plates", "")),
+                row.get("last_changed_by", ""),
+            ]).lower()
+            if search_text not in searchable:
+                return False
+        if press_filter != "All" and row.get("press", "") != press_filter:
+            return False
+        if format_filter != "All" and row.get("format", "") != format_filter:
+            return False
+        return True
+
+    def _matches_layout_filter_no_pages(row):
+        search_text = (search_var.get() or "").strip().lower()
+        press_filter = (press_var.get() or "All").strip()
+        format_filter = (format_var.get() or "All").strip()
+        issue_filter = (issue_date_var.get() or "All").strip()
         if search_text:
             searchable = " ".join([
                 row.get("issue_disp", ""),
@@ -11300,28 +13321,15 @@ def build_main_launcher():
             return False
         return True
 
-    def _matches_layout_filter_no_issue(row):
-        search_text = (search_var.get() or "").strip().lower()
-        press_filter = (press_var.get() or "All").strip()
-        format_filter = (format_var.get() or "All").strip()
-        if search_text:
-            searchable = " ".join([
-                row.get("issue_disp", ""),
-                row.get("product", ""),
-                row.get("press", ""),
-                row.get("format", ""),
-                row.get("pages_disp", ""),
-                str(row.get("color_pages", "")),
-                str(row.get("plates", "")),
-                row.get("last_changed_by", ""),
-            ]).lower()
-            if search_text not in searchable:
-                return False
-        if press_filter != "All" and row.get("press", "") != press_filter:
-            return False
-        if format_filter != "All" and row.get("format", "") != format_filter:
-            return False
-        return True
+    def _pages_display_sort_key(value):
+        text = str(value or "")
+        numbers = []
+        for part in re.findall(r"\d+", text):
+            try:
+                numbers.append(int(part))
+            except Exception:
+                pass
+        return (numbers, text.lower())
 
     def update_sort_headings():
         tree.heading("#0", text=_treeview_sort_heading_text("Product", sort_state, "product"), command=lambda: sort_by("product"))
@@ -11338,6 +13346,11 @@ def build_main_launcher():
         issue_date_combo.configure(values=unique_dates)
         if issue_date_var.get() not in unique_dates:
             issue_date_var.set("All")
+        page_values = [row.get("pages_disp", "") for row in all_rows if _matches_layout_filter_no_pages(row) and row.get("pages_disp")]
+        unique_pages = ["All"] + sorted(set(page_values), key=_pages_display_sort_key)
+        pages_filter_combo.configure(values=unique_pages)
+        if pages_filter_var.get() not in unique_pages:
+            pages_filter_var.set("All")
         rows = [row for row in all_rows if _matches_layout_filter(row)]
         rows = sort_rows(rows)
         load_rows_into_tree(rows, preserve_selection=selected, preserve_focus=focused, preserve_yview=yview)
@@ -11369,6 +13382,7 @@ def build_main_launcher():
     press_var.trace_add("write", lambda *_: refresh(preserve_state=False))
     format_var.trace_add("write", lambda *_: refresh(preserve_state=False))
     issue_date_var.trace_add("write", lambda *_: refresh(preserve_state=False))
+    pages_filter_var.trace_add("write", lambda *_: refresh(preserve_state=False))
     def selected_path():
         sel = tree.selection()
         candidate = sel[0] if sel else tree.focus()
@@ -11458,65 +13472,118 @@ def build_main_launcher():
         outer.columnconfigure(0, weight=1)
         ttk.Label(
             outer,
-            text="All layouts are shown below. Layouts with an issue date of today or earlier are pre-selected for deletion (double-click a row to keep/remove it from deletion):",
+            text="Select individual layouts to delete, or select an issue-date group to select/clear everything in that issue date. Nothing is selected by default.",
             font=(None, 10, "bold")
         ).grid(row=0, column=0, sticky="w")
-        cleanup_columns = ("delete", "issue", "product", "press", "format", "saved")
-        cleanup_tree = ttk.Treeview(outer, columns=cleanup_columns, show="headings", selectmode="browse")
+        cleanup_columns = ("delete", "product", "press", "format", "saved")
+        cleanup_tree = ttk.Treeview(outer, columns=cleanup_columns, show="tree headings", selectmode="browse")
         cleanup_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         cleanup_vsb = ttk.Scrollbar(outer, orient="vertical", command=cleanup_tree.yview)
         cleanup_vsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
         cleanup_tree.configure(yscrollcommand=cleanup_vsb.set)
+        cleanup_tree.heading("#0", text="Issue Date / Layout")
         cleanup_tree.heading("delete", text="Delete")
-        cleanup_tree.heading("issue", text="Issue Date")
         cleanup_tree.heading("product", text="Product")
         cleanup_tree.heading("press", text="Press")
         cleanup_tree.heading("format", text="Format")
         cleanup_tree.heading("saved", text="Last Saved")
+        cleanup_tree.column("#0", width=230, anchor="w")
         cleanup_tree.column("delete", width=70, anchor="center")
-        cleanup_tree.column("issue", width=110, anchor="center")
-        cleanup_tree.column("product", width=280, anchor="w")
+        cleanup_tree.column("product", width=260, anchor="w")
         cleanup_tree.column("press", width=90, anchor="center")
-        cleanup_tree.column("format", width=120, anchor="center")
+        cleanup_tree.column("format", width=110, anchor="center")
         cleanup_tree.column("saved", width=170, anchor="center")
-        delete_state = {
-            row["path"]: bool(row.get("issue_dt") and row.get("issue_dt").date() <= today)
-            for row in all_rows
-        }
-        def checkbox_value(path):
+        try:
+            cleanup_tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
+        except Exception:
+            pass
+        delete_state = {row["path"]: False for row in all_rows}
+        issue_groups = {}
+        for row in all_rows:
+            issue_label = row.get("issue_disp") or "No Issue Date"
+            issue_groups.setdefault(issue_label, []).append(row)
+
+        def checkbox_value_for_path(path):
             return "☑" if delete_state.get(path, False) else "☐"
+
+        def group_checkbox_value(group_iid):
+            paths = [child for child in cleanup_tree.get_children(group_iid) if child in delete_state]
+            if not paths:
+                return "☐"
+            checked = sum(1 for path in paths if delete_state.get(path, False))
+            if checked == 0:
+                return "☐"
+            if checked == len(paths):
+                return "☑"
+            return "◩"
+
+        def refresh_group_checkbox(group_iid):
+            try:
+                values = list(cleanup_tree.item(group_iid, "values") or [])
+                if values:
+                    values[0] = group_checkbox_value(group_iid)
+                    cleanup_tree.item(group_iid, values=tuple(values))
+            except Exception:
+                pass
+
         def populate_cleanup_tree():
             cleanup_tree.delete(*cleanup_tree.get_children())
-            for row in all_rows:
-                path = row["path"]
-                cleanup_tree.insert("", "end", iid=path, values=(
-                    checkbox_value(path),
-                    row["issue_disp"],
-                    row["product"],
-                    row["press"],
-                    row["format"],
-                    row["saved_disp"],
-                ))
-        def toggle_cleanup_item(path):
-            if not path or path not in delete_state:
+            for issue_label, rows in issue_groups.items():
+                group_iid = "issue::" + str(issue_label)
+                cleanup_tree.insert("", "end", iid=group_iid, text=str(issue_label), values=("☐", f"{len(rows)} layout(s)", "", "", ""), tags=("group_row",), open=False)
+                for row in rows:
+                    path = row["path"]
+                    cleanup_tree.insert(group_iid, "end", iid=path, text=os.path.basename(path), values=(
+                        checkbox_value_for_path(path),
+                        row.get("product") or "",
+                        row.get("press") or "",
+                        row.get("format") or "",
+                        row.get("saved_disp") or "",
+                    ))
+                refresh_group_checkbox(group_iid)
+
+        def toggle_cleanup_item(item_id):
+            if not item_id:
                 return
-            delete_state[path] = not delete_state[path]
-            row = cleanup_tree.item(path, "values")
-            if row:
-                cleanup_tree.item(path, values=(checkbox_value(path),) + tuple(row[1:]))
-            cleanup_tree.selection_set(path)
-            cleanup_tree.focus(path)
+            if item_id in delete_state:
+                delete_state[item_id] = not delete_state.get(item_id, False)
+                values = cleanup_tree.item(item_id, "values")
+                if values:
+                    cleanup_tree.item(item_id, values=(checkbox_value_for_path(item_id),) + tuple(values[1:]))
+                parent = cleanup_tree.parent(item_id)
+                if parent:
+                    refresh_group_checkbox(parent)
+                cleanup_tree.selection_set(item_id)
+                cleanup_tree.focus(item_id)
+                return
+            if str(item_id).startswith("issue::"):
+                child_paths = [child for child in cleanup_tree.get_children(item_id) if child in delete_state]
+                if not child_paths:
+                    return
+                new_value = not all(delete_state.get(path, False) for path in child_paths)
+                for path in child_paths:
+                    delete_state[path] = new_value
+                    values = cleanup_tree.item(path, "values")
+                    if values:
+                        cleanup_tree.item(path, values=(checkbox_value_for_path(path),) + tuple(values[1:]))
+                refresh_group_checkbox(item_id)
+                cleanup_tree.selection_set(item_id)
+                cleanup_tree.focus(item_id)
+
         def toggle_from_event(event=None):
-            path = cleanup_tree.identify_row(event.y) if event is not None else cleanup_tree.focus()
-            toggle_cleanup_item(path)
+            item_id = cleanup_tree.identify_row(event.y) if event is not None else cleanup_tree.focus()
+            toggle_cleanup_item(item_id)
             return "break"
         cleanup_tree.bind("<Double-Button-1>", toggle_from_event)
         cleanup_tree.bind("<space>", toggle_from_event)
         populate_cleanup_tree()
         status_var = tk.StringVar(value="Ready.")
         ttk.Label(outer, textvariable=status_var, foreground="#555555").grid(row=2, column=0, sticky="w", pady=(12, 0))
+        cleanup_progress_var = tk.DoubleVar(value=0)
+        cleanup_progress = ttk.Progressbar(outer, variable=cleanup_progress_var, maximum=1, mode="determinate")
+        cleanup_progress.grid(row=3, column=0, sticky="ew", pady=(6, 0))
         btns = ttk.Frame(outer)
-        btns.grid(row=3, column=0, pady=(12, 0), sticky="e")
+        btns.grid(row=4, column=0, pady=(12, 0), sticky="e")
 
         def _regen_preview_for_path(path, template_mode=False, default_dir=None, prompt_save_template=None):
             try:
@@ -11674,12 +13741,26 @@ def build_main_launcher():
             ):
                 return
             errors = []
-            for path in to_delete:
+            total_delete = len(to_delete)
+            try:
+                cleanup_progress.configure(maximum=max(1, total_delete))
+            except Exception:
+                pass
+            cleanup_progress_var.set(0)
+            status_var.set(f"Removing 0 of {total_delete} selected layout file(s)...")
+            dialog.update_idletasks()
+            for idx, path in enumerate(to_delete, start=1):
+                status_var.set(f"Removing {idx} of {total_delete}: {os.path.basename(path)}")
+                cleanup_progress_var.set(idx - 1)
+                dialog.update_idletasks()
                 try:
                     remove_preview_image_for_json(path)
                     os.remove(path)
                 except Exception as exc:
                     errors.append(f"{os.path.basename(path)}: {exc}")
+                cleanup_progress_var.set(idx)
+                dialog.update_idletasks()
+            status_var.set(f"Removed {total_delete - len(errors)} of {total_delete} selected layout file(s).")
             refresh(preserve_state=False)
             if errors:
                 messagebox.showerror(
@@ -12102,6 +14183,41 @@ def build_main_launcher():
                     except Exception:
                         pass
 
+        def maintenance_refresh_locks():
+            confirm = messagebox.askyesno(
+                "Refresh Record Locks",
+                "This will clear every current database edit lock.\n\n"
+                "Use this when Press Layouts reports a record as open by a user even though it is not actually open anymore.\n\n"
+                "Any records that are still truly open will re-register their lock automatically on the next heartbeat.\n\n"
+                "Do you want to refresh all record locks now?",
+                parent=dialog,
+            )
+            if not confirm:
+                return
+            try:
+                status_var.set("Refreshing record locks...")
+                log_message("Refreshing database record locks...", clear=True)
+                removed_rows = _db_refresh_all_record_locks()
+                if removed_rows:
+                    lines = [f"Removed {len(removed_rows)} record lock(s):"]
+                    for row in removed_rows:
+                        record_type = str(row.get('record_type') or '').title()
+                        file_name = str(row.get('file_name') or row.get('name') or 'Unknown')
+                        opened_by = str(row.get('opened_by') or 'Unknown')
+                        hostname = str(row.get('hostname') or 'Unknown workstation')
+                        process_id = row.get('process_id')
+                        heartbeat_at = row.get('heartbeat_at')
+                        lines.append(f"- {record_type}: {file_name} | {opened_by} on {hostname} | PID {process_id or 'Unknown'} | heartbeat {heartbeat_at or 'Unknown'}")
+                    log_message("\n".join(lines), clear=True)
+                else:
+                    log_message("No record locks were present.", clear=True)
+                status_var.set("Record locks refreshed.")
+                messagebox.showinfo("Refresh Record Locks", f"Record locks refreshed.\n\nRemoved {len(removed_rows)} lock(s).", parent=dialog)
+            except Exception as exc:
+                log_message(f"Record lock refresh failed: {exc}", clear=True)
+                status_var.set("Record lock refresh failed.")
+                messagebox.showerror("Refresh Record Locks", f"Could not refresh record locks:\n{exc}", parent=dialog)
+
         def maintenance_optimize():
             if not messagebox.askyesno(
                 "Optimize Database",
@@ -12130,6 +14246,7 @@ def build_main_launcher():
         ttk.Button(action_row, text="Backup Database", command=maintenance_backup, width=20).grid(row=0, column=2, sticky="ew", pady=(0, 8))
         ttk.Button(action_row, text="Restore Database", command=maintenance_restore, width=20).grid(row=1, column=0, sticky="ew", padx=(0, 8))
         ttk.Button(action_row, text="Optimize Database", command=maintenance_optimize, width=20).grid(row=1, column=1, sticky="ew", padx=(0, 8))
+        ttk.Button(action_row, text="Refresh Record Locks", command=maintenance_refresh_locks, width=20).grid(row=1, column=2, sticky="ew")
 
         def close_db_maintenance_dialog():
             try:
@@ -12284,7 +14401,6 @@ def build_main_launcher():
         unregister_single_instance_window(root)
         root.destroy()
     root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
-    root.bind("<FocusOut>", _on_launcher_focus_out, add="+")
     root.protocol("WM_DELETE_WINDOW", on_close)
     refresh(preserve_state=False)
     schedule_refresh()
@@ -12934,9 +15050,32 @@ def _db_heartbeat_lock(path):
     if not parsed or not parsed.get('file_name'):
         return
     context = _db_lock_context()
+    updated_count = 0
     with _db_cursor() as (cur, config):
         schema = _db_pg_ident(config.get('schema'))
         cur.execute(f'''UPDATE {schema}.record_locks l SET heartbeat_at = NOW() FROM {schema}.records r WHERE l.record_type = r.record_type AND l.record_id = r.id AND r.record_type = %s AND r.file_name = %s AND l.opened_by = %s AND COALESCE(l.hostname, '') = %s AND COALESCE(l.process_id, 0) = %s''', (parsed['record_type'], parsed['file_name'], context['opened_by'], context['hostname'], context['process_id']))
+        try:
+            updated_count = int(cur.rowcount or 0)
+        except Exception:
+            updated_count = 0
+    if updated_count <= 0:
+        # A DB Maintenance lock refresh intentionally clears the lock table.
+        # Active editor windows should claim their own record again on the next
+        # heartbeat so truly open records become protected again automatically.
+        try:
+            _db_acquire_lock(path)
+        except Exception:
+            pass
+
+def _db_refresh_all_record_locks():
+    'Clear all database edit locks and return the lock rows that were removed.'
+    removed_rows = []
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(f'''SELECT l.record_type, r.file_name, COALESCE(r.name, r.file_stem, r.file_name) AS name, l.opened_by, l.hostname, l.process_id, l.opened_at, l.heartbeat_at FROM {schema}.record_locks l JOIN {schema}.records r ON r.record_type = l.record_type AND r.id = l.record_id ORDER BY l.heartbeat_at, l.opened_by, r.file_name''')
+        removed_rows = _db_fetchall(cur)
+        cur.execute(f'DELETE FROM {schema}.record_locks')
+    return removed_rows
 
 
 def _db_warn_if_locked(path, parent=None, title='Record Already Open'):
@@ -12950,6 +15089,13 @@ def _db_attach_window_lock(win, ctx, warn_on_conflict=False):
     path = ctx.get('file_path') if isinstance(ctx, dict) else None
     if not path or not _db_parse_virtual_path(path):
         return
+    previous_path = getattr(win, '_db_locked_path', None)
+    if previous_path and previous_path != path:
+        try:
+            _db_release_lock(previous_path)
+        except Exception:
+            pass
+        win._db_locked_path = None
     status = _db_warn_if_locked(path, parent=win) if warn_on_conflict else _db_lock_status_for_path(path)
     if not status.get('conflict'):
         _db_acquire_lock(path)
@@ -13025,8 +15171,12 @@ def do_save_as(win, ctx):
     try:
         if ctx.get('template_mode', False):
             data = _normalize_template_data(data)
-        if not data.get('name'):
-            data['name'] = os.path.splitext(os.path.basename(path))[0]
+        data = dict(data)
+        for _copy_key in ('_db_record_id', '_db_record_type', '_file_path', '_layout_name'):
+            data.pop(_copy_key, None)
+        # Save As is a copy operation: the new record should carry the new
+        # record/template name, even when the source already had a name.
+        data['name'] = os.path.splitext(os.path.basename(path))[0]
         safe_write_json(path, data)
         _save_preview_for_current_window(win, path)
         ctx['file_path'] = path
