@@ -1,6 +1,144 @@
 {
-  "current_version": "1.4.8",
+  "current_version": "1.4.16",
   "versions": [
+    {
+      "version": "1.4.16",
+      "released": "8-3-2026",
+      "summary": "Fixes dragging emails from Outlook onto the Plan button and makes .msg manifest parsing read the full message body.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed Outlook message drag-and-drop so dragging an email directly from Outlook onto the Plan button or planning wizard loads its manifest; when tkdnd cannot extract the email contents from the drop (FileGroupDescriptorW with an empty payload), the app retrieves the selected email from Outlook via COM and parses it.",
+            "Fixed .msg manifest parsing truncation by reading the full message body through Outlook COM first, with a file-based CFB fallback, so long split and main manifest bodies parse completely.",
+            "Fixed drop payload handling so manifest drops are no longer silently ignored when the delivered path is unrecognized, and an explanatory dialog appears for non-manifest drops.",
+            "Fixed the planning wizard's template picker page so the press run boxes scroll when there are many press runs, instead of overflowing the dialog."
+          ]
+        },
+        {
+          "category": "Added",
+          "items": [
+            "Added parsing of manifest emails saved as .eml files, extracting the plain-text tab-separated body the same way as .msg messages.",
+            "Added content-based manifest detection that checks the file's magic bytes in addition to the file extension, so tkdnd temp files load even when their names do not end in .msg, .eml, or .pdf."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.15",
+      "released": "7-30-2026",
+      "summary": "Adds an admin-only product name translation table to the planning wizard for mapping manifest PDF product names.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a Translation Table button on the first page of the planning wizard, visible only to admin users, that opens a dialog for managing incoming-to-output product name mappings.",
+            "Added product name translation that automatically applies the translation table when a manifest PDF is loaded into the planning wizard.",
+            "Added a persistent JSON-based translation table stored at L:\\PressLayouts\\product_translations.json."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.14",
+      "released": "7-30-2026",
+      "summary": "Fixes multi-section manifest PDF parsing and Outlook drag-and-drop of email attachments.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the manifest PDF parser to handle 3+ section columns by clustering page-number digit X values into N columns instead of assuming only 2, so color pages in sections after the first two (e.g. Greenville sections B and C) are detected correctly.",
+            "Fixed Outlook email-attachment drag-and-drop by injecting missing Tcl dictionary entries for FileGroupDescriptorW and FileGroupDescriptor into tkdnd's platform-to-type mapping at runtime."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Replaced ctypes WM_DROPFILES window-subclassing drag-and-drop with tkinterdnd2 for reliable cross-application drag support.",
+            "Rewrote the Broadsheet manifest color-page parser to use position-aware text extraction, matching Full markers to page numbers by Y-coordinate per column instead of assuming color pages are the first N consecutive pages."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.13",
+      "released": "7-29-2026",
+      "summary": "Adds a Go to Tomorrow button to the main launcher that expands tomorrow's issue date group and focuses the first layout.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a Go to Tomorrow button at the top right of the main launcher that collapses all issue date groups, expands tomorrow's issue date, and selects/focuses the first layout in that group."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.12",
+      "released": "7-29-2026",
+      "summary": "Removes orphaned functions, dead code, and redundant imports from the source file.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Removed 17 orphaned functions that were never called anywhere in the codebase, including a 117-line dead duplicate screenshot function.",
+            "Removed 10 redundant import statements from the assembled module boundaries that duplicated already-available top-level imports.",
+            "Removed one redundant function-level import of the glob module."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.11",
+      "released": "7-28-2026",
+      "summary": "Auto-generates press run names from sections/page ranges, appends run name to layout publication name, fixes product name capitalization and arrow key behavior in entries.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed the planning wizard press runs screen to auto-generate run names from the assigned section letters and page ranges, omitting page numbers when all pages are included.",
+            "Run name uses the parent section name when all subsections of a split section are assigned to the same run.",
+            "Changed planning wizard to append the auto-generated run name to the layout publication (product) field instead of only the filename.",
+            "Changed planning wizard to auto-set the starter sheet format (NYT/USAT) based on the publication name without prompting the user.",
+            "Changed press runs screen to show page ranges as read-only labels derived from section definitions rather than editable entry fields."
+          ]
+        },
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the layout editor product name field to capitalize as you type instead of only on focus out (the dirty-marking KeyRelease binding was overwriting the normalization handler).",
+            "Fixed arrow key handlers so text entry widgets (like the product name) preserve default cursor-movement behavior instead of switching fields, while grid cells retain their arrow-key navigation."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.10",
+      "released": "7-27-2026",
+      "summary": "Fixes preview panel auto-refresh for database-stored layouts.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed preview panel auto-refresh not detecting saves for database-stored layouts by using the record's updated_at timestamp as the change signature instead of attempting to stat a non-existent file on disk."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.9",
+      "released": "7-27-2026",
+      "summary": "Refreshes the preview panel automatically when a layout is saved by any user.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Changed all preview panels to automatically refresh when the underlying preview image file changes on disk, so another user's save is reflected without manual reselection.",
+            "Added file-signature tracking to each preview panel so stale preview images are detected and reloaded on the next auto-refresh or cache-watcher cycle."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.4.8",
       "released": "7-22-2026",
@@ -2050,7 +2188,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.4.8",
+    "current_release": "1.4.16",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",

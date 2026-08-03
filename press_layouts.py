@@ -1,3 +1,4 @@
+import email
 import getpass
 import glob
 import importlib
@@ -5,10 +6,13 @@ import importlib.util
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
+import tkinterdnd2 as tkdnd
 
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
@@ -54,46 +58,6 @@ def _runtime_module_available(module_name: str) -> bool:
 
 
 
-def _collect_missing_runtime_dependencies():
-    missing = []
-    if not _runtime_module_available("PIL"):
-        missing.append({
-            "display": "Pillow",
-            "packages": ["Pillow"],
-        })
-    if not (_runtime_module_available("psycopg2") or _runtime_module_available("psycopg")):
-        missing.append({
-            "display": "PostgreSQL driver",
-            "packages": ["psycopg2-binary", "psycopg"],
-        })
-    if os.name == 'nt':
-        pywin32_modules = ("win32print", "win32ui", "win32con")
-        if not all(_runtime_module_available(name) for name in pywin32_modules):
-            missing.append({
-                "display": "Windows printing support",
-                "packages": ["pywin32"],
-            })
-    return missing
-
-
-
-def _install_runtime_package(package_name: str):
-    install_commands = [
-        [sys.executable, "-m", "pip", "install", package_name],
-    ]
-    if os.name == 'nt':
-        install_commands.insert(0, [sys.executable, "-m", "pip", "install", "--user", package_name])
-    last_error = None
-    for command in install_commands:
-        try:
-            subprocess.check_call(command)
-            return
-        except Exception as exc:
-            last_error = exc
-    raise last_error if last_error is not None else RuntimeError(f"Failed to install package: {package_name}")
-
-
-
 def ensure_runtime_dependencies(parent=None, force=False, prompt_user=True):
     global _RUNTIME_DEPENDENCY_CHECK_COMPLETE
     _RUNTIME_DEPENDENCY_CHECK_COMPLETE = True
@@ -136,16 +100,6 @@ def _shared_executable_candidates():
         if path and path not in candidates:
             candidates.append(path)
     return candidates
-
-def _resolve_shared_executable_path():
-    candidates = _shared_executable_candidates()
-    for candidate in candidates:
-        try:
-            if os.path.exists(candidate):
-                return candidate
-        except Exception:
-            pass
-    return candidates[0] if candidates else ""
 
 SELECTED_DB_CONFIG_PATH = SHARED_LIVE_DB_CONFIG_PATH
 SELECTED_DB_CONFIG_LABEL = "Live"
@@ -485,6 +439,70 @@ def is_admin(username=None) -> bool:
     effective_username = username if username is not None else get_windows_username()
     return str(effective_username or '').strip().lower() == 'mbradbury'
 
+def _load_product_translations():
+    try:
+        with _db_cursor() as (cur, config):
+            schema = _db_pg_ident(config.get('schema'))
+            cur.execute(f'SELECT incoming, output FROM {schema}.product_translations ORDER BY incoming')
+            return [{"incoming": r["incoming"], "output": r["output"]} for r in _db_fetchall(cur)]
+    except Exception:
+        return []
+
+def _save_product_translations(translations):
+    try:
+        with _db_cursor() as (cur, config):
+            schema = _db_pg_ident(config.get('schema'))
+            cur.execute(f'DELETE FROM {schema}.product_translations')
+            for entry in translations:
+                incoming = entry.get("incoming", "").strip()
+                if incoming:
+                    cur.execute(
+                        f'INSERT INTO {schema}.product_translations (incoming, output) VALUES (%s, %s)',
+                        (incoming, entry.get("output", "").strip()),
+                    )
+    except Exception:
+        pass
+
+def _apply_product_translation(product_name):
+    entries = _load_product_translations()
+    lower_in = product_name.strip().lower()
+    for entry in entries:
+        if entry.get("incoming", "").strip().lower() == lower_in:
+            return entry.get("output", "").strip() or product_name
+    return product_name
+
+def _load_section_translations():
+    try:
+        with _db_cursor() as (cur, config):
+            schema = _db_pg_ident(config.get('schema'))
+            cur.execute(f'SELECT incoming, output FROM {schema}.section_translations ORDER BY incoming')
+            return [{"incoming": r["incoming"], "output": r["output"]} for r in _db_fetchall(cur)]
+    except Exception:
+        return []
+
+def _save_section_translations(translations):
+    try:
+        with _db_cursor() as (cur, config):
+            schema = _db_pg_ident(config.get('schema'))
+            cur.execute(f'DELETE FROM {schema}.section_translations')
+            for entry in translations:
+                incoming = entry.get("incoming", "").strip()
+                if incoming:
+                    cur.execute(
+                        f'INSERT INTO {schema}.section_translations (incoming, output) VALUES (%s, %s)',
+                        (incoming, entry.get("output", "").strip()),
+                    )
+    except Exception:
+        pass
+
+def _apply_section_translation(section_name):
+    entries = _load_section_translations()
+    lower_in = str(section_name or "").strip().lower()
+    for entry in entries:
+        if entry.get("incoming", "").strip().lower() == lower_in:
+            return entry.get("output", "").strip() or section_name
+    return section_name
+
 def stamp_layout_change_metadata(data, path=None):
     if not isinstance(data, dict):
         return data
@@ -516,31 +534,6 @@ def is_valid_page_count(value: str, multiple: int) -> bool:
         return n >= multiple and (n % multiple == 0)
     except Exception:
         return False
-def apply_min_pages_to_section_vars(format_name, section_count_var, section_page_vars, fill_only_blanks=True):
-    """
-    Ensure enabled section page values are valid for the format.
-    - fill_only_blanks=True: only fills blanks/invalids
-    - fill_only_blanks=False: forces enabled sections to minimum
-    """
-    minimum = min_pages_for_format(format_name)
-
-    try:
-        count = int(section_count_var.get())
-    except Exception:
-        count = 1
-    count = max(1, min(4, count))
-    section_count_var.set(str(count))
-
-    for i in range(4):
-        if i < count:
-            current = section_page_vars[i].get().strip()
-            if fill_only_blanks:
-                if (current == "") or (not is_valid_page_count(current, minimum)):
-                    section_page_vars[i].set(str(minimum))
-            else:
-                section_page_vars[i].set(str(minimum))
-        else:
-            section_page_vars[i].set("")
 def parse_issue_date_flexible(text: str, today=None):
     """
     Parse many date inputs into datetime.
@@ -658,35 +651,6 @@ def fmt_dt_for_display(dt: datetime) -> str:
 def fmt_issue_for_display(issue_text: str) -> str:
     dt = parse_issue_date_flexible(issue_text)
     return dt.strftime("%m/%d/%Y") if dt else (issue_text or "")
-def build_layout_rows():
-    ensure_dir(LAYOUTS_DIR)
-    rows = []
-
-    for path in sorted(glob.glob(os.path.join(LAYOUTS_DIR, "*.json"))):
-        data = safe_read_json(path) or {}
-
-        press = data.get("press", "") or ""
-        fmt = data.get("format", "") or ""
-        issue = data.get("issue_date", "") or ""
-        product = data.get("product", "") or ""
-        saved_at = data.get("saved_at", "") or ""
-
-        issue_dt = parse_issue_date_flexible(issue)
-        saved_dt = parse_saved_at(saved_at)
-
-        rows.append({
-            "path": path,
-            "issue_dt": issue_dt,
-            "issue_disp": fmt_issue_for_display(issue),
-            "product": product,
-            "press": press,
-            "format": fmt,
-            "saved_dt": saved_dt,
-            "saved_disp": fmt_dt_for_display(saved_dt),
-        })
-
-    return rows
-
 def build_layout_filename_suggestion(ctx) -> str:
     raw_date = ctx["issue_entry"].get().strip() if ctx.get("issue_entry") else ""
     raw_product = normalize_publication_name(ctx["product_entry"].get()) if ctx.get("product_entry") else ""
@@ -1195,24 +1159,32 @@ def enable_arrow_navigation(focus_list, units, press_name):
         w = event.widget
         if w in grid_lookup:
             return grid_left(w)
+        if isinstance(w, (tk.Entry, ttk.Entry)):
+            return
         return _goto(prev_map[w])
 
     def on_right(event):
         w = event.widget
         if w in grid_lookup:
             return grid_right(w)
+        if isinstance(w, (tk.Entry, ttk.Entry)):
+            return
         return _goto(next_map[w])
 
     def on_up(event):
         w = event.widget
         if w in grid_lookup:
             return grid_up(w)
+        if isinstance(w, (tk.Entry, ttk.Entry)):
+            return
         return _goto(prev_map[w])
 
     def on_down(event):
         w = event.widget
         if w in grid_lookup:
             return grid_down(w)
+        if isinstance(w, (tk.Entry, ttk.Entry)):
+            return
         return _goto(next_map[w])
 
     for w in focus_list:
@@ -1545,6 +1517,18 @@ def _preview_file_signature(path: str):
         int(getattr(stat, "st_ctime_ns", int(float(getattr(stat, "st_ctime", 0.0)) * 1000000000))),
         int(getattr(stat, "st_size", 0)),
     )
+
+
+def _preview_file_signature_for_json(json_path: str):
+    parsed = _db_parse_virtual_path(json_path) if callable(_db_parse_virtual_path) else None
+    if parsed and parsed.get('file_name'):
+        row = _db_read_record(parsed['record_type'], parsed['file_name']) if callable(_db_read_record) else None
+        if row:
+            updated_at = row.get('updated_at')
+            if updated_at is not None:
+                return ('db', str(updated_at))
+        return None
+    return _preview_file_signature(preview_image_path_for_json(json_path))
 
 
 def _clear_preview_image_cache_entry(json_path: str):
@@ -2582,31 +2566,6 @@ def _unit_has_assigned_pages(unit_ctx) -> bool:
     return False
 
 
-def _validate_used_units_have_sections(ctx, parent=None) -> bool:
-    offending_labels = []
-    for unit_ctx in ctx.get("units", []):
-        try:
-            section_value = (unit_ctx["section_entry"].get() or "").strip()
-        except Exception:
-            section_value = ""
-        if section_value:
-            continue
-        if _unit_has_assigned_pages(unit_ctx):
-            offending_labels.append(str(unit_ctx.get("label") or "Unit"))
-
-    if not offending_labels:
-        return True
-
-    labels_text = ", ".join(offending_labels)
-    messagebox.showerror(
-        "Missing Section Assignment",
-        "All units with pages assigned must be assigned a section before saving.\n\n"
-        f"Units missing a section: {labels_text}",
-        parent=parent,
-    )
-    return False
-
-
 def _ctx_is_regular_mode(ctx) -> bool:
     if bool(ctx.get("regular_mode", False)):
         return True
@@ -3136,7 +3095,6 @@ def _template_exists_for_imposition(ctx) -> bool:
         })
 
     if not template_candidates:
-        import glob
         for tmpl_path in sorted(glob.glob(os.path.join(TEMPLATE_DIR, "*.json"))):
             template_candidates.append({
                 "path": tmpl_path,
@@ -3248,16 +3206,7 @@ def save_template_from_layout(ctx):
 import sys as _single_file_sys
 _single_file_sys.modules.setdefault('press_layout_core', _single_file_sys.modules[__name__])
 
-import os
-import glob
-import json
 import calendar
-import re
-import sys
-import threading
-from datetime import datetime
-import tkinter as tk
-from tkinter import ttk, messagebox
 ensure_runtime_dependencies(prompt_user=True)
 from PIL import Image
 
@@ -3507,19 +3456,6 @@ def _layout_data_to_headless_ctx(data, config=None, title_base=""):
         "units": units,
         "color_cells": color_cells,
     }
-
-
-def _build_imposition_text_from_layout_data(data, config=None):
-    try:
-        ctx = _layout_data_to_headless_ctx(data, config=config, title_base="")
-        return build_imposition_text(ctx)
-    except Exception:
-        pass
-    fallback = str((data or {}).get("name") or "").strip()
-    if fallback.lower().endswith('.json'):
-        fallback = os.path.splitext(fallback)[0]
-    return fallback
-
 
 
 def _desired_starter_format_for_publication(publication_name):
@@ -4559,19 +4495,6 @@ def _print_starter_sheet_data_to_default_printer(data, copies=1, printer_name=No
             os.remove(path)
         except Exception:
             pass
-def print_layout_json_to_default_printer(json_path, copies=5):
-    data = safe_read_json(json_path)
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Could not read layout data from {json_path}.")
-    return _print_layout_data_to_default_printer(data, copies=copies)
-
-
-def print_starter_sheet_json_to_default_printer(json_path, copies=1):
-    data = safe_read_json(json_path)
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Could not read layout data from {json_path}.")
-    return _print_starter_sheet_data_to_default_printer(data, copies=copies)
-
 def build_press_layout(win, title="Press Layout", config=None, load_path=None, load_as_copy=False, initial_data=None):
     config = config or {}
 
@@ -5710,7 +5633,27 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     issue_entry.bind("<Button-1>", _open_issue_date_picker)
 
     def _on_publication_key_release(event=None):
-        _normalize_publication_entry()
+        try:
+            current = product_entry.get()
+        except Exception:
+            return
+        uppered = str(current or "").upper()
+        if uppered != current:
+            try:
+                cursor_index = product_entry.index("insert")
+                sel_start = product_entry.index("sel.first")
+                sel_end = product_entry.index("sel.last")
+            except Exception:
+                cursor_index, sel_start, sel_end = None, None, None
+            try:
+                product_entry.delete(0, "end")
+                product_entry.insert(0, uppered)
+                if sel_start is not None and sel_end is not None:
+                    product_entry.selection_range(min(sel_start, len(uppered)), min(sel_end, len(uppered)))
+                elif cursor_index is not None:
+                    product_entry.icursor(min(cursor_index, len(uppered)))
+            except Exception:
+                pass
         update_imposition()
 
     def _on_publication_focus_out(event=None):
@@ -6186,7 +6129,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     # Bind change events to mark the layout as dirty
     try:
         issue_entry.bind("<KeyRelease>", _mark_dirty_event)
-        product_entry.bind("<KeyRelease>", _mark_dirty_event)
+        product_entry.bind("<KeyRelease>", _mark_dirty_event, add="+")
         for sv in section_name_vars:
             try:
                 sv.trace_add("write", _mark_dirty_var)
@@ -6345,26 +6288,6 @@ def _bind_window_size_memory(win, state_key):
         win.bind("<Configure>", _schedule, add="+")
     except Exception:
         pass
-
-
-def _fit_image_to_width(image, max_width):
-    try:
-        from PIL import Image
-    except Exception as e:
-        raise RuntimeError(f"Pillow is required for previews: {e}")
-    if image is None:
-        return None
-    try:
-        max_width = max(1, int(max_width))
-    except Exception:
-        return image
-    width, height = image.size
-    if width <= 0 or height <= 0:
-        return image
-    if width == max_width:
-        return image
-    scale = max_width / float(width)
-    return image.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
 
 
 def _fit_image_to_box(image, max_width, max_height):
@@ -6775,11 +6698,6 @@ def get_cached_regular_rows(force=False):
     return rows, changed
 
 
-def list_matching_regular_layouts(press_name, format_name):
-    rows, _changed = get_cached_regular_rows(force=False)
-    return [row for row in rows if row.get("press") == press_name and row.get("format") == format_name]
-
-
 def _rebuild_layout_cache(entries=None):
     if entries is None:
         entries = _json_dir_entries(LAYOUTS_DIR)
@@ -6959,25 +6877,6 @@ def open_json_in_layout(
     return win
 
 
-def _resize_preview_image(image, scale=0.75):
-    try:
-        from PIL import Image
-    except Exception as e:
-        raise RuntimeError(f"Pillow is required for previews: {e}")
-    if image is None:
-        return None
-    try:
-        scale = float(scale)
-    except Exception:
-        scale = 0.75
-    scale = max(0.1, min(1.0, scale))
-    width, height = image.size
-    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
-    if new_size == image.size:
-        return image
-    return image.resize(new_size, Image.LANCZOS)
-
-
 def _window_rect(win):
     try:
         win.update_idletasks()
@@ -6996,160 +6895,6 @@ def _window_rect(win):
         "right": left + max(1, width),
         "bottom": top + max(1, height),
     }
-
-
-def _launcher_monitor_rect(launcher):
-    try:
-        rect = _window_rect(launcher)
-    except Exception:
-        rect = None
-    try:
-        monitors = helpers_mod._monitor_rects_win32()
-    except Exception:
-        monitors = []
-    if rect and monitors:
-        try:
-            monitor = helpers_mod._find_best_monitor_for_rect(rect, monitors)
-            if monitor:
-                return monitor
-        except Exception:
-            pass
-    try:
-        sw = int(launcher.winfo_screenwidth())
-        sh = int(launcher.winfo_screenheight())
-    except Exception:
-        sw, sh = 1920, 1080
-    return {"left": 0, "top": 0, "right": sw, "bottom": sh, "primary": True}
-
-
-def _clamp_preview_position(monitor, x, y, width, height, margin=20):
-    left = int(monitor.get("left", 0))
-    top = int(monitor.get("top", 0))
-    right = int(monitor.get("right", left + width))
-    bottom = int(monitor.get("bottom", top + height))
-    min_x = left + margin
-    min_y = top + margin
-    max_x = max(min_x, right - width - margin)
-    max_y = max(min_y, bottom - height - margin)
-    x = max(min_x, min(int(x), max_x))
-    y = max(min_y, min(int(y), max_y))
-    return x, y
-
-
-def _capture_window_image(win):
-    try:
-        from PIL import ImageGrab
-    except Exception as e:
-        raise RuntimeError(f"Pillow ImageGrab is required for previews: {e}")
-
-    # Prefer a real screenshot of the actual layout window. This matches the
-    # on-screen UI instead of using the print preview rendering path.
-    try:
-        win.update_idletasks()
-        win.lift()
-        try:
-            win.attributes("-topmost", True)
-            win.update()
-            win.attributes("-topmost", False)
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-    rect = _window_rect(win)
-    if not rect:
-        raise RuntimeError("Could not determine preview window bounds.")
-    bbox = (rect["left"], rect["top"], rect["right"], rect["bottom"])
-
-    # Give Tk/Windows a brief moment so the fully rendered layout is visible
-    # before the screenshot is taken.
-    try:
-        win.after(60)
-        win.update()
-    except Exception:
-        pass
-
-    image = None
-    try:
-        image = ImageGrab.grab(bbox=bbox, all_screens=True)
-    except Exception:
-        image = None
-
-    # Fallback to PrintWindow when available for a more robust capture on Windows.
-    if image is None and os.name == 'nt':
-        try:
-            import ctypes
-            from ctypes import wintypes
-            from PIL import Image
-
-            user32 = ctypes.windll.user32
-            gdi32 = ctypes.windll.gdi32
-            hwnd = wintypes.HWND(int(win.winfo_id()))
-
-            class RECT(ctypes.Structure):
-                _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG), ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
-
-            rect_raw = RECT()
-            if not user32.GetWindowRect(hwnd, ctypes.byref(rect_raw)):
-                raise RuntimeError("GetWindowRect failed")
-            width = max(1, rect_raw.right - rect_raw.left)
-            height = max(1, rect_raw.bottom - rect_raw.top)
-
-            hwnd_dc = user32.GetWindowDC(hwnd)
-            mem_dc = gdi32.CreateCompatibleDC(hwnd_dc)
-            bitmap = gdi32.CreateCompatibleBitmap(hwnd_dc, width, height)
-            old_obj = gdi32.SelectObject(mem_dc, bitmap)
-
-            PW_RENDERFULLCONTENT = 0x00000002
-            result = user32.PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT)
-            if result != 1:
-                result = user32.PrintWindow(hwnd, mem_dc, 0)
-            if result != 1:
-                raise RuntimeError("PrintWindow failed")
-
-            class BITMAPINFOHEADER(ctypes.Structure):
-                _fields_ = [
-                    ("biSize", wintypes.DWORD),
-                    ("biWidth", wintypes.LONG),
-                    ("biHeight", wintypes.LONG),
-                    ("biPlanes", wintypes.WORD),
-                    ("biBitCount", wintypes.WORD),
-                    ("biCompression", wintypes.DWORD),
-                    ("biSizeImage", wintypes.DWORD),
-                    ("biXPelsPerMeter", wintypes.LONG),
-                    ("biYPelsPerMeter", wintypes.LONG),
-                    ("biClrUsed", wintypes.DWORD),
-                    ("biClrImportant", wintypes.DWORD),
-                ]
-
-            class BITMAPINFO(ctypes.Structure):
-                _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
-
-            bmi = BITMAPINFO()
-            bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-            bmi.bmiHeader.biWidth = width
-            bmi.bmiHeader.biHeight = -height
-            bmi.bmiHeader.biPlanes = 1
-            bmi.bmiHeader.biBitCount = 32
-            bmi.bmiHeader.biCompression = 0
-
-            buffer_len = width * height * 4
-            buffer = ctypes.create_string_buffer(buffer_len)
-            rows = gdi32.GetDIBits(mem_dc, bitmap, 0, height, buffer, ctypes.byref(bmi), 0)
-            if rows == 0:
-                raise RuntimeError("GetDIBits failed")
-            image = Image.frombuffer("RGBA", (width, height), buffer, "raw", "BGRA", 0, 1).convert("RGB")
-
-            gdi32.SelectObject(mem_dc, old_obj)
-            gdi32.DeleteObject(bitmap)
-            gdi32.DeleteDC(mem_dc)
-            user32.ReleaseDC(hwnd, hwnd_dc)
-        except Exception:
-            image = None
-
-    if image is None:
-        raise RuntimeError("Could not capture layout preview image.")
-    return image
 
 
 def _clear_preview_panel(preview_label, preview_state, empty_text="Select an item to preview"):
@@ -7395,18 +7140,11 @@ def build_new_layout_launcher(parent):
 
     mode_bar = ttk.Frame(frame)
     mode_bar.grid(row=0, column=0, columnspan=12, sticky="ew", pady=(0, 8))
-    mode_bar.columnconfigure(2, weight=1)
-    def open_plan_from_new_layout():
-        try:
-            root.destroy()
-        except Exception:
-            pass
-        build_plan_wizard(parent)
-    ttk.Button(mode_bar, text="Plan", command=open_plan_from_new_layout, width=12).grid(row=0, column=0, sticky="w", padx=(0, 8))
+    mode_bar.columnconfigure(1, weight=1)
     mode_button = ttk.Button(mode_bar, text="From Regular", width=16)
-    mode_button.grid(row=0, column=1, sticky="w")
+    mode_button.grid(row=0, column=0, sticky="w")
     mode_note_var = tk.StringVar(value="Guided mode: filter templates, then pick one or create a blank layout from a specific press / format / section setup.")
-    ttk.Label(mode_bar, textvariable=mode_note_var).grid(row=0, column=2, sticky="w", padx=(12, 0))
+    ttk.Label(mode_bar, textvariable=mode_note_var).grid(row=0, column=1, sticky="w", padx=(12, 0))
 
     search_frame = ttk.Frame(frame)
     search_frame.grid(row=1, column=0, columnspan=12, sticky="ew", pady=(0, 4))
@@ -7557,7 +7295,8 @@ def build_new_layout_launcher(parent):
                 return
             if current_preview_path() != _path:
                 return
-            if preview_state.get("path") == _path and preview_state.get("photo") is not None:
+            current_sig = _preview_file_signature_for_json(_path)
+            if preview_state.get("path") == _path and preview_state.get("photo") is not None and preview_state.get("preview_file_sig") == current_sig:
                 return
             close_preview()
             image, _preview_title = open_json_preview(root, _path, template_mode=(not mode_state["regular"]))
@@ -7566,6 +7305,7 @@ def build_new_layout_launcher(parent):
                 return
             _set_preview_panel(preview_label, preview_state, image)
             preview_state["path"] = _path
+            preview_state["preview_file_sig"] = current_sig
         preview_state["after_id"] = root.after_idle(_do_show)
     def _active_section_count():
         value = (section_count_var.get() or "All").strip()
@@ -7984,8 +7724,20 @@ def build_new_layout_launcher(parent):
         pass
     update_launcher_template_sort_headings()
     update_launcher_regular_sort_headings()
-    template_cache_watcher = _bind_cache_watcher(root, get_cached_templates, lambda: refresh_templates())
-    regular_cache_watcher = _bind_cache_watcher(root, get_cached_regular_rows, lambda: refresh_regulars())
+    def _check_preview_freshness():
+        path = preview_state.get("path")
+        if not path:
+            return
+        current_sig = _preview_file_signature_for_json(path)
+        if preview_state.get("preview_file_sig") != current_sig:
+            preview_state["photo"] = None
+            show_preview(path)
+    def _on_cache_change():
+        refresh_templates()
+        refresh_regulars()
+        _check_preview_freshness()
+    template_cache_watcher = _bind_cache_watcher(root, get_cached_templates, _on_cache_change)
+    regular_cache_watcher = _bind_cache_watcher(root, get_cached_regular_rows, _on_cache_change)
     update_mode_widgets()
     root.bind("<FocusIn>", lambda e: show_preview(current_preview_path()), add="+")
     root.protocol("WM_DELETE_WINDOW", lambda: (_persist_bound_preview_panes(root), _cancel_cache_watcher(root, template_cache_watcher), _cancel_cache_watcher(root, regular_cache_watcher), close_preview(), root.destroy()))
@@ -8104,7 +7856,8 @@ def build_template_editor_launcher(parent):
                 return
             if _current_preview_path() != _path:
                 return
-            if preview_state.get("path") == _path and preview_state.get("photo") is not None:
+            current_sig = _preview_file_signature_for_json(_path)
+            if preview_state.get("path") == _path and preview_state.get("photo") is not None and preview_state.get("preview_file_sig") == current_sig:
                 return
             close_preview()
             image, preview_title = open_json_preview(root, _path, template_mode=True)
@@ -8113,6 +7866,7 @@ def build_template_editor_launcher(parent):
                 return
             _set_preview_panel(preview_label, preview_state, image)
             preview_state["path"] = _path
+            preview_state["preview_file_sig"] = current_sig
         preview_state["after_id"] = root.after_idle(_do_show)
     def _on_launcher_focus_in(event=None):
         show_preview(_current_preview_path())
@@ -8380,7 +8134,18 @@ def build_template_editor_launcher(parent):
     paned.add(preview_box, minsize=160)
     _bind_preview_pane_memory(root, "template_editor_launcher", paned, preview_box, default_height=240)
     refresh()
-    template_cache_watcher = _bind_cache_watcher(root, get_cached_templates, lambda: refresh())
+    def _check_preview_freshness():
+        path = preview_state.get("path")
+        if not path:
+            return
+        current_sig = _preview_file_signature_for_json(path)
+        if preview_state.get("preview_file_sig") != current_sig:
+            preview_state["photo"] = None
+            show_preview(path)
+    def _on_cache_change():
+        refresh()
+        _check_preview_freshness()
+    template_cache_watcher = _bind_cache_watcher(root, get_cached_templates, _on_cache_change)
     root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
     root.protocol("WM_DELETE_WINDOW", lambda: (_persist_bound_preview_panes(root), _cancel_cache_watcher(root, template_cache_watcher), close_preview(), root.destroy()))
     return root
@@ -8441,12 +8206,6 @@ def _layout_color_and_plate_counts_from_data(data):
                 plates += 1
 
     return color_pages, plates
-
-
-def _load_layout_color_and_plate_counts(path):
-    data = safe_read_json(path) or {}
-    return _layout_color_and_plate_counts_from_data(data)
-
 
 
 def build_regular_editor_launcher(parent):
@@ -8544,12 +8303,16 @@ def build_regular_editor_launcher(parent):
             preview_state["after_id"] = None
             if _request_id != preview_state.get("request_id") or selected_path() != _path:
                 return
+            current_sig = _preview_file_signature_for_json(_path)
+            if preview_state.get("path") == _path and preview_state.get("photo") is not None and preview_state.get("preview_file_sig") == current_sig:
+                return
             image, _pt = open_json_preview(root, _path, template_mode=False)
             if image is None:
                 close_preview()
                 return
             _set_preview_panel(preview_label, preview_state, image)
             preview_state["path"] = _path
+            preview_state["preview_file_sig"] = current_sig
         preview_state["after_id"] = root.after_idle(_do_show)
     def sort_rows(rows):
         col = sort_state.get("col")
@@ -8742,7 +8505,18 @@ def build_regular_editor_launcher(parent):
     paned.add(preview_box, minsize=160)
     _bind_preview_pane_memory(root, "regular_editor_launcher", paned, preview_box, default_height=240)
     refresh()
-    regular_cache_watcher = _bind_cache_watcher(root, get_cached_regular_rows, lambda: refresh())
+    def _check_preview_freshness():
+        path = preview_state.get("path")
+        if not path:
+            return
+        current_sig = _preview_file_signature_for_json(path)
+        if preview_state.get("preview_file_sig") != current_sig:
+            preview_state["photo"] = None
+            show_preview(path)
+    def _on_cache_change():
+        refresh()
+        _check_preview_freshness()
+    regular_cache_watcher = _bind_cache_watcher(root, get_cached_regular_rows, _on_cache_change)
     root.protocol("WM_DELETE_WINDOW", lambda: (_persist_bound_preview_panes(root), _cancel_cache_watcher(root, regular_cache_watcher), close_preview(), root.destroy()))
     return root
 
@@ -9002,14 +8776,11 @@ def show_restart_required_dialog(parent, running_version, latest_version):
     except Exception:
         pass
 
-    dialog = tk.Toplevel(parent)
+    dialog = tk.Toplevel()
     set_window_icon(dialog)
     parent._restart_required_dialog = dialog
     dialog.title("Update Available")
-    try:
-        dialog.transient(parent)
-    except Exception:
-        pass
+    dialog.attributes("-topmost", True)
     try:
         dialog.grab_set()
     except Exception:
@@ -9204,38 +8975,6 @@ def _configure_changelog_tree_tags(tree):
         color = _category_color(category_name)
         tree.tag_configure(_category_tag_name(category_name), foreground=color, font=(None, 10, "bold"))
         tree.tag_configure(_item_tag_name(category_name), foreground=color)
-
-def populate_changelog_tree(tree, changelog_data=None):
-    data = changelog_data if isinstance(changelog_data, dict) else load_changelog_data()
-    versions = get_changelog_versions(data)
-    tree.delete(*tree.get_children())
-    _configure_changelog_tree_tags(tree)
-    if not versions:
-        tree.insert("", "end", text="No changelog entries found.", tags=("summary",))
-        return
-    for index, entry in enumerate(versions):
-        version_label = str(entry.get("version") or "").strip() or "0.0.0"
-        if not version_label.lower().startswith("v"):
-            version_label = f"v{version_label}"
-        released = str(entry.get("released") or "").strip()
-        summary = str(entry.get("summary") or "").strip()
-        version_text = f"Press Layouts {version_label}"
-        if released:
-            version_text += f"  •  {released}"
-        version_id = tree.insert("", "end", text=version_text, open=(index == 0), tags=("version",))
-        if summary:
-            tree.insert(version_id, "end", text=summary, tags=("summary",))
-        for section in _normalize_change_sections(entry):
-            title = section.get("title") or "Changes"
-            items = section.get("items") or []
-            category_tag = _category_tag_name(title)
-            item_tag = _item_tag_name(title)
-            color = _category_color(title)
-            tree.tag_configure(category_tag, foreground=color, font=(None, 10, "bold"))
-            tree.tag_configure(item_tag, foreground=color)
-            category_id = tree.insert(version_id, "end", text=title, open=True, tags=(category_tag,))
-            for item in items:
-                tree.insert(category_id, "end", text=item, tags=("item", item_tag))
 
 def show_changelog_dialog(parent):
     existing = getattr(parent, "_changelog_dialog", None)
@@ -11167,6 +10906,905 @@ def unregister_single_instance_window(win):
 
 
 
+_CFB_FREESECT = 0xFFFFFFFF
+_CFB_ENDOFCHAIN = 0xFFFFFFFE
+_CFB_FATSECT = 0xFFFFFFFD
+_CFB_DIFSECT = 0xFFFFFFFC
+
+
+def _read_msg_streams(msg_path):
+    """Parse an Outlook .msg (OLE2 compound file) and return {stream_name: bytes}."""
+    with open(msg_path, 'rb') as fh:
+        data = fh.read()
+    if data[:8] != b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
+        return {}
+    sector_shift = struct.unpack('<H', data[0x1E:0x20])[0]
+    sector_size = 1 << sector_shift
+    mini_shift = struct.unpack('<H', data[0x20:0x22])[0]
+    mini_size = 1 << mini_shift
+    first_dir = struct.unpack('<I', data[0x30:0x34])[0]
+    mini_cutoff = struct.unpack('<I', data[0x38:0x3C])[0]
+    first_minifat = struct.unpack('<I', data[0x3C:0x40])[0]
+    num_minifat = struct.unpack('<I', data[0x40:0x44])[0]
+
+    def _sector_offset(sid):
+        return (sid + 1) * sector_size
+
+    difat = list(struct.unpack('<109I', data[0x4C:0x4C + 109 * 4]))
+    fat_sectors = [sid for sid in difat if sid != _CFB_FREESECT]
+    fat = []
+    for fsid in fat_sectors:
+        fat += list(struct.unpack('<%dI' % (sector_size // 4), data[_sector_offset(fsid):_sector_offset(fsid) + sector_size]))
+
+    entries = []
+    dir_sector = first_dir
+    seen = set()
+    while dir_sector != _CFB_ENDOFCHAIN and dir_sector not in seen:
+        seen.add(dir_sector)
+        base = _sector_offset(dir_sector)
+        for off in range(0, sector_size, 128):
+            entry = data[base + off:base + off + 128]
+            if len(entry) < 128:
+                break
+            obj_type = entry[0x42]
+            if obj_type not in (2, 5):
+                continue
+            name_len = struct.unpack('<H', entry[0x40:0x42])[0]
+            name = entry[:max(0, name_len - 2)].decode('utf-16-le', errors='replace') if name_len >= 2 else ""
+            entries.append({
+                'type': obj_type,
+                'name': name,
+                'sector': struct.unpack('<I', entry[0x74:0x78])[0],
+                'size': struct.unpack('<Q', entry[0x78:0x80])[0],
+            })
+        dir_sector = fat[dir_sector]
+
+    root = None
+    streams = {}
+    for entry in entries:
+        if entry['type'] == 5:
+            root = entry
+        elif entry['type'] == 2:
+            streams[entry['name']] = entry
+
+    def _read_regular(entry):
+        out = b''
+        cur = entry['sector']
+        chain_seen = set()
+        remaining = entry['size']
+        while cur != _CFB_ENDOFCHAIN and cur not in chain_seen and remaining > 0 and cur < len(fat):
+            chain_seen.add(cur)
+            out += data[_sector_offset(cur):_sector_offset(cur) + sector_size]
+            remaining -= sector_size
+            cur = fat[cur]
+        return out[:entry['size']]
+
+    def _read_stream(name):
+        entry = streams.get(name)
+        if entry is None:
+            return b''
+        if entry['size'] >= mini_cutoff or root is None:
+            return _read_regular(entry)
+        mini_stream = _read_regular(root)
+        minifat = []
+        for m in range(num_minifat):
+            minifat += list(struct.unpack('<%dI' % (sector_size // 4), data[_sector_offset(first_minifat + m):_sector_offset(first_minifat + m) + sector_size]))
+        out = b''
+        cur = entry['sector']
+        chain_seen = set()
+        remaining = entry['size']
+        while cur != _CFB_ENDOFCHAIN and cur not in chain_seen and remaining > 0 and cur < len(minifat):
+            chain_seen.add(cur)
+            out += mini_stream[cur * mini_size:cur * mini_size + mini_size]
+            remaining -= mini_size
+            nxt = minifat[cur]
+            cur = nxt if nxt not in (_CFB_FREESECT, _CFB_FATSECT, _CFB_DIFSECT) else _CFB_ENDOFCHAIN
+        return out[:entry['size']]
+
+    return {name: _read_stream(name) for name in streams}
+
+
+def _extract_msg_body_text(msg_path):
+    """Return the plain-text body of an Outlook .msg file, or None."""
+    try:
+        streams = _read_msg_streams(msg_path)
+    except Exception:
+        return None
+    for name in ("__substg1.0_1000001F", "__substg1.0_1000001E"):
+        raw = streams.get(name)
+        if raw:
+            try:
+                if name.endswith("1F"):
+                    return raw.decode('utf-16-le', errors='replace')
+                return raw.decode('latin-1', errors='replace')
+            except Exception:
+                return None
+    return None
+
+
+def _parse_manifest_msg(msg_path):
+    """Parse an Outlook 'Change in Paging' email (.msg) into the manifest structure.
+
+    These NYT emails are always Broadsheet and list sections as
+    <section>[\\t<name>]\\t<pages>[\\t<split>]\\t<color pages> per run.
+    Returns the same dict shape as _parse_manifest_pdf, plus an optional
+    'split' list (signature page counts) per section.
+
+    The plain-text body stream inside the .msg is often truncated to a short
+    preview, so the full body is read through Outlook COM when available and the
+    direct compound-file parser is used as a fallback.
+    """
+    body = _extract_msg_body_text_via_com(msg_path) or _extract_msg_body_text(msg_path)
+    return _parse_manifest_msg_body(body)
+
+
+def _parse_manifest_msg_body(body):
+    result = {"product": "NYT", "issue_date": "", "is_tab": False, "sections": []}
+    if not body:
+        return result
+    lines = [line.replace('\r', '') for line in body.split('\n')]
+    for line in lines:
+        match = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", line)
+        if match:
+            result["issue_date"] = match.group(1)
+            break
+
+    by_name = {}
+    for line in lines:
+        cells = [cell.strip() for cell in line.split('\t')]
+        pages_idx = None
+        for i, cell in enumerate(cells):
+            if cell.isdigit() and int(cell) > 0:
+                pages_idx = i
+                break
+        if pages_idx is None:
+            continue
+        pages = int(cells[pages_idx])
+        before = [cell for cell in cells[:pages_idx] if cell]
+        after = [cell for cell in cells[pages_idx + 1:] if cell]
+        if not before:
+            continue
+        if len(before) >= 2 and re.match(r'^[A-Z]$', before[0]):
+            letter = before[0]
+            name = before[0]
+        else:
+            letter = ""
+            name = before[-1]
+        split_counts = []
+        for cell in after:
+            if "/" in cell and "," not in cell and all(part.isdigit() and int(part) > 0 for part in cell.split("/")):
+                split_counts = [int(part) for part in cell.split("/")]
+                break
+        color_pages = []
+        for cell in after:
+            if "," in cell:
+                for token in cell.split(","):
+                    token = token.strip()
+                    if token.isdigit():
+                        color_pages.append(int(token))
+        color_pages = sorted(set(page for page in color_pages if 1 <= page <= pages))
+        split = split_counts if len(split_counts) >= 2 and sum(split_counts) == pages else None
+        by_name[letter or name] = {
+            "letter": letter,
+            "name": name,
+            "pages": pages,
+            "format": "Broadsheet",
+            "color_pages": color_pages,
+            "split": split,
+        }
+    result["sections"] = list(by_name.values())
+    return result
+
+
+def _extract_msg_body_text_via_com(msg_path):
+    """Read the full .msg body through Outlook COM, or None when unavailable."""
+    try:
+        import win32com.client
+    except Exception:
+        return None
+    try:
+        application = win32com.client.Dispatch('Outlook.Application')
+        namespace = application.GetNamespace('MAPI')
+        item = namespace.OpenSharedItem(os.path.abspath(msg_path))
+        try:
+            body = str(item.Body or "")
+        finally:
+            try:
+                item.Close(0)
+            except Exception:
+                pass
+        return body or None
+    except Exception:
+        return None
+
+
+def _outlook_selected_email_path():
+    """Save the email currently selected in Outlook as a temp .msg file.
+
+    Outlook message drags advertise FileGroupDescriptorW but do not deliver
+    their contents through tkdnd, so the drop payload is empty. In that case
+    the email being dragged is still selected in Outlook, so we ask Outlook
+    for it directly and save a .msg we can parse. Returns the temp path or None.
+    """
+    try:
+        import win32com.client
+    except Exception:
+        return None
+    try:
+        application = win32com.client.GetActiveObject('Outlook.Application')
+        explorer = application.ActiveExplorer()
+        if explorer is None:
+            return None
+        selection = explorer.Selection
+        if selection is None or selection.Count < 1:
+            return None
+        item = selection.Item(1)
+        if getattr(item, 'Class', 0) != 43:  # olMail
+            return None
+        subject = str(item.Subject or "")
+        safe = re.sub(r'[<>:"/\\|?*]', '_', subject).strip() or 'outlook_message'
+        temp_path = os.path.join(tempfile.gettempdir(), safe[:80] + '.msg')
+        item.SaveAs(temp_path, 3)  # olMSG
+        if os.path.isfile(temp_path):
+            return temp_path
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_manifest_drop_path(widget, event):
+    """Resolve a drop to a manifest file path (PDF/.msg/.eml) or None.
+
+    Handles normal file drops (paths already on disk) and Outlook email
+    drags (FileGroupDescriptorW with no extractable contents, which fall
+    back to reading the selected email straight out of Outlook).
+    """
+    paths = _manifest_paths_from_drop(widget, event.data)
+    if paths:
+        return paths[0]
+    source_types = [str(t) for t in (getattr(event, 'sourcetypes', None) or [])]
+    drop_type = str(getattr(event, 'type', '') or '')
+    looks_like_email = ('FileGroupDescriptorW' in source_types
+                        or 'FileGroupDescriptor' in source_types
+                        or drop_type in ('FileGroupDescriptorW', 'FileGroupDescriptor'))
+    if looks_like_email or not source_types:
+        return _outlook_selected_email_path()
+    return None
+
+
+def _extract_eml_body_text(eml_path):
+    """Extract the plain-text body of a .eml (RFC 822) message file.
+
+    Returns the decoded text/plain body (tabs preserved), or "" on any failure.
+    """
+    try:
+        with open(eml_path, "rb") as fh:
+            raw = fh.read()
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    try:
+        msg = email.message_from_bytes(raw)
+    except Exception:
+        return ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() != "text/plain":
+                continue
+            disposition = str(part.get("Content-Disposition") or "").lower()
+            if "attachment" in disposition:
+                continue
+            payload = part.get_payload(decode=True)
+            if payload:
+                charset = part.get_content_charset() or "utf-8"
+                return _decode_mime_text(payload, charset)
+    payload = msg.get_payload(decode=True)
+    if payload:
+        charset = msg.get_content_charset() or "utf-8"
+        return _decode_mime_text(payload, charset)
+    return ""
+
+
+def _decode_mime_text(payload, charset):
+    for candidate in (charset, "utf-8", "latin-1"):
+        try:
+            return payload.decode(candidate)
+        except Exception:
+            continue
+    return payload.decode("latin-1", errors="replace")
+
+
+def _parse_manifest_eml(eml_path):
+    """Parse an email saved as .eml into the manifest structure.
+
+    These NYT emails are plain-text (tab-separated runs), so the parsed body
+    uses the same table format as the Outlook .msg messages.
+    """
+    return _parse_manifest_msg_body(_extract_eml_body_text(eml_path))
+
+
+def _load_manifest_section(sections, make_section_fn, color_index, sec):
+    """Append one manifest section to the plan section list (handling splits).
+
+    Returns a list of (section_name, page) color keys for the color-pages screen.
+    """
+    color_keys = []
+    try:
+        pages = int(sec.get("pages") or 0)
+    except Exception:
+        pages = 0
+    if pages <= 0:
+        return color_keys
+    section_name = sec.get("letter") or sec.get("name") or ""
+    section_name = _apply_section_translation(section_name)
+    fmt = sec.get("format", "Broadsheet")
+    try:
+        color_pages = sorted(set(int(page) for page in (sec.get("color_pages") or []) if 1 <= int(page) <= pages))
+    except Exception:
+        color_pages = []
+    split_counts = []
+    for count in (sec.get("split") or []):
+        try:
+            parsed = int(count)
+        except Exception:
+            parsed = 0
+        if parsed > 0:
+            split_counts.append(parsed)
+
+    parent = make_section_fn(
+        name=section_name,
+        pages=str(pages),
+        start="1",
+        fmt=fmt,
+        page_numbers=list(range(1, pages + 1)),
+        color_index=color_index,
+    )
+    sections.append(parent)
+    if len(split_counts) >= 2 and sum(split_counts) == pages:
+        child_uids = []
+        cursor = 1
+        for i, count in enumerate(split_counts, start=1):
+            group = list(range(cursor, cursor + count))
+            child = make_section_fn(
+                name=f"{section_name}{i}",
+                pages=str(count),
+                start=str(cursor),
+                fmt=fmt,
+                page_numbers=group,
+                parent_id=parent.get("uid"),
+                color_index=color_index,
+            )
+            sections.append(child)
+            child_uids.append(child.get("uid"))
+            for page in color_pages:
+                if cursor <= page <= cursor + count - 1:
+                    color_keys.append((f"{section_name}{i}", page))
+            cursor += count
+        parent["is_split_parent"] = True
+        parent["split_children"] = child_uids
+    else:
+        for page in color_pages:
+            color_keys.append((section_name, page))
+    return color_keys
+
+
+def _parse_manifest_pdf(pdf_path):
+    """Parse a press manifest PDF and return structured data.
+
+    Returns dict with:
+      product (str), issue_date (str, mm/dd/yyyy),
+      is_tab (bool), sections (list of dicts):
+        letter (str), name (str), pages (int), format (str),
+        color_pages (list of int, 1-indexed within section)
+    """
+    import fitz
+    from collections import defaultdict
+
+    doc = fitz.open(pdf_path)
+    page = doc[0]
+
+    # Positioned text items: (text, x, y)
+    pos_items = []
+    for block in page.get_text('dict')['blocks']:
+        if 'lines' in block:
+            for line in block['lines']:
+                for span in line['spans']:
+                    text = span['text'].strip()
+                    if text:
+                        pos_items.append((text, span['origin'][0], round(span['origin'][1])))
+
+    all_text_flat = page.get_text()
+    doc.close()
+
+    lines = [l.strip() for l in all_text_flat.split("\n") if l.strip()]
+
+    # Detect Tab vs Broadsheet
+    title_lines = [l for l in lines[:3] if l]
+    is_tab = any("Tab" in l for l in title_lines)
+
+    result = {"product": "", "issue_date": "", "is_tab": is_tab, "sections": []}
+
+    if is_tab:
+        return _parse_tab_text(lines, result)
+
+    # --- Broadsheet parsing ---
+    # Find date
+    for l in lines:
+        m = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", l)
+        if m:
+            result["issue_date"] = m.group(1)
+            break
+
+    # Find product
+    exclude = {"DAY", "DATE", "TOTAL NO. OF PAGES", "NUMBER OF SECTIONS", "PRODUCT",
+               "COLOR", "SECTION", "NO. OF PAGES", "NO. OF COLOR ADS", "NO. OF EDIT COLOR",
+               "COLOR SAMPLES", "ADVERTISING", "EDITORIAL", "NOTES:", "See", "Attached",
+               "Press Report", "SECTION NO. OF PAGES"}
+    known_days = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
+
+    product_candidates = []
+    for l in lines:
+        if not l or len(l) < 8:
+            continue
+        if l in exclude or l in known_days:
+            continue
+        if l == result["issue_date"] or l.isdigit():
+            continue
+        if l.startswith("Press Report"):
+            continue
+        if "_" in l:
+            continue
+        if re.search(r"\d{4}$", l):
+            continue
+        product_candidates.append(l)
+
+    dash_candidates = [l for l in product_candidates if " - " in l]
+    if dash_candidates:
+        result["product"] = max(dash_candidates, key=len)
+    elif product_candidates:
+        result["product"] = max(product_candidates, key=len)
+
+    # --- Position-aware colour-page parsing ---
+    # Build rows (y → [(text, x)]) from positioned items
+    rows = defaultdict(list)
+    for text, x, y in pos_items:
+        rows[y].append((text, round(x)))
+    sorted_ys = sorted(rows.keys())
+
+    # Find all page-number columns by clustering digit X values.
+    digit_x_counts = defaultdict(int)
+    for text, x, y in pos_items:
+        if text.isdigit() and 1 <= int(text) <= 200:
+            digit_x_counts[round(x)] += 1
+    # Only consider X values with multiple digit occurrences
+    # (filters out one-off header values like section page counts)
+    digit_xs = sorted(x for x, c in digit_x_counts.items() if c >= 2)
+    # Cluster X values within 20px of each other -> one column
+    columns = []
+    if digit_xs:
+        cluster = [digit_xs[0]]
+        for x in digit_xs[1:]:
+            if x - cluster[-1] <= 20:
+                cluster.append(x)
+            else:
+                columns.append(round(sum(cluster) / len(cluster)))
+                cluster = [x]
+        columns.append(round(sum(cluster) / len(cluster)))
+
+    # Build column boundaries (midpoints between column centers)
+    col_boundaries = {}
+    for i, col_x in enumerate(columns):
+        lo = float('-inf') if i == 0 else (columns[i-1] + col_x) / 2
+        hi = float('inf') if i == len(columns)-1 else (col_x + columns[i+1]) / 2
+        col_boundaries[col_x] = (lo, hi)
+
+    def _col(x):
+        for col_x, (lo, hi) in col_boundaries.items():
+            if lo <= x < hi:
+                return col_x
+        return None
+
+    # Build page_at_y for each column
+    def _build_page_at_y(target_x):
+        result = {}
+        for text, x, y in pos_items:
+            if round(x) == target_x and text.isdigit():
+                n = int(text)
+                if 1 <= n <= 200:
+                    result[y] = n
+        return result
+
+    page_at_y_by_col = {col_x: _build_page_at_y(col_x) for col_x in columns}
+
+    # Per-column section state
+    col_cur = {col_x: None for col_x in columns}
+    col_name_found = {col_x: False for col_x in columns}
+    sections_by_col = {col_x: [] for col_x in columns}
+
+    def _flush(col_x):
+        if col_cur[col_x] is not None:
+            sections_by_col[col_x].append(col_cur[col_x])
+        col_cur[col_x] = None
+        col_name_found[col_x] = False
+
+    def _start(letter, col_x):
+        _flush(col_x)
+        col_cur[col_x] = {"letter": letter, "pages": 0, "name": "", "full_ys": []}
+        col_name_found[col_x] = False
+
+    for y in sorted_ys:
+        row_texts = rows[y]
+        any_sep = False
+        for col_x in columns:
+            lo, hi = col_boundaries[col_x]
+            if any("\\" in t for t, x in row_texts if lo <= x < hi):
+                _flush(col_x)
+                any_sep = True
+        if any_sep:
+            continue
+
+        for text, x in row_texts:
+            col_x = _col(x)
+            if col_x is None:
+                continue
+            cur = col_cur[col_x]
+            if re.match(r"^[A-Z]$", text):
+                _start(text, col_x)
+            elif cur is not None and cur["pages"] == 0 and text.isdigit():
+                cur["pages"] = int(text)
+            elif cur is not None and cur["pages"] > 0 and not col_name_found[col_x] and not text.isdigit():
+                cur["name"] = text
+                col_name_found[col_x] = True
+            elif cur is not None and text == "Full":
+                cur["full_ys"].append(y)
+
+    for col_x in columns:
+        _flush(col_x)
+
+    for col_x in columns:
+        page_at_y = page_at_y_by_col[col_x]
+        for sec in sections_by_col[col_x]:
+            pages = sec["pages"]
+            color_pages = sorted(set(
+                pn for y in sec["full_ys"]
+                if (pn := page_at_y.get(y)) and 1 <= pn <= pages
+            ))
+            result["sections"].append({
+                "letter": sec["letter"],
+                "name": sec["name"] or sec["letter"],
+                "pages": pages,
+                "format": "Broadsheet",
+                "color_pages": color_pages,
+            })
+
+    return result
+
+
+def _parse_tab_text(lines, result):
+    """Parse a Tab-format manifest from flat text lines."""
+    for l in lines:
+        if l.startswith("Product:"):
+            result["product"] = l.replace("Product:", "").strip()
+            break
+
+    for l in lines:
+        m = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", l)
+        if m:
+            result["issue_date"] = m.group(1)
+            break
+
+    section_letter = ""
+    page_count = 0
+    # Find date index, then section letter + page count come after
+    date_idx = -1
+    for i, l in enumerate(lines):
+        if re.match(r"\d{2}/\d{2}/\d{4}", l):
+            date_idx = i
+            break
+    if date_idx >= 0:
+        for i in range(date_idx + 1, min(date_idx + 10, len(lines))):
+            l = lines[i]
+            if not section_letter and re.match(r"^[A-Z]$", l):
+                section_letter = l
+                continue
+            if section_letter and l.isdigit() and not page_count:
+                page_count = int(l)
+                break
+
+    # Fallback: scan for single letter followed by digit
+    if not section_letter or not page_count:
+        for i, l in enumerate(lines):
+            if re.match(r"^[A-Z]$", l) and i + 1 < len(lines) and lines[i + 1].isdigit():
+                section_letter = l
+                page_count = int(lines[i + 1])
+                break
+
+    # Parse page pairs: "+ N Full" or "+ N"
+    page_pairs = []
+    page_ref = 1
+    for l in lines:
+        if l.startswith("+"):
+            parts = l.replace("+", "").strip().split()
+            if parts:
+                try:
+                    paired_num = int(parts[0])
+                    has_full = "Full" in l
+                    page_pairs.append((page_ref, paired_num, has_full))
+                except ValueError:
+                    pass
+            page_ref += 1
+
+    color_pages = set()
+    for p1, p2, is_color in page_pairs:
+        if is_color:
+            if 1 <= p1 <= page_count:
+                color_pages.add(p1)
+            if 1 <= p2 <= page_count:
+                color_pages.add(p2)
+
+    if section_letter and page_count > 0:
+        result["sections"].append({
+            "letter": section_letter,
+            "name": section_letter,
+            "pages": page_count,
+            "format": "Tab",
+            "color_pages": sorted(color_pages),
+        })
+
+    return result
+
+
+def _build_translation_tab(owner, load_fn, save_fn):
+    """Build one translation-table tab (incoming -> output) and return its frame."""
+    translations = load_fn()
+    tab = ttk.Frame(owner)
+
+    tree_frame = ttk.Frame(tab)
+    tree_frame.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+    columns = ("incoming", "output")
+    tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
+    tree.heading("incoming", text="Incoming Name")
+    tree.heading("output", text="Output Name")
+    tree.column("incoming", width=220, minwidth=140)
+    tree.column("output", width=220, minwidth=140)
+    scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=scrollbar.set)
+    tree.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    btn_frame = ttk.Frame(tab)
+    btn_frame.pack(fill="x", padx=8, pady=(4, 8))
+
+    def _save_and_refresh():
+        save_fn(translations)
+        _populate()
+
+    def _populate():
+        tree.delete(*tree.get_children())
+        for entry in translations:
+            tree.insert("", "end", values=(entry.get("incoming", ""), entry.get("output", "")))
+
+    def _add():
+        add_dlg = tk.Toplevel(owner)
+        add_dlg.title("Add Translation")
+        add_dlg.transient(owner)
+        add_dlg.grab_set()
+        add_dlg.resizable(False, False)
+        ttk.Label(add_dlg, text="Incoming Name:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 2))
+        incoming_var = tk.StringVar()
+        ttk.Entry(add_dlg, textvariable=incoming_var, width=40).grid(row=0, column=1, padx=(4, 8), pady=(8, 2))
+        ttk.Label(add_dlg, text="Output Name:").grid(row=1, column=0, sticky="w", padx=8, pady=(2, 8))
+        output_var = tk.StringVar()
+        ttk.Entry(add_dlg, textvariable=output_var, width=40).grid(row=1, column=1, padx=(4, 8), pady=(2, 8))
+        btn_frame = ttk.Frame(add_dlg)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=(0, 8))
+        def _confirm():
+            incoming = incoming_var.get().strip()
+            if incoming:
+                translations.append({"incoming": incoming, "output": output_var.get().strip()})
+                _save_and_refresh()
+            add_dlg.destroy()
+        ttk.Button(btn_frame, text="Add", command=_confirm, width=10).pack(side="left", padx=(0, 6))
+        ttk.Button(btn_frame, text="Cancel", command=add_dlg.destroy, width=10).pack(side="left")
+        add_dlg.wait_window()
+
+    def _edit():
+        selected = tree.selection()
+        if not selected:
+            return
+        idx = tree.index(selected[0])
+        entry = translations[idx]
+        edit_dlg = tk.Toplevel(owner)
+        edit_dlg.title("Edit Translation")
+        edit_dlg.transient(owner)
+        edit_dlg.grab_set()
+        edit_dlg.resizable(False, False)
+        ttk.Label(edit_dlg, text="Incoming Name:").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 2))
+        incoming_var = tk.StringVar(value=entry.get("incoming", ""))
+        ttk.Entry(edit_dlg, textvariable=incoming_var, width=40).grid(row=0, column=1, padx=(4, 8), pady=(8, 2))
+        ttk.Label(edit_dlg, text="Output Name:").grid(row=1, column=0, sticky="w", padx=8, pady=(2, 8))
+        output_var = tk.StringVar(value=entry.get("output", ""))
+        ttk.Entry(edit_dlg, textvariable=output_var, width=40).grid(row=1, column=1, padx=(4, 8), pady=(2, 8))
+        btn_frame = ttk.Frame(edit_dlg)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=(0, 8))
+        def _confirm():
+            incoming = incoming_var.get().strip()
+            if incoming:
+                translations[idx] = {"incoming": incoming, "output": output_var.get().strip()}
+                _save_and_refresh()
+            edit_dlg.destroy()
+        ttk.Button(btn_frame, text="Save", command=_confirm, width=10).pack(side="left", padx=(0, 6))
+        ttk.Button(btn_frame, text="Cancel", command=edit_dlg.destroy, width=10).pack(side="left")
+        edit_dlg.wait_window()
+
+    def _delete():
+        selected = tree.selection()
+        if not selected:
+            return
+        idx = tree.index(selected[0])
+        entry = translations[idx]
+        if messagebox.askyesno("Delete Translation", f'Delete translation for "{entry.get("incoming", "")}"?', parent=owner):
+            del translations[idx]
+            _save_and_refresh()
+
+    ttk.Button(btn_frame, text="Add", command=_add, width=12).pack(side="left", padx=(0, 6))
+    ttk.Button(btn_frame, text="Edit", command=_edit, width=12).pack(side="left", padx=(0, 6))
+    ttk.Button(btn_frame, text="Delete", command=_delete, width=12).pack(side="left", padx=(0, 6))
+    _populate()
+    return tab
+
+
+def _show_translation_table_dialog(parent):
+    dlg = tk.Toplevel(parent)
+    dlg.title("Translation Tables")
+    dlg.transient(parent)
+    dlg.grab_set()
+    dlg.geometry("560x380")
+    dlg.minsize(460, 300)
+    notebook = ttk.Notebook(dlg)
+    notebook.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+    notebook.add(
+        _build_translation_tab(dlg, _load_product_translations, _save_product_translations),
+        text="Product Names",
+    )
+    notebook.add(
+        _build_translation_tab(dlg, _load_section_translations, _save_section_translations),
+        text="Section Names",
+    )
+    btn_frame = ttk.Frame(dlg)
+    btn_frame.pack(fill="x", padx=8, pady=(4, 8))
+    ttk.Button(btn_frame, text="Close", command=dlg.destroy, width=12).pack(side="right")
+    dlg.wait_window()
+
+
+def _classify_manifest_path(path):
+    """Return the manifest kind ('pdf', 'msg' or 'eml') for a dropped path.
+
+    The extension is used first, then the file magic is inspected so temp files
+    produced by tkdnd/Outlook are recognised even with an unexpected name.
+    """
+    lower = str(path or "").lower()
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+    except Exception:
+        head = b""
+    if lower.endswith(".pdf") or head.startswith(b"%PDF"):
+        return "pdf"
+    if lower.endswith(".msg") or head == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return "msg"
+    if lower.endswith(".eml"):
+        return "eml"
+    if head.startswith(b"From ") or head.startswith(b"Subject:"):
+        return "eml"
+    return None
+
+
+def _manifest_paths_from_drop(widget, data):
+    """Turn a tkdnd drop payload into a list of existing file paths."""
+    paths = []
+    try:
+        items = widget.tk.splitlist(data)
+    except Exception:
+        items = [data]
+    for item in items:
+        item = str(item or "").strip()
+        if not item:
+            continue
+        if item.startswith("{") and item.endswith("}"):
+            item = item[1:-1]
+        if os.path.isfile(item):
+            paths.append(item)
+    if not paths:
+        whole = str(data or "").strip()
+        if whole.startswith("{") and whole.endswith("}"):
+            whole = whole[1:-1]
+        if whole and os.path.isfile(whole):
+            paths.append(whole)
+    return paths
+
+
+def _report_unusable_manifest_drop(widget, event):
+    """Show what the drop delivered when it was not a recognised manifest file."""
+    data = str(getattr(event, "data", "") or "").strip()
+    drop_type = str(getattr(event, "type", "") or "").strip()
+    source_types = getattr(event, "sourcetypes", None) or []
+    details = data[:600] if data else "(empty)"
+    messagebox.showinfo(
+        "Manifest Drop",
+        "This drop was not recognised as a manifest (PDF, .msg or .eml email).\n\n"
+        f"Drop type: {drop_type or '(none)'}\n"
+        f"Source types: {', '.join(source_types) or '(none)'}\n\n"
+        f"Received:\n{details}",
+        parent=widget,
+    )
+
+
+def _load_manifest_from_path_in_dialog(dialog, path):
+    """Worker: parse a manifest PDF, Outlook .msg or .eml email and fill the wizard."""
+    manifest = None
+    try:
+        kind = _classify_manifest_path(path)
+        if kind == "msg":
+            manifest = _parse_manifest_msg(path)
+        elif kind == "eml":
+            manifest = _parse_manifest_eml(path)
+        elif kind == "pdf":
+            manifest = _parse_manifest_pdf(path)
+    except Exception as exc:
+        try:
+            messagebox.showerror("Load Manifest", f"Could not read the manifest file.\n\n{exc}", parent=dialog)
+        except Exception:
+            pass
+        return
+    if manifest is None:
+        try:
+            messagebox.showerror("Load Manifest", "This drop was not recognised as a manifest (PDF, .msg or .eml email).", parent=dialog)
+        except Exception:
+            pass
+        return
+    if not manifest.get("sections"):
+        try:
+            messagebox.showwarning("Load Manifest", "No sections could be identified in the manifest file.", parent=dialog)
+        except Exception:
+            pass
+        return
+    try:
+        issue_date_var = getattr(dialog, "_plan_issue_date_var", None)
+        publication_var = getattr(dialog, "_plan_publication_var", None)
+        sections = getattr(dialog, "_plan_sections", None)
+        show_page_one_fn = getattr(dialog, "_plan_show_page_one", None)
+        make_section_fn = getattr(dialog, "_plan_make_section", None)
+    except Exception:
+        return
+    if issue_date_var is not None and manifest.get("issue_date"):
+        issue_date_var.set(manifest["issue_date"])
+    if publication_var is not None and manifest.get("product"):
+        publication_var.set(_apply_product_translation(manifest["product"]))
+    if sections is not None and make_section_fn is not None:
+        sections.clear()
+        dialog._manifest_color_pages = {}
+        for idx, sec in enumerate(manifest["sections"]):
+            for key in _load_manifest_section(sections, make_section_fn, idx, sec):
+                dialog._manifest_color_pages[key] = True
+    else:
+        dialog._manifest_color_pages = {}
+    if show_page_one_fn is not None:
+        show_page_one_fn()
+
+
+def _patch_tkdnd_file_mapping(tk):
+    """Inject missing Outlook file-drop OLE mappings into tkdnd (see build_plan_wizard)."""
+    try:
+        tk.eval('dict set ::tkdnd::generic::_platform2tkdnd FileGroupDescriptorW DND_Files')
+        tk.eval('dict set ::tkdnd::generic::_platform2tkdnd FileGroupDescriptor  DND_Files')
+        tk.eval('dict lappend ::tkdnd::generic::_tkdnd2platform DND_Files FileGroupDescriptorW')
+        tk.eval('dict lappend ::tkdnd::generic::_tkdnd2platform DND_Files FileGroupDescriptor')
+    except Exception:
+        pass
+
+
 def build_plan_wizard(parent):
     """Open the first two pages of the layout planning wizard."""
     dialog = tk.Toplevel(parent)
@@ -11179,6 +11817,21 @@ def build_plan_wizard(parent):
         dialog.transient(parent)
     except Exception:
         pass
+
+    # Register for drag-and-drop (tkdnd via tkinterdnd2)
+    # tkdnd (as of 2.10.1) has FileGroupDescriptorW/W mapping commented out in
+    # tkdnd_windows.tcl, so we inject the missing entries so Outlook attachment
+    # drops (which use FileGroupDescriptorW + FileContents OLE formats) are
+    # recognised and extracted to temp files by the DLL.
+    _patch_tkdnd_file_mapping(dialog)
+    dialog.drop_target_register(tkdnd.DND_FILES, tkdnd.DND_TEXT)
+    def _plan_on_drop(event):
+        path = _resolve_manifest_drop_path(dialog, event)
+        if path:
+            _load_manifest_from_path_in_dialog(dialog, path)
+            return
+        _report_unusable_manifest_drop(dialog, event)
+    dialog.dnd_bind("<<Drop>>", _plan_on_drop)
 
     format_multiples = {"Broadsheet": 2, "Tab": 4, "8 up": 8}
     format_values = list(format_multiples.keys())
@@ -11925,6 +12578,15 @@ def build_plan_wizard(parent):
         finally:
             plan_validation_state["active"] = False
 
+    def _load_manifest():
+        manifest_path = filedialog.askopenfilename(
+            parent=dialog,
+            title="Select Manifest",
+            filetypes=[("Manifest files", "*.pdf *.msg"), ("PDF files", "*.pdf"), ("Outlook messages", "*.msg"), ("All files", "*.*")],
+        )
+        if manifest_path:
+            _load_manifest_from_path_in_dialog(dialog, manifest_path)
+
     def show_page_one():
         header_var.set("Plan Layout - Sections")
         _clear_frame(body)
@@ -11936,15 +12598,46 @@ def build_plan_wizard(parent):
         top.grid(row=0, column=0, sticky="ew")
         top.columnconfigure(1, weight=1)
         top.columnconfigure(3, weight=1)
-        ttk.Label(top, text="Issue Date:", font=(None, 10, "bold")).grid(row=0, column=0, sticky="w")
-        issue_entry = ttk.Entry(top, textvariable=issue_date_var, width=18)
+
+        # Manifest load button row
+        manifest_frame = ttk.Frame(top)
+        manifest_frame.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 8))
+        manifest_frame.columnconfigure(0, weight=1)
+        load_btn = ttk.Button(
+            manifest_frame, text="Load Manifest\u2026",
+            command=_load_manifest, width=20,
+        )
+        load_btn.pack(side="left", padx=(0, 12))
+        drop_label = tk.Label(
+            manifest_frame,
+            text="or drag & drop a manifest PDF or email here",
+            foreground="#888888", font=(None, 9, "italic"),
+            cursor="hand2",
+            bg="#f7f7f7",
+        )
+        drop_label.pack(side="left", fill="x", expand=True)
+        drop_label.bind("<Button-1>", lambda _e: _load_manifest())
+        if is_admin():
+            ttk.Button(
+                manifest_frame, text="Translation Table\u2026",
+                command=lambda: _show_translation_table_dialog(dialog),
+                width=18,
+            ).pack(side="right", padx=(12, 0))
+
+        # Issue Date and Publication row
+        entry_row = ttk.Frame(top)
+        entry_row.grid(row=1, column=0, columnspan=4, sticky="ew")
+        entry_row.columnconfigure(1, weight=1)
+        entry_row.columnconfigure(3, weight=1)
+        ttk.Label(entry_row, text="Issue Date:", font=(None, 10, "bold")).grid(row=0, column=0, sticky="w")
+        issue_entry = ttk.Entry(entry_row, textvariable=issue_date_var, width=18)
         issue_entry.grid(row=0, column=1, sticky="ew", padx=(8, 24))
         _bind_issue_date_formatting(issue_entry)
         issue_entry.bind("<Button-1>", lambda _event, w=issue_entry: _open_plan_issue_date_picker(w), add="+")
         _bind_page_one_validation_trace(issue_date_var)
         _bind_page_one_validation_trace(publication_var)
-        ttk.Label(top, text="Publication:", font=(None, 10, "bold")).grid(row=0, column=2, sticky="w")
-        ttk.Entry(top, textvariable=publication_var, width=34).grid(row=0, column=3, sticky="ew", padx=(8, 0))
+        ttk.Label(entry_row, text="Publication:", font=(None, 10, "bold")).grid(row=0, column=2, sticky="w")
+        ttk.Entry(entry_row, textvariable=publication_var, width=34).grid(row=0, column=3, sticky="ew", padx=(8, 0))
 
         canvas = tk.Canvas(body, highlightthickness=0, bd=0, background="#f7f7f7")
         canvas.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
@@ -12484,6 +13177,42 @@ def build_plan_wizard(parent):
                 pass
         return ", ".join(selected) if selected else "No sections assigned"
 
+    def _generate_run_name(run, assignable_sections, plan):
+        selected = []
+        for group in (plan.get("section_groups") or []):
+            children = group.get("sections") or []
+            if group.get("is_split"):
+                checked_children = []
+                for child in children:
+                    child_name = child.get("name") or ""
+                    var = run.get("section_vars", {}).get(child_name)
+                    if var is not None and var.get():
+                        checked_children.append(child)
+                if not checked_children:
+                    continue
+                if len(checked_children) == len(children):
+                    selected.append(group.get("name", ""))
+                else:
+                    for child in checked_children:
+                        child_name = child.get("name", "")
+                        page_numbers = child.get("page_numbers", [])
+                        page_text = _format_page_ranges(page_numbers)
+                        selected.append(f"{child_name} {page_text}" if page_text else child_name)
+            else:
+                section = children[0] if children else None
+                if not section:
+                    continue
+                name = section.get("name") or ""
+                var = run.get("section_vars", {}).get(name)
+                if var is not None and var.get():
+                    selected.append(group.get("name", name))
+        if not selected:
+            return "(empty)"
+        return " & ".join(selected)
+
+    def _update_run_name(run, assignable_sections, plan):
+        run["name"].set(_generate_run_name(run, assignable_sections, plan))
+
     def _default_press_runs_for_plan(plan):
         run = {
             "name": tk.StringVar(value="Run 1"),
@@ -12491,7 +13220,8 @@ def build_plan_wizard(parent):
             "section_vars": {},
         }
         for section in _plan_assignable_sections(plan):
-            run["section_vars"][section.get("name") or ""] = tk.BooleanVar(value=True)
+            name = section.get("name") or ""
+            run["section_vars"][name] = tk.BooleanVar(value=True)
         return [run]
 
     def show_page_three(plan, press_runs=None):
@@ -12518,7 +13248,8 @@ def build_plan_wizard(parent):
             idx = len(press_runs) + 1
             run = {"name": tk.StringVar(value=f"Run {idx}"), "press_var": tk.StringVar(value="Press 1"), "section_vars": {}}
             for section in assignable_sections:
-                run["section_vars"][section.get("name") or ""] = tk.BooleanVar(value=False)
+                name = section.get("name") or ""
+                run["section_vars"][name] = tk.BooleanVar(value=False)
             press_runs.append(run)
             show_page_three(plan, press_runs)
 
@@ -12536,9 +13267,10 @@ def build_plan_wizard(parent):
         for run_index, run in enumerate(press_runs, start=1):
             box = ttk.LabelFrame(frame, text=f"Press Run {run_index}", padding=10)
             box.grid(row=row, column=0, sticky="ew", pady=(0, 12))
-            box.columnconfigure(3, weight=1)
+            box.columnconfigure(1, weight=1)
             ttk.Label(box, text="Name:").grid(row=0, column=0, sticky="w")
-            ttk.Entry(box, textvariable=run["name"], width=18).grid(row=0, column=1, sticky="w", padx=(6, 18))
+            name_entry = ttk.Entry(box, textvariable=run["name"], width=18, state="readonly")
+            name_entry.grid(row=0, column=1, sticky="w", padx=(6, 18))
             ttk.Label(box, text="Press:").grid(row=0, column=2, sticky="w")
             ttk.Combobox(box, textvariable=run["press_var"], values=("Press 1", "Press 2"), state="readonly", width=10).grid(row=0, column=3, sticky="w", padx=(6, 18))
             ttk.Button(box, text="x Delete", command=lambda r=run: delete_run(r), width=10).grid(row=0, column=4, sticky="e")
@@ -12547,9 +13279,23 @@ def build_plan_wizard(parent):
                 name = section.get("name") or ""
                 if name not in run["section_vars"]:
                     run["section_vars"][name] = tk.BooleanVar(value=False)
-                label = f"{name} - {section.get('format')} - {section.get('pages')} pgs ({_format_page_ranges(section.get('page_numbers', []))})"
+                def _make_section_trace(r, section_name, run_plan=plan):
+                    section_var = r["section_vars"].get(section_name)
+                    if section_var:
+                        def _on_change(*_args, _r=r, _as=assignable_sections, _plan=run_plan):
+                            _update_run_name(_r, _as, _plan)
+                        try:
+                            section_var.trace_add("write", _on_change)
+                        except Exception:
+                            pass
+                _make_section_trace(run, name)
+                page_numbers = section.get("page_numbers", [])
+                page_range_text = _format_page_ranges(page_numbers)
+                label = f"{name} - {section.get('format')} - {section.get('pages')} pgs  ({page_range_text})" if page_range_text else f"{name} - {section.get('format')} - {section.get('pages')} pgs"
                 ttk.Checkbutton(box, text=label, variable=run["section_vars"][name]).grid(row=2 + idx, column=0, columnspan=5, sticky="w", pady=1)
             row += 1
+        for r in press_runs:
+            _update_run_name(r, assignable_sections, plan)
         ttk.Button(footer_left, text="+ Add Press Run", command=add_run, width=18).pack(side="left", padx=(0, 8))
         ttk.Button(footer_right, text="Cancel", command=dialog.destroy, width=12).pack(side="right")
         ttk.Button(footer_right, text="Next", command=lambda p=plan, r=press_runs: show_page_four(p, r), width=12).pack(side="right", padx=(0, 8))
@@ -12757,8 +13503,15 @@ def build_plan_wizard(parent):
         body.columnconfigure(0, weight=1)
         assignable_sections = _plan_assignable_sections(plan)
         run_configs = []
-        frame = ttk.Frame(body, padding=12)
-        frame.grid(row=0, column=0, sticky="nsew")
+        canvas = tk.Canvas(body, highlightthickness=0, bd=0, background="#f7f7f7")
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        frame = tk.Frame(canvas, background="#f7f7f7", bd=0, highlightthickness=0, padx=12, pady=12)
+        win_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win_id, width=e.width))
         frame.columnconfigure(0, weight=1)
         ttk.Label(frame, text="Pick a layout template for each press run. If no matching template exists, (NEW) will be used.", font=(None, 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
         template_preview_state = {"popup": None, "photo": None, "after_id": None}
@@ -12890,6 +13643,9 @@ def build_plan_wizard(parent):
             _bind_template_dropdown_preview(template_combo, template_var, path_by_name)
             row += 1
 
+        _bind_mousewheel_to_canvas(canvas, canvas)
+        _bind_mousewheel_to_canvas(frame, canvas)
+
         def finish():
             if not run_configs:
                 messagebox.showerror("Plan Layout", "Assign at least one section to a press run.", parent=dialog)
@@ -12917,13 +13673,16 @@ def build_plan_wizard(parent):
                     "press": press,
                     "format": fmt,
                     "issue_date": plan.get("issue_date") or "",
-                    "product": plan.get("publication") or "",
+                    "product": ((plan.get("publication") or "") + " " + _generate_run_name(run, assignable_sections, plan)).strip(),
                     "section_count": len(selected_sections),
                     "section_pages": section_pages,
                     "section_names": section_names,
                     "saved_at": datetime.now().isoformat(timespec="seconds"),
                     "last_changed_by": get_windows_username(),
                 })
+                desired_starter = _desired_starter_format_for_publication(data.get("product") or "")
+                if desired_starter:
+                    data["starter_format"] = desired_starter
                 color_cells, color_ok = _template_color_cells_for_run(color_template_data, press, fmt, selected_sections)
                 data = _apply_planned_pages_to_template_units(data, color_template_data, selected_sections)
                 data["color_cells"] = color_cells if color_ok else []
@@ -12957,7 +13716,21 @@ def build_plan_wizard(parent):
     def show_page_two_from_validation():
         plan = _validate_plan_inputs()
         if plan is not None:
+            # Apply manifest color state to page_color_state
+            manifest_colors = getattr(dialog, "_manifest_color_pages", None)
+            if manifest_colors:
+                for key, value in manifest_colors.items():
+                    section_name, page = key
+                    page_color_state[(section_name, (int(page),))] = bool(value)
+                dialog._manifest_color_pages = None
             show_page_two(plan)
+
+    # Store references on dialog for drag-and-drop / load manifest
+    dialog._plan_issue_date_var = issue_date_var
+    dialog._plan_publication_var = publication_var
+    dialog._plan_sections = sections
+    dialog._plan_make_section = _make_section
+    dialog._plan_show_page_one = show_page_one
 
     show_page_one()
     return dialog
@@ -12966,9 +13739,10 @@ def build_main_launcher():
     ensure_dir(LAYOUTS_DIR)
     ensure_dir(TEMPLATE_DIR)
     ensure_dir(REGULAR_DIR)
-    root = tk.Tk()
+    root = tkdnd.TkinterDnD.Tk()
     set_window_icon(root)
     register_single_instance_window(root)
+    _patch_tkdnd_file_mapping(root)
     root.title("Press Layouts")
     root.geometry("1100x760")
     root.minsize(980, 680)
@@ -12994,6 +13768,21 @@ def build_main_launcher():
     launcher_username = get_windows_username()
     status_frame = ttk.Frame(frame)
     status_frame.grid(row=0, column=0, sticky="e")
+
+    def go_to_tomorrow():
+        tomorrow_disp = fmt_issue_for_display(tomorrow_issue_date_mmddyyyy())
+        target_group_iid = f"__issue_group__::{tomorrow_disp}"
+        for child in tree.get_children(""):
+            tree.item(child, open=False)
+        if target_group_iid in group_by_iid:
+            tree.item(target_group_iid, open=True)
+            children = tree.get_children(target_group_iid)
+            if children:
+                first_child = children[0]
+                tree.selection_set(first_child)
+                tree.focus(first_child)
+                tree.see(first_child)
+
     version_label_var = tk.StringVar(value=_format_version_label(running_version))
     version_label = ttk.Label(status_frame, textvariable=version_label_var, style="LauncherVersion.TLabel", font=(None, 10))
     version_label.pack(side="right")
@@ -13043,6 +13832,9 @@ def build_main_launcher():
     pages_filter_var = tk.StringVar(value="All")
     pages_filter_combo = ttk.Combobox(filter_frame, textvariable=pages_filter_var, values=["All"], state="readonly", width=14)
     pages_filter_combo.grid(row=0, column=7, sticky="w", padx=(8, 0))
+    filter_frame.columnconfigure(8, weight=1)
+    go_tomorrow_btn = ttk.Button(filter_frame, text="Go to Tomorrow", command=go_to_tomorrow)
+    go_tomorrow_btn.grid(row=0, column=9, sticky="e", padx=(12, 0))
 
     columns = ("press", "format", "pages", "color_pages", "plates", "changed_by", "saved")
     tree = ttk.Treeview(frame, columns=columns, show="tree headings", selectmode="browse")
@@ -13115,7 +13907,8 @@ def build_main_launcher():
                 return
             if _current_preview_path() != _path:
                 return
-            if preview_state.get("path") == _path and preview_state.get("photo") is not None:
+            current_sig = _preview_file_signature_for_json(_path)
+            if preview_state.get("path") == _path and preview_state.get("photo") is not None and preview_state.get("preview_file_sig") == current_sig:
                 return
             close_preview()
             image, preview_title = open_json_preview(root, _path, template_mode=False)
@@ -13124,6 +13917,7 @@ def build_main_launcher():
                 return
             _set_preview_panel(preview_label, preview_state, image)
             preview_state["path"] = _path
+            preview_state["preview_file_sig"] = current_sig
         preview_state["after_id"] = root.after_idle(_do_show)
     def _on_launcher_focus_in(event=None):
         show_preview(_current_preview_path())
@@ -13362,6 +14156,14 @@ def build_main_launcher():
         except Exception:
             pass
         refresh_job["id"] = root.after(auto_refresh_ms, auto_refresh_tick)
+    def _check_preview_freshness():
+        path = preview_state.get("path")
+        if not path:
+            return
+        current_sig = _preview_file_signature_for_json(path)
+        if preview_state.get("preview_file_sig") != current_sig:
+            preview_state["photo"] = None
+            show_preview(path)
     def auto_refresh_tick():
         refresh_job["id"] = None
         try:
@@ -13369,6 +14171,7 @@ def build_main_launcher():
         finally:
             if root.winfo_exists():
                 schedule_refresh()
+                _check_preview_freshness()
     def sort_by(col):
         if sort_state["col"] == col:
             sort_state["desc"] = not sort_state["desc"]
@@ -13415,6 +14218,13 @@ def build_main_launcher():
     def new_layout():
         close_preview()
         build_new_layout_launcher(root)
+
+    def open_plan(drop_path=None):
+        close_preview()
+        dialog = build_plan_wizard(root)
+        if drop_path:
+            _load_manifest_from_path_in_dialog(dialog, drop_path)
+        return dialog
 
     def regenerate_selected_preview():
         path = selected_path()
@@ -14295,6 +15105,16 @@ def build_main_launcher():
     left_btns.grid(row=0, column=0, sticky="w")
     right_btns = ttk.Frame(btns)
     right_btns.grid(row=0, column=1, sticky="e")
+    plan_button = ttk.Button(left_btns, text="Plan", command=open_plan, width=12)
+    plan_button.pack(side="left", padx=(0, 8))
+    def _on_plan_drop(event):
+        path = _resolve_manifest_drop_path(root, event)
+        if path:
+            open_plan(drop_path=path)
+            return
+        _report_unusable_manifest_drop(root, event)
+    plan_button.drop_target_register(tkdnd.DND_FILES)
+    plan_button.dnd_bind("<<Drop>>", _on_plan_drop)
     ttk.Button(left_btns, text="New", command=new_layout, width=12).pack(side="left", padx=(0, 8))
     ttk.Button(left_btns, text="Open", command=open_selected, width=12).pack(side="left", padx=(0, 8))
     ttk.Button(left_btns, text="Clone", command=clone_selected, width=12).pack(side="left", padx=(0, 8))
@@ -14414,7 +15234,6 @@ _single_file_sys.modules.setdefault('press_layout_ui', _single_file_sys.modules[
 
 import io
 import socket
-import threading
 from contextlib import contextmanager
 from tkinter import simpledialog
 
@@ -14632,6 +15451,18 @@ def _db_bootstrap():
                     PRIMARY KEY (record_type, record_id)
                 )''')
                 cur.execute(f'CREATE INDEX IF NOT EXISTS record_locks_heartbeat_idx ON {schema}.record_locks (heartbeat_at)')
+                cur.execute(f'''CREATE TABLE IF NOT EXISTS {schema}.product_translations (
+                    id BIGSERIAL PRIMARY KEY,
+                    incoming TEXT NOT NULL,
+                    output TEXT NOT NULL DEFAULT '',
+                    UNIQUE (incoming)
+                )''')
+                cur.execute(f'''CREATE TABLE IF NOT EXISTS {schema}.section_translations (
+                    id BIGSERIAL PRIMARY KEY,
+                    incoming TEXT NOT NULL,
+                    output TEXT NOT NULL DEFAULT '',
+                    UNIQUE (incoming)
+                )''')
             finally:
                 cur.close()
         finally:
