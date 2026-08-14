@@ -1,6 +1,167 @@
 {
-  "current_version": "1.4.18",
+  "current_version": "1.5.0",
   "versions": [
+    {
+      "version": "1.5.0",
+      "released": "8-14-2026",
+      "summary": "Major release. Adds a changelog feature summary, shows the latest version by default, and adds a Full History view.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "The changelog window now opens to a \"What's New in Press Layouts 1.5.0\" summary of features added since 1.4.0, followed by the latest release entry.",
+            "Added a Full History button that expands the changelog window to the complete version history."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.29",
+      "released": "8-14-2026",
+      "summary": "Validates dropped planning manifests before opening them externally.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Plan-button drops with no recognizable sections now fail with 'Invalid file/message for planning wizard' without opening the source item or planning wizard."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.28",
+      "released": "8-14-2026",
+      "summary": "Opens dropped planning manifests in their associated application.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Dropping a PDF or email message on the Plan button now opens the source item in its registered Windows application while also loading it into the planning wizard."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.27",
+      "released": "8-14-2026",
+      "summary": "Adds a double-truck explanation to printed-layout legends.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a light-blue blue-box symbol and '= double truck' label beside the color-page legend at the bottom of printed layouts."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.26",
+      "released": "8-14-2026",
+      "summary": "Groups layout-editor color and double-truck controls.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Grouped Color Select, All Color, and All B/W controls together and grouped DT Select, Set DT, and Clear DT controls together in the layout editor."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.25",
+      "released": "8-14-2026",
+      "summary": "Updates planning-wizard template hover previews to show generated layouts.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Planning-wizard template hover previews now use the selected run's sections, actual pages, color-page selections, and double trucks instead of displaying the untouched template."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.24",
+      "released": "8-14-2026",
+      "summary": "Corrects color handling for email-manifest double trucks.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed center-spread double trucks loaded from email manifests so every parsed DT group is marked color in the planning wizard, while Butt in Gutter metadata remains ignored."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.23",
+      "released": "8-14-2026",
+      "summary": "Loads email-manifest double trucks as color groups in the planning wizard.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed manifest-derived double trucks defaulting to B/W on the planning wizard color-page screen; parsed double trucks are now marked color automatically."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.22",
+      "released": "8-14-2026",
+      "summary": "Parses center-spread gutter-bleed double trucks from email manifests.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added parsing of Center Spread Gutter Bleed metadata from Outlook messages, including continuation lines and multiple section/page pairs.",
+            "Resolved parsed section aliases through the section translation table so multiple email DTs are loaded into the corresponding planning-wizard sections."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.21",
+      "released": "8-14-2026",
+      "summary": "Improves double-truck rendering across the editor, previews, and printed layouts.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the Broadsheet right-column divider not being removed for vertical double trucks.",
+            "Removed the internal double-truck grid line in previews and printed layouts and added a very light blue spread background while preserving readable page numbers."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.20",
+      "released": "8-14-2026",
+      "summary": "Improves double-truck selection visibility in the layout editor.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Highlighted both page cells while selecting a double truck and removed the internal press-grid divider once the double truck is set."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.19",
+      "released": "8-14-2026",
+      "summary": "Adds double-truck support to layouts, regulars, printing, previews, and planning validation.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added layout-editor double-truck selection with blue spread boxes in the editor, printed layouts, and previews.",
+            "Added physical-position validation for Broadsheet, Tab, and 8-up double trucks, including planning-wizard template and dinky compatibility checks.",
+            "Preserved double trucks in layouts and regulars while preventing them from being created or saved in templates."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.4.18",
       "released": "8-14-2026",
@@ -2219,11 +2380,46 @@
       ]
     }
   ],
+  "feature_summary": {
+    "title": "What's New in Press Layouts 1.5.0",
+    "since": "1.4.0",
+    "sections": [
+      {
+        "category": "Added",
+        "items": [
+          "Layout Planning wizard for building planned sections, splitting sections into legal signatures, selecting color pages, assigning sections to press runs, matching templates, and generating and opening finished layouts.",
+          "Double-truck support across the layout editor, previews, and printed layouts, including planning validation and parsing of center-spread double trucks from email manifests.",
+          "Manifest drag-and-drop from Outlook, .msg and .eml files, and PDFs onto the Plan button or planning wizard.",
+          "Go to Tomorrow button on the main launcher.",
+          "Admin-only product-name translation table for planning-manifest PDFs.",
+          "DB Maintenance refresh of stale record-open locks."
+        ]
+      },
+      {
+        "category": "Fixed",
+        "items": [
+          "Outlook message and .msg manifest parsing now reads the full message body, including continuation lines, so long split and main manifests parse completely.",
+          "Manifest PDF parsing now handles three or more section columns and matches color pages by position.",
+          "Preview panels now auto-refresh when a layout is saved by any user, including database-stored layouts.",
+          "Template Editor Save As now creates a proper renamed copy while leaving the original template intact."
+        ]
+      },
+      {
+        "category": "Changed",
+        "items": [
+          "Faster startup and browsing with cached translation tables and window state, a PostgreSQL connection pool, and reduced polling.",
+          "Plan button moved into the New Layout window with auto-generated press run names.",
+          "Templates saved from layouts now normalize to contiguous page numbers starting at 1.",
+          "Drag-and-drop rebuilt on tkinterdnd2 for reliable cross-application support."
+        ]
+      }
+    ]
+  },
   "distribution": {
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.4.18",
+    "current_release": "1.5.0",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",

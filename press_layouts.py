@@ -947,6 +947,117 @@ def resolve_unit_section_id_for_ctx(unit_dict, ctx, section_count=None):
     return sec_id
 
 
+def _double_truck_format_pairings(format_name):
+    """Return the valid zero-based cell pairings for a press format."""
+    fmt = str(format_name or "").strip().lower()
+    if fmt == "broadsheet":
+        return [((0, 0), (1, 0)), ((0, 1), (1, 1))]
+    if fmt == "tab":
+        return [((0, 0), (0, 1)), ((0, 2), (0, 3)), ((1, 0), (1, 1)), ((1, 2), (1, 3))]
+    if fmt == "8 up":
+        return [
+            ((0, 0), (0, 1)), ((0, 2), (0, 3)), ((0, 4), (0, 5)), ((0, 6), (0, 7)),
+            ((1, 0), (1, 1)), ((1, 2), (1, 3)), ((1, 4), (1, 5)), ((1, 6), (1, 7)),
+        ]
+    return []
+
+
+def _double_truck_grid_locations(units, format_name):
+    """Index populated page values by section/page and return their coordinates."""
+    locations = {}
+    for unit in units or []:
+        if not isinstance(unit, dict):
+            continue
+        label = str(unit.get("label") or "")
+        section_value = unit.get("section")
+        if section_value is None:
+            section_value = unit.get("section_entry", "")
+            if hasattr(section_value, "get"):
+                section_value = section_value.get()
+        section = str(section_value or "").strip().upper()
+        grid = unit.get("grid")
+        if grid is None:
+            entries = unit.get("entries", []) or []
+            grid = [[cell.get() if hasattr(cell, "get") else cell for cell in row] for row in entries]
+        for row_index, row in enumerate(grid or []):
+            for col_index, value in enumerate(row if isinstance(row, list) else []):
+                page = safe_int(value)
+                if page is not None and section:
+                    locations.setdefault((section, page), []).append((label, row_index, col_index))
+    return locations
+
+
+def _double_truck_pair_error(format_name, units, section, pages):
+    """Return an error string when pages do not occupy one valid DT position."""
+    try:
+        page_values = tuple(sorted({int(page) for page in pages}))
+    except Exception:
+        return "A double truck must contain two page numbers."
+    if len(page_values) != 2:
+        return "A double truck must contain two different page numbers."
+    section_name = str(section or "").strip().upper()
+    locations = _double_truck_grid_locations(units, format_name)
+    first = locations.get((section_name, page_values[0]), [])
+    second = locations.get((section_name, page_values[1]), [])
+    if not first or not second:
+        return f"Double truck {section_name} {page_values[0]}/{page_values[1]} must reference two assigned pages."
+    pairings = {frozenset(pair) for pair in _double_truck_format_pairings(format_name)}
+    for unit_a, row_a, col_a in first:
+        for unit_b, row_b, col_b in second:
+            if unit_a == unit_b and frozenset(((row_a, col_a), (row_b, col_b))) in pairings:
+                return None
+    return f"Double truck {section_name} {page_values[0]}/{page_values[1]} is not in a valid {format_name} press position."
+
+
+def validate_double_trucks(data):
+    """Validate layout-only DT metadata and return user-facing errors."""
+    if not isinstance(data, dict):
+        return ["Double truck data is invalid."]
+    units = data.get("units", []) or []
+    format_name = data.get("format") or "Broadsheet"
+    errors = []
+    seen_pairs = set()
+    seen_pages = set()
+    for index, item in enumerate(data.get("double_trucks", []) or [], start=1):
+        if not isinstance(item, dict):
+            errors.append(f"Double truck {index} is invalid.")
+            continue
+        section = item.get("section") or ""
+        pages = item.get("pages") or []
+        error = _double_truck_pair_error(format_name, units, section, pages)
+        if error:
+            errors.append(error)
+            continue
+        key = (str(section).strip().upper(), tuple(sorted(int(page) for page in pages)))
+        if key in seen_pairs:
+            errors.append(f"Double truck {key[0]} {key[1][0]}/{key[1][1]} is duplicated.")
+        seen_pairs.add(key)
+        for page in key[1]:
+            page_key = (key[0], page)
+            if page_key in seen_pages:
+                errors.append(f"Page {key[0]} {page} cannot belong to more than one double truck.")
+            seen_pages.add(page_key)
+    return errors
+
+
+def normalize_double_trucks(data):
+    """Canonicalize DT metadata without changing the source dictionary."""
+    normalized = []
+    for item in (data.get("double_trucks", []) if isinstance(data, dict) else []) or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            pages = sorted({int(page) for page in item.get("pages", [])})
+        except Exception:
+            continue
+        if len(pages) != 2:
+            continue
+        section = str(item.get("section") or "").strip().upper()
+        if section:
+            normalized.append({"section": section, "pages": pages})
+    return normalized
+
+
 def compute_section_page_counts_from_ctx(ctx, section_count=None):
     if section_count is None:
         try:
@@ -1240,13 +1351,24 @@ def enable_arrow_navigation(focus_list, units, press_name):
 # Reusable Tk widgets for press units, overlays, color swatches, scroll areas, sizing, tab order, and arrow-key navigation.
 # =============================================================================
 
-def overlay_render_cell(overlay: tk.Canvas, text: str, circled: bool):
+def overlay_render_cell(overlay: tk.Canvas, text: str, circled: bool, selected: bool = False, double_truck: bool = False):
     """Render the cell's text and optional red circle on top."""
     overlay.delete("all")
 
     overlay.update_idletasks()
     w = overlay.winfo_width()
     h = overlay.winfo_height()
+
+    if selected:
+        overlay.create_rectangle(
+            1, 1, max(2, w - 1), max(2, h - 1),
+            fill="#fff3cd", outline="#f59e0b", width=2, tags=("double_truck_selection",)
+        )
+    elif double_truck:
+        overlay.create_rectangle(
+            1, 1, max(2, w - 1), max(2, h - 1),
+            fill="#eaf5ff", outline="", width=0, tags=("double_truck_fill",)
+        )
 
     # draw text in the middle
     overlay.create_text(
@@ -1292,6 +1414,26 @@ def overlay_set_circle(overlay: tk.Canvas, on: bool):
             pad, pad, max(pad+1, w - pad), max(pad+1, h - pad),
             outline="red", width=2, tags=("circle",)
         )
+
+
+def overlay_set_double_truck(overlay: tk.Canvas, edges=None):
+    """Draw the outer edges of a blue DT box on a participating cell."""
+    overlay.delete("double_truck")
+    if not edges:
+        return
+    overlay.update_idletasks()
+    width = max(1, overlay.winfo_width())
+    height = max(1, overlay.winfo_height())
+    color = "#1976d2"
+    line_width = 3
+    if "top" in edges:
+        overlay.create_line(1, 1, width - 1, 1, fill=color, width=line_width, tags=("double_truck",))
+    if "bottom" in edges:
+        overlay.create_line(1, height - 1, width - 1, height - 1, fill=color, width=line_width, tags=("double_truck",))
+    if "left" in edges:
+        overlay.create_line(1, 1, 1, height - 1, fill=color, width=line_width, tags=("double_truck",))
+    if "right" in edges:
+        overlay.create_line(width - 1, 1, width - 1, height - 1, fill=color, width=line_width, tags=("double_truck",))
 def make_press_area(parent, enable_hscroll=False, height_hint=320):
     outer = ttk.Frame(parent)
     outer.pack(fill="both", expand=True)
@@ -1466,6 +1608,7 @@ def create_press_unit(
         cell_overlays.append(row_overlays)
 
     # Divider visuals
+    horizontal_dividers = []
     if use_v_sep:
         if use_h_sep:
             tk.Frame(box_frame, bg=midline_color).grid(row=0, column=mid_col, rowspan=mid_row, sticky="nsew")
@@ -1479,15 +1622,23 @@ def create_press_unit(
 
     if use_h_sep:
         if use_v_sep:
-            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=0, columnspan=mid_col, sticky="nsew")
-            tk.Frame(box_frame, bg=midline_color).grid(
+            left_divider = tk.Frame(box_frame, bg=midline_color)
+            left_divider.grid(row=mid_row, column=0, columnspan=mid_col, sticky="nsew")
+            right_divider = tk.Frame(box_frame, bg=midline_color)
+            right_divider.grid(
                 row=mid_row, column=mid_col + 1,
                 columnspan=total_grid_cols - (mid_col + 1),
                 sticky="nsew"
             )
+            horizontal_dividers.extend(((left_divider, 0, mid_col), (right_divider, mid_col, grid_cols)))
             tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=mid_col, sticky="nsew")
         else:
-            tk.Frame(box_frame, bg=midline_color).grid(row=mid_row, column=0, columnspan=total_grid_cols, sticky="nsew")
+            divider = tk.Frame(box_frame, bg=midline_color)
+            divider.grid(row=mid_row, column=0, columnspan=total_grid_cols, sticky="nsew")
+            horizontal_dividers.append((divider, 0, total_grid_cols))
+
+    box_frame._press_horizontal_dividers = horizontal_dividers
+    unit_frame._press_horizontal_dividers = horizontal_dividers
 
     ttk.Label(unit_frame, text=unit_label, font=(None, 10, "bold")).pack(pady=(6, 0))
 
@@ -2469,6 +2620,7 @@ def _normalize_template_data(data):
     if not isinstance(data, dict):
         return data
     normalized = dict(data)
+    normalized.pop("double_trucks", None)
     try:
         section_count = max(1, min(4, int(normalized.get("section_count", 1))))
     except Exception:
@@ -2794,6 +2946,9 @@ def validate_layout_data_for_mode(data, template_mode=False, regular_mode=False)
     if missing_sections:
         errors.append("All units with pages assigned must be assigned a section before saving. Units missing a section: " + ", ".join(missing_sections) + ".")
 
+    if not template_mode:
+        errors.extend(validate_double_trucks(data))
+
     return errors
 
 
@@ -2873,6 +3028,7 @@ def collect_layout_data(ctx):
             {"unit": unit, "r": int(r), "c": int(c)}
             for (unit, r, c) in sorted(ctx.get("color_cells", set()))
         ]
+        data["double_trucks"] = normalize_double_trucks({"double_trucks": ctx.get("double_trucks", [])})
     return data
 def populate_layout_from_data(ctx, data):
     regular_mode = _ctx_is_regular_mode(ctx)
@@ -2975,6 +3131,7 @@ def populate_layout_from_data(ctx, data):
                 ctx["color_cells"].add((unit, r, c))
             except Exception:
                 pass
+        ctx["double_trucks"] = normalize_double_trucks(data)
 
 def do_save(win, ctx):
     default_dir = ctx.get("default_dir", LAYOUTS_DIR)
@@ -3246,6 +3403,7 @@ def save_template_from_layout(ctx):
         data.pop("issue_date", None)
         data.pop("product", None)
         data.pop("color_cells", None)
+        data.pop("double_trucks", None)
 
         # Generate template filename
         template_filename = build_filename_suggestion(ctx)
@@ -3573,6 +3731,7 @@ def _normalize_layout_data_for_touch(data, path, template_mode=False, regular_mo
         normalized.pop("issue_date", None)
         normalized.pop("product", None)
         normalized.pop("color_cells", None)
+        normalized.pop("double_trucks", None)
     return normalized, ctx
 
 
@@ -3949,6 +4108,30 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
         cell_h = box_h / rows
         mid_col = cols // 2
         mid_row = rows // 2
+        dt_rects = []
+        dt_locations = {}
+        for item in normalize_double_trucks(data):
+            if str(item.get("section") or "").strip().upper() != section_text:
+                continue
+            for row_index in range(rows):
+                for col_index in range(cols):
+                    try:
+                        page_value = int((entries[row_index][col_index].get() or "").strip())
+                    except Exception:
+                        continue
+                    if page_value in item.get("pages", []):
+                        dt_locations.setdefault(tuple(item["pages"]), []).append((row_index, col_index))
+        for positions in dt_locations.values():
+            if len(positions) != 2:
+                continue
+            (row_a, col_a), (row_b, col_b) = positions
+            rect = (
+                x0 + min(col_a, col_b) * cell_w + 2,
+                box_top + min(row_a, row_b) * cell_h + 2,
+                x0 + (max(col_a, col_b) + 1) * cell_w - 2,
+                box_top + (max(row_a, row_b) + 1) * cell_h - 2,
+            )
+            dt_rects.append(rect)
         for row_index in range(1, rows):
             yy = box_top + (row_index * cell_h)
             width = midline_thickness if (rows % 2 == 0 and row_index == mid_row) else 1
@@ -3959,6 +4142,8 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
             width = midline_thickness if (cols % 2 == 0 and col_index == mid_col) else 1
             color = midline_color if width > 1 else '#888888'
             draw.line((xx, box_top, xx, y1), fill=color, width=width)
+        for rect in dt_rects:
+            draw.rectangle(rect, fill="#eaf5ff")
 
         for row_index in range(rows):
             for col_index in range(cols):
@@ -3993,6 +4178,11 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
                             except Exception:
                                 page_num = 10 ** 9
                             color_page_refs.append((section_display_lookup.get(section_ref, 999), section_ref, page_num, ref_text))
+
+        # Draw DT marks after page text and color marks so each spread has one
+        # continuous blue outline around the two physical press positions.
+        for rect in dt_rects:
+            draw.rectangle(rect, outline="#1976d2", width=7)
 
         label_top = y1 + 6
         _render_draw_centered_text(draw, (x0, label_top, x1, label_top + unit_label_h), lab, unit_font)
@@ -4045,7 +4235,25 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
     )
     draw.ellipse(legend_circle_box, outline='red', width=6)
     _render_draw_centered_text_heavy(draw, legend_circle_box, '#', legend_symbol_font, fill='black', offset=1)
-    draw.text((margin_x + legend_circle_diameter + 24, legend_y), '= color page', fill='black', font=legend_font)
+    color_label_x = margin_x + legend_circle_diameter + 24
+    color_label = '= color page'
+    draw.text((color_label_x, legend_y), color_label, fill='black', font=legend_font)
+
+    color_label_width = _render_measure_text(draw, color_label, legend_font)[0]
+    dt_legend_x = color_label_x + color_label_width + 90
+    dt_legend_box = (
+        dt_legend_x,
+        legend_y,
+        dt_legend_x + legend_circle_diameter,
+        legend_y + legend_circle_diameter,
+    )
+    draw.rectangle(dt_legend_box, fill="#eaf5ff", outline="#1976d2", width=7)
+    draw.text(
+        (dt_legend_x + legend_circle_diameter + 24, legend_y),
+        '= double truck',
+        fill='black',
+        font=legend_font,
+    )
 
     color_page_refs_sorted = [item[3] for item in sorted(color_page_refs, key=lambda item: (item[0], item[2], item[3]))]
     refs_text = 'Color pages list: ' + (', '.join(color_page_refs_sorted) if color_page_refs_sorted else 'None')
@@ -4614,6 +4822,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             color_items.append(new_item)
         data["units"] = converted_units
         data["color_cells"] = color_items
+        data["double_trucks"] = []
         data["press"] = new_press
         return data
 
@@ -4626,6 +4835,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         cols = int(target_cfg.get("grid_cols", 2) or 2)
         data["units"] = [{"label": label, "section": "", "grid": _blank_grid(rows, cols)} for label in target_labels]
         data["color_cells"] = []
+        data["double_trucks"] = []
         data["format"] = new_format
         return data
 
@@ -5071,6 +5281,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "default_dir": config.get("default_dir", TEMPLATE_DIR if template_mode else LAYOUTS_DIR),
         "prompt_save_template": bool(config.get("prompt_save_template", not template_mode)),
         "color_cells": set(),  # per-cell storage
+        "double_trucks": [],
     }
     try:
         win._press_layout_ctx = ctx
@@ -5149,15 +5360,147 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     color_toggle = None
     all_color_btn = None
     all_bw_btn = None
+    double_truck_select_var = tk.BooleanVar(value=False)
+    double_truck_selection = []
+    double_truck_toggle = None
+    double_truck_set_btn = None
+    double_truck_clear_btn = None
+    color_controls_frame = None
+    double_truck_controls_frame = None
     if not template_mode:
+        color_controls_frame = ttk.LabelFrame(btn_frame, text="Color", padding=(6, 3))
+        color_controls_frame.pack(side="left", padx=(0, 8))
+        double_truck_controls_frame = ttk.LabelFrame(btn_frame, text="Double Truck", padding=(6, 3))
+        double_truck_controls_frame.pack(side="left", padx=(0, 12))
         color_toggle = ttk.Checkbutton(
-            btn_frame,
+            color_controls_frame,
             style="SlideToggle.TCheckbutton",
             text="Color Select",
             variable=color_select_var,
             takefocus=False
         )
-        color_toggle.pack(side="left", padx=(0, 8))
+        color_toggle.pack(side="left", padx=(0, 6))
+
+        double_truck_toggle = ttk.Checkbutton(
+            double_truck_controls_frame,
+            style="SlideToggle.TCheckbutton",
+            text="DT Select",
+            variable=double_truck_select_var,
+            takefocus=False,
+        )
+        double_truck_toggle.pack(side="left", padx=(0, 6))
+
+        def _clear_double_truck_selection():
+            double_truck_selection.clear()
+            refresh_color_overlays()
+
+        def _editor_double_truck_pairs():
+            pairs = []
+            for item in normalize_double_trucks({"double_trucks": ctx.get("double_trucks", [])}):
+                pairs.append(item)
+            return pairs
+
+        def _refresh_double_truck_dividers():
+            for unit in ctx.get("units", []):
+                for divider, _start_col, _end_col in getattr(unit.get("frame"), "_press_horizontal_dividers", []):
+                    try:
+                        divider.grid()
+                    except Exception:
+                        pass
+            locations = _double_truck_grid_locations(ctx.get("units", []), ctx.get("format_name", ""))
+            for item in _editor_double_truck_pairs():
+                section = item["section"]
+                first = locations.get((section, item["pages"][0]), [])
+                second = locations.get((section, item["pages"][1]), [])
+                for unit_label, row_a, col_a in first:
+                    for other_label, row_b, col_b in second:
+                        if unit_label != other_label or row_a == row_b:
+                            continue
+                        unit = next((candidate for candidate in ctx.get("units", []) if candidate["label"] == unit_label), None)
+                        if unit is None:
+                            continue
+                        for divider, start_col, end_col in getattr(unit.get("frame"), "_press_horizontal_dividers", []):
+                            if start_col <= min(col_a, col_b) < end_col:
+                                try:
+                                    divider.grid_remove()
+                                except Exception:
+                                    pass
+
+        def _editor_cell_double_truck_edges(unit, row, col):
+            section_value = unit.get("section_entry")
+            section = str(section_value.get() if section_value is not None else "").strip().upper()
+            try:
+                page = int(unit["entries"][row][col].get())
+            except Exception:
+                return set()
+            for item in _editor_double_truck_pairs():
+                if item["section"] != section or page not in item["pages"]:
+                    continue
+                locations = _double_truck_grid_locations(ctx.get("units", []), ctx.get("format_name", ""))
+                other_page = item["pages"][0] if item["pages"][1] == page else item["pages"][1]
+                current = (unit["label"], row, col)
+                other = locations.get((section, other_page), [])
+                other = next((location for location in other if location[0] == unit["label"]), None)
+                if other is None:
+                    return set()
+                _unit, other_row, other_col = other
+                edges = {"top", "bottom", "left", "right"}
+                if other_row == row and other_col == col + 1:
+                    edges.discard("right")
+                elif other_row == row and other_col == col - 1:
+                    edges.discard("left")
+                elif other_col == col and other_row == row + 1:
+                    edges.discard("bottom")
+                elif other_col == col and other_row == row - 1:
+                    edges.discard("top")
+                return edges
+            return set()
+
+        def _set_editor_double_truck():
+            if len(double_truck_selection) != 2:
+                messagebox.showinfo("Double Truck", "Select exactly two page cells in a valid double-truck position.", parent=win)
+                return
+            first, second = double_truck_selection
+            units_for_validation = []
+            for unit in ctx.get("units", []):
+                units_for_validation.append({
+                    "label": unit["label"],
+                    "section": unit["section_entry"].get(),
+                    "grid": [[cell.get() for cell in row] for row in unit.get("entries", [])],
+                })
+            section = first[0]
+            pages = [first[3], second[3]]
+            error = _double_truck_pair_error(ctx.get("format_name", ""), units_for_validation, section, pages)
+            if error:
+                messagebox.showerror("Invalid Double Truck", error, parent=win)
+                return
+            normalized = {tuple(item["pages"]) for item in _editor_double_truck_pairs()}
+            page_pair = tuple(sorted(int(page) for page in pages))
+            if page_pair not in normalized:
+                ctx.setdefault("double_trucks", []).append({"section": section, "pages": list(page_pair)})
+            double_truck_selection.clear()
+            refresh_color_overlays()
+            _mark_dirty_var()
+
+        def _clear_editor_double_truck():
+            if not double_truck_selection:
+                return
+            selected_pages = {(item[0], item[3]) for item in double_truck_selection}
+            ctx["double_trucks"] = [
+                item for item in _editor_double_truck_pairs()
+                if not any((item["section"], page) in selected_pages for page in item["pages"])
+            ]
+            double_truck_selection.clear()
+            refresh_color_overlays()
+            _mark_dirty_var()
+
+        double_truck_set_btn = ttk.Button(double_truck_controls_frame, text="Set DT", command=_set_editor_double_truck, width=8)
+        double_truck_set_btn.pack(side="left", padx=(0, 4))
+        double_truck_clear_btn = ttk.Button(double_truck_controls_frame, text="Clear DT", command=_clear_editor_double_truck, width=9)
+        double_truck_clear_btn.pack(side="left")
+    else:
+        def _refresh_double_truck_dividers():
+            return
 
     starter_format_var = tk.StringVar(value="Standard")
     ctx["starter_format_var"] = starter_format_var
@@ -5586,10 +5929,10 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             messagebox.showerror("Print Failed", str(e))
 
     if not template_mode:
-        all_color_btn = ttk.Button(btn_frame, text="All Color", command=lambda: select_all_color_pages(), width=10, takefocus=False)
-        all_color_btn.pack(side="left", padx=(0, 8))
-        all_bw_btn = ttk.Button(btn_frame, text="All b/w", command=lambda: clear_all_color_pages(), width=10, takefocus=False)
-        all_bw_btn.pack(side="left", padx=(0, 12))
+        all_color_btn = ttk.Button(color_controls_frame, text="All Color", command=lambda: select_all_color_pages(), width=10, takefocus=False)
+        all_color_btn.pack(side="left", padx=(0, 6))
+        all_bw_btn = ttk.Button(color_controls_frame, text="All b/w", command=lambda: clear_all_color_pages(), width=10, takefocus=False)
+        all_bw_btn.pack(side="left")
         ttk.Label(btn_frame, text="Starter:").pack(side="left", padx=(0, 6))
         starter_combo = ttk.Combobox(btn_frame, textvariable=starter_format_var, values=["Standard", "NYT", "USAT"], state="readonly", width=10)
         starter_combo.pack(side="left", padx=(0, 8))
@@ -5853,16 +6196,29 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         entry = unit_dict["entries"][r][c]
         key = (unit_dict["label"], r, c)
         circled = key in ctx["color_cells"]
+        dt_edges = _editor_cell_double_truck_edges(unit_dict, r, c) if not template_mode else set()
         selecting = (not template_mode) and color_select_var.get() and unit_dict.get("color_capable", False)
+        dt_selecting = (not template_mode) and double_truck_select_var.get() and bool((entry.get() or "").strip())
+        section_value = unit_dict.get("section_entry")
+        section_name = str(section_value.get() if section_value is not None else "").strip().upper()
+        try:
+            page_value = int(entry.get())
+        except Exception:
+            page_value = None
+        dt_selected = any(
+            item[0] == section_name and item[1] == unit_dict["label"] and item[2] == r and item[3] == page_value
+            for item in double_truck_selection
+        )
         is_focused = entry == entry.focus_get()
 
-        if is_focused and not color_select_var.get():
+        if is_focused and not color_select_var.get() and not dt_edges and not dt_selecting:
             overlay_hide(overlay)
             return
 
-        if circled or selecting:
+        if circled or selecting or dt_edges or dt_selecting:
             overlay_show(overlay)
-            overlay_render_cell(overlay, entry.get(), circled)
+            overlay_render_cell(overlay, entry.get(), circled, selected=dt_selected, double_truck=bool(dt_edges))
+            overlay_set_double_truck(overlay, dt_edges)
         else:
             overlay_hide(overlay)
             overlay.delete("all")
@@ -5906,6 +6262,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 pass
 
     def refresh_color_overlays():
+        _refresh_double_truck_dividers()
         for u in ctx["units"]:
             overlays = u.get("overlays", [])
             for r in range(len(overlays)):
@@ -5985,6 +6342,18 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                 entry = entries[r][c]
 
                 def on_overlay_click(event, _u=u, _r=r, _c=c):
+                    if double_truck_select_var.get() and not template_mode:
+                        try:
+                            value = int(_u["entries"][_r][_c].get())
+                        except Exception:
+                            return "break"
+                        item = (_u.get("section_entry").get().strip().upper(), _u["label"], _r, value, _c)
+                        if item in double_truck_selection:
+                            double_truck_selection.remove(item)
+                        elif len(double_truck_selection) < 2:
+                            double_truck_selection.append(item)
+                        refresh_color_overlays()
+                        return "break"
                     if not color_select_var.get():
                         target = _u["entries"][_r][_c]
                         target.focus_set()
@@ -6002,6 +6371,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
 
     if color_toggle is not None:
         color_toggle.configure(command=refresh_color_overlays)
+    if double_truck_toggle is not None:
+        double_truck_toggle.configure(command=refresh_color_overlays)
 
     # ---- Load file (open vs copy) ----
     if initial_data is not None:
@@ -6116,6 +6487,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             "section_names": list(data.get("section_names", []) or []),
             "units": list(data.get("units", []) or []),
             "color_cells": list(data.get("color_cells", []) or []),
+            "double_trucks": normalize_double_trucks(data),
             "starter_format": (starter_format_var.get() or "Standard").strip() or "Standard",
         }
 
@@ -9048,6 +9420,23 @@ def _configure_changelog_tree_tags(tree):
         tree.tag_configure(_category_tag_name(category_name), foreground=color, font=(None, 10, "bold"))
         tree.tag_configure(_item_tag_name(category_name), foreground=color)
 
+def get_feature_summary(changelog_data=None):
+    data = changelog_data if isinstance(changelog_data, dict) else load_changelog_data()
+    if not isinstance(data, dict):
+        return None
+    summary = data.get("feature_summary")
+    if not isinstance(summary, dict):
+        return None
+    title = str(summary.get("title") or "").strip()
+    since = str(summary.get("since") or "").strip()
+    if not title:
+        title = f"What's New in Press Layouts {get_version_label(data)}"
+    sections = _normalize_change_sections({"changes": summary.get("sections")})
+    if not sections:
+        return None
+    return {"title": title, "since": since, "sections": sections}
+
+
 def show_changelog_dialog(parent):
     existing = getattr(parent, "_changelog_dialog", None)
     try:
@@ -9082,7 +9471,7 @@ def show_changelog_dialog(parent):
     header.grid(row=0, column=0, sticky="ew")
     header.columnconfigure(0, weight=1)
     ttk.Label(header, text=f"Press Layouts {get_version_label(changelog_data)}", font=(None, 12, "bold")).grid(row=0, column=0, sticky="w")
-    ttk.Label(header, text="Expand or collapse each version to scan the history quickly.", foreground="#555555").grid(row=1, column=0, sticky="w", pady=(4, 0))
+    ttk.Label(header, text="See what's new since the last major version, or expand each version to scan the full history.", foreground="#555555").grid(row=1, column=0, sticky="w", pady=(4, 0))
 
     body_frame = ttk.Frame(outer)
     body_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 10))
@@ -9100,6 +9489,9 @@ def show_changelog_dialog(parent):
     canvas_window = canvas.create_window((0, 0), window=content, anchor="nw")
 
     version_widgets = {}
+    hint_label = None
+    summary_data = get_feature_summary(changelog_data)
+    summary_wrap_labels = []
     versions = get_changelog_versions(changelog_data)
 
     def _version_key(entry, index):
@@ -9163,10 +9555,64 @@ def show_changelog_dialog(parent):
         lbl.grid(row=row_index, column=0, sticky="ew", padx=(indent, 0), pady=pady)
         return lbl
 
-    if not versions:
-        ttk.Label(content, text="No changelog entries found.", foreground="#333333", justify="left", anchor="w", wraplength=700).grid(row=0, column=0, sticky="ew")
-    else:
-        for index, entry in enumerate(versions):
+    def _render_feature_summary(summary_data):
+        nonlocal summary_wrap_labels
+        summary_wrap_labels = []
+        wrap_labels = []
+        next_row = 0
+        title = str(summary_data.get("title") or "What's New").strip()
+        title_lbl = ttk.Label(content, text=title, font=(None, 11, "bold"), foreground="#1a237e", justify="left", anchor="w")
+        title_lbl.grid(row=next_row, column=0, sticky="ew")
+        wrap_labels.append(title_lbl)
+        next_row += 1
+        since = str(summary_data.get("since") or "").strip()
+        if since:
+            since_lbl = ttk.Label(content, text=f"Highlights since v{since}", foreground="#555555", justify="left", anchor="w")
+            since_lbl.grid(row=next_row, column=0, sticky="ew", pady=(2, 8))
+            wrap_labels.append(since_lbl)
+            next_row += 1
+        for section in summary_data.get("sections") or []:
+            section_title = str(section.get("title") or "Changes").strip() or "Changes"
+            section_label = ttk.Label(content, text=section_title, foreground=_category_color(section_title), font=(None, 10, "bold"), justify="left", anchor="w")
+            section_label.grid(row=next_row, column=0, sticky="ew", pady=(0, 4))
+            next_row += 1
+            for item in section.get("items") or []:
+                wrap_labels.append(_add_wrapped_label(content, f"• {item}", next_row, foreground="#222222", pady=(0, 2)))
+                next_row += 1
+        summary_wrap_labels = wrap_labels
+        return next_row + 1
+
+    def _render_versions(entries, full_history=False):
+        nonlocal hint_label, summary_wrap_labels
+        for widget in list(version_widgets.values()):
+            for child in (widget.get("button"), widget.get("body")):
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+        version_widgets.clear()
+        for child in content.winfo_children():
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        if hint_label is not None:
+            try:
+                hint_label.destroy()
+            except Exception:
+                pass
+            hint_label = None
+        summary_wrap_labels = []
+
+        start_row = 0
+        if not full_history and summary_data is not None:
+            start_row = _render_feature_summary(summary_data)
+
+        if not entries:
+            ttk.Label(content, text="No changelog entries found.", foreground="#333333", justify="left", anchor="w", wraplength=700).grid(row=start_row, column=0, sticky="ew")
+            return
+
+        for index, entry in enumerate(entries):
             version_label = str(entry.get("version") or "").strip() or "0.0.0"
             if not version_label.lower().startswith("v"):
                 version_label = f"v{version_label}"
@@ -9177,7 +9623,7 @@ def show_changelog_dialog(parent):
             version_key = _version_key(entry, index)
 
             card = ttk.Frame(content, padding=(0, 0, 0, 10))
-            card.grid(row=index, column=0, sticky="ew")
+            card.grid(row=start_row + index, column=0, sticky="ew")
             card.columnconfigure(0, weight=1)
 
             header_button = ttk.Button(card, text=title_text, command=(lambda key=version_key: _toggle_version(key)))
@@ -9213,6 +9659,25 @@ def show_changelog_dialog(parent):
             }
             _apply_version_state(version_key)
 
+        if not full_history and entries:
+            hint_row = start_row + len(entries)
+            hint_label = ttk.Label(
+                content,
+                text="Showing the latest release and what's new since the last major version. Click \"Full History\" below to view all versions.",
+                foreground="#555555",
+                justify="left",
+                anchor="w",
+                wraplength=_current_wraplength(),
+            )
+            hint_label.grid(row=hint_row, column=0, sticky="ew", pady=(4, 0))
+
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+
+    _render_versions(versions[:1])
+
     def _update_wrap_lengths(_event=None):
         wraplength = _current_wraplength()
         try:
@@ -9225,6 +9690,16 @@ def show_changelog_dialog(parent):
                     lbl.configure(wraplength=wraplength)
                 except Exception:
                     pass
+        for lbl in summary_wrap_labels:
+            try:
+                lbl.configure(wraplength=wraplength)
+            except Exception:
+                pass
+        if hint_label is not None:
+            try:
+                hint_label.configure(wraplength=wraplength)
+            except Exception:
+                pass
         try:
             canvas.configure(scrollregion=canvas.bbox("all"))
         except Exception:
@@ -9255,10 +9730,17 @@ def show_changelog_dialog(parent):
     canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
     _update_wrap_lengths()
 
+    def _show_full_history():
+        _render_versions(versions, full_history=True)
+        full_history_btn.configure(state="disabled")
+        _update_wrap_lengths()
+
     button_row = ttk.Frame(outer)
     button_row.grid(row=2, column=0, sticky="e")
     ttk.Button(button_row, text="Expand All", command=lambda: _set_all_versions(True)).pack(side="left", padx=(0, 8))
     ttk.Button(button_row, text="Collapse All", command=lambda: _set_all_versions(False)).pack(side="left", padx=(0, 8))
+    full_history_btn = ttk.Button(button_row, text="Full History", command=_show_full_history)
+    full_history_btn.pack(side="left", padx=(0, 8))
     ttk.Button(button_row, text="Close", command=_cleanup_dialog, width=10).pack(side="right")
 
     dialog.bind("<Escape>", lambda _event: _cleanup_dialog())
@@ -11121,6 +11603,44 @@ def _parse_manifest_msg_body(body):
             result["issue_date"] = match.group(1)
             break
 
+    double_truck_lines = []
+    collecting_double_truck_metadata = False
+    for line in lines:
+        cells = [cell.strip() for cell in line.split('\t')]
+        label = cells[0].strip().lower() if cells else ""
+        if label == "center spread gutter bleed":
+            collecting_double_truck_metadata = True
+            double_truck_lines.append("\t".join(cells[1:]))
+            continue
+        if not collecting_double_truck_metadata:
+            continue
+        if label in {"butt in gutter", "thanks,"}:
+            break
+        if not line.strip():
+            # Outlook places a blank line between continuation rows.
+            continue
+        # Continuation rows contain the next DT reference and may also contain
+        # advertiser text, which is intentionally ignored below.
+        double_truck_lines.append(line)
+
+    double_trucks = []
+    center_tokens = []
+    for line in double_truck_lines:
+        center_tokens.extend(re.findall(r"\b([A-Za-z]+)(\d+)\b", line))
+    token_index = 0
+    while token_index + 1 < len(center_tokens):
+        first_prefix, first_page = center_tokens[token_index]
+        second_prefix, second_page = center_tokens[token_index + 1]
+        if first_prefix.upper() == second_prefix.upper():
+            double_trucks.append({
+                "section_alias": first_prefix.upper(),
+                "pages": [int(first_page), int(second_page)],
+            })
+            token_index += 2
+        else:
+            token_index += 1
+    result["double_trucks"] = double_trucks
+
     by_name = {}
     for line in lines:
         cells = [cell.strip() for cell in line.split('\t')]
@@ -11797,6 +12317,38 @@ def _manifest_paths_from_drop(widget, data):
     return paths
 
 
+def _read_manifest_for_planning(path):
+    """Parse a PDF, Outlook message, or email file into planning data."""
+    kind = _classify_manifest_path(path)
+    if kind == "msg":
+        return _parse_manifest_msg(path)
+    if kind == "eml":
+        return _parse_manifest_eml(path)
+    if kind == "pdf":
+        return _parse_manifest_pdf(path)
+    return None
+
+
+def _open_manifest_in_associated_application(path, parent=None):
+    """Open a dropped PDF/email with its registered Windows application."""
+    path = str(path or "").strip()
+    if not path:
+        return False
+    try:
+        os.startfile(path)
+        return True
+    except Exception as exc:
+        try:
+            messagebox.showwarning(
+                "Open Manifest",
+                f"The planning wizard will still load the manifest, but the source item could not be opened:\n\n{path}\n\n{exc}",
+                parent=parent,
+            )
+        except Exception:
+            pass
+        return False
+
+
 def _report_unusable_manifest_drop(widget, event):
     """Show what the drop delivered when it was not a recognised manifest file."""
     data = str(getattr(event, "data", "") or "").strip()
@@ -11817,13 +12369,7 @@ def _load_manifest_from_path_in_dialog(dialog, path):
     """Worker: parse a manifest PDF, Outlook .msg or .eml email and fill the wizard."""
     manifest = None
     try:
-        kind = _classify_manifest_path(path)
-        if kind == "msg":
-            manifest = _parse_manifest_msg(path)
-        elif kind == "eml":
-            manifest = _parse_manifest_eml(path)
-        elif kind == "pdf":
-            manifest = _parse_manifest_pdf(path)
+        manifest = _read_manifest_for_planning(path)
     except Exception as exc:
         try:
             messagebox.showerror("Load Manifest", f"Could not read the manifest file.\n\n{exc}", parent=dialog)
@@ -11838,7 +12384,7 @@ def _load_manifest_from_path_in_dialog(dialog, path):
         return
     if not manifest.get("sections"):
         try:
-            messagebox.showwarning("Load Manifest", "No sections could be identified in the manifest file.", parent=dialog)
+            messagebox.showerror("Load Manifest", "Invalid file/message for planning wizard", parent=dialog)
         except Exception:
             pass
         return
@@ -11849,6 +12395,7 @@ def _load_manifest_from_path_in_dialog(dialog, path):
         show_page_one_fn = getattr(dialog, "_plan_show_page_one", None)
         make_section_fn = getattr(dialog, "_plan_make_section", None)
         reset_state_fn = getattr(dialog, "_plan_reset_wizard_state", None)
+        apply_double_trucks_fn = getattr(dialog, "_plan_apply_manifest_double_trucks", None)
     except Exception:
         return
     if reset_state_fn is not None:
@@ -11863,6 +12410,8 @@ def _load_manifest_from_path_in_dialog(dialog, path):
         for idx, sec in enumerate(manifest["sections"]):
             for key in _load_manifest_section(sections, make_section_fn, idx, sec):
                 dialog._manifest_color_pages[key] = True
+        if apply_double_trucks_fn is not None:
+            apply_double_trucks_fn(manifest.get("double_trucks") or [])
     else:
         dialog._manifest_color_pages = {}
     if show_page_one_fn is not None:
@@ -13422,6 +13971,36 @@ def build_plan_wizard(parent):
                     })
         return wanted
 
+    def _planned_double_trucks_for_sections(sections):
+        planned = []
+        for section_index, section in enumerate(sections):
+            section_name = str(section.get("name") or "").strip()
+            page_numbers = [int(page) for page in section.get("page_numbers", []) or []]
+            seen = set()
+            for page_number in page_numbers:
+                group_pages = page_group_state.get((section_name, page_number))
+                if not group_pages or len(group_pages) != 2:
+                    continue
+                pair = tuple(sorted(int(page) for page in group_pages))
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                offsets = []
+                for page in pair:
+                    try:
+                        offsets.append(page_numbers.index(page) + 1)
+                    except ValueError:
+                        offsets = []
+                        break
+                if len(offsets) == 2:
+                    planned.append({
+                        "section_index": int(section_index),
+                        "section": section_name,
+                        "pages": list(pair),
+                        "template_pages": offsets,
+                    })
+        return planned
+
     def _section_aliases_for_template_index(template_data, run_sections, section_index):
         aliases = set()
         try:
@@ -13490,6 +14069,41 @@ def build_plan_wizard(parent):
             unique.append(item)
         return unique, True
 
+    def _template_matches_plan_double_trucks(template_data, press, fmt, run_sections):
+        """Check planned DTs against physical positions in a candidate template."""
+        cfg = CONFIG_MAP.get((press, fmt), {}) or {}
+        only_k_labels = {str(label or "") for label in cfg.get("only_k_labels", set())}
+        for wanted in _planned_double_trucks_for_sections(run_sections):
+            section_index = int(wanted["section_index"])
+            aliases = _section_aliases_for_template_index(template_data, run_sections, section_index)
+            locations = {}
+            for unit in template_data.get("units", []) or []:
+                if not isinstance(unit, dict):
+                    continue
+                unit_label = str(unit.get("label") or "")
+                unit_section = str(unit.get("section") or "").strip().upper()
+                if unit_section and aliases and unit_section not in aliases:
+                    continue
+                for row, values in enumerate(unit.get("grid", []) or []):
+                    for col, value in enumerate(values if isinstance(values, list) else []):
+                        page = safe_int(value)
+                        if page in wanted["template_pages"]:
+                            locations.setdefault(page, []).append((unit_label, row, col))
+            first = locations.get(wanted["template_pages"][0], [])
+            second = locations.get(wanted["template_pages"][1], [])
+            pairings = {frozenset(pair) for pair in _double_truck_format_pairings(fmt)}
+            valid = False
+            for unit_a, row_a, col_a in first:
+                for unit_b, row_b, col_b in second:
+                    if unit_a == unit_b and frozenset(((row_a, col_a), (row_b, col_b))) in pairings:
+                        valid = True
+                        break
+                if valid:
+                    break
+            if not valid:
+                return False
+        return True
+
     def _apply_planned_pages_to_template_units(data, template_data, run_sections):
         if not isinstance(data, dict):
             return data
@@ -13550,6 +14164,51 @@ def build_plan_wizard(parent):
                 unit["section"] = ""
         return data
 
+    def _build_planned_run_data(template_data, press, fmt, run, selected_sections, assignable_sections, plan):
+        """Build an in-memory generated layout for previewing or saving."""
+        source = template_data if isinstance(template_data, dict) else {"version": 1, "units": []}
+        data = json.loads(json.dumps(source, default=str))
+        for transient_key in ("_db_record_id", "_db_record_type", "_file_path", "_layout_name"):
+            data.pop(transient_key, None)
+        color_template_data = json.loads(json.dumps(data, default=str))
+
+        if template_data and not _template_matches_plan_double_trucks(color_template_data, press, fmt, selected_sections):
+            return None, "The selected template cannot accommodate the planned double-truck positions."
+
+        section_pages = [int(section.get("pages") or 0) for section in selected_sections]
+        section_names = [
+            str(section.get("name") or chr(ord("A") + index)).upper()
+            for index, section in enumerate(selected_sections)
+        ]
+        data.update({
+            "press": press,
+            "format": fmt,
+            "issue_date": plan.get("issue_date") or "",
+            "product": ((plan.get("publication") or "") + " " + _generate_run_name(run, assignable_sections, plan)).strip(),
+            "section_count": len(selected_sections),
+            "section_pages": section_pages,
+            "section_names": section_names,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "last_changed_by": get_windows_username(),
+        })
+        desired_starter = _desired_starter_format_for_publication(data.get("product") or "")
+        if desired_starter:
+            data["starter_format"] = desired_starter
+
+        color_cells, color_ok = _template_color_cells_for_run(
+            color_template_data, press, fmt, selected_sections
+        )
+        data = _apply_planned_pages_to_template_units(data, color_template_data, selected_sections)
+        data["color_cells"] = color_cells if color_ok else []
+        data["double_trucks"] = [
+            {
+                "section": str(selected_sections[item["section_index"]].get("name") or "").upper(),
+                "pages": list(item["pages"]),
+            }
+            for item in _planned_double_trucks_for_sections(selected_sections)
+        ]
+        return data, None
+
     def _template_matches_plan_colors(template_path, press, fmt, run_sections):
         try:
             template_data = safe_read_json(template_path) or {}
@@ -13558,7 +14217,7 @@ def build_plan_wizard(parent):
         if not isinstance(template_data, dict):
             return False
         _color_cells, ok = _template_color_cells_for_run(template_data, press, fmt, run_sections)
-        return bool(ok)
+        return bool(ok and _template_matches_plan_double_trucks(template_data, press, fmt, run_sections))
 
     def _candidate_templates_for_run(run, sections):
         press = run["press_var"].get()
@@ -13608,14 +14267,35 @@ def build_plan_wizard(parent):
             template_preview_state["popup"] = None
             template_preview_state["photo"] = None
 
-        def _show_template_preview(widget, template_var, template_paths, selected_name=None):
+        def _show_template_preview(widget, template_var, template_paths, selected_sections, run, selected_name=None):
             selected_name = (selected_name if selected_name is not None else (template_var.get() or "")).strip()
             template_path = template_paths.get(selected_name)
             if not template_path:
                 _hide_template_preview()
                 return
             try:
-                image, _title = open_json_preview(dialog, template_path, template_mode=True)
+                template_data = safe_read_json(template_path) or {}
+                press = run["press_var"].get()
+                fmt = _press_run_format(selected_sections)
+                preview_data, preview_error = _build_planned_run_data(
+                    template_data,
+                    press,
+                    fmt,
+                    run,
+                    selected_sections,
+                    assignable_sections,
+                    plan,
+                )
+                if preview_error:
+                    image = None
+                else:
+                    image = render_layout_preview_image_from_data(
+                        preview_data,
+                        dict(CONFIG_MAP[(press, fmt)]),
+                        scale=0.75,
+                        title_base=f"{press} - {fmt}",
+                        template_mode=False,
+                    )
             except Exception:
                 image = None
             if image is None:
@@ -13652,16 +14332,26 @@ def build_plan_wizard(parent):
             except Exception:
                 pass
 
-        def _schedule_template_preview(widget, template_var, template_paths, selected_name=None, delay=350):
+        def _schedule_template_preview(widget, template_var, template_paths, selected_sections, run, selected_name=None, delay=350):
             after_id = template_preview_state.get("after_id")
             if after_id is not None:
                 try:
                     dialog.after_cancel(after_id)
                 except Exception:
                     pass
-            template_preview_state["after_id"] = dialog.after(delay, lambda: _show_template_preview(widget, template_var, template_paths, selected_name=selected_name))
+            template_preview_state["after_id"] = dialog.after(
+                delay,
+                lambda: _show_template_preview(
+                    widget,
+                    template_var,
+                    template_paths,
+                    selected_sections,
+                    run,
+                    selected_name=selected_name,
+                ),
+            )
 
-        def _bind_template_dropdown_preview(combo, template_var, template_paths):
+        def _bind_template_dropdown_preview(combo, template_var, template_paths, selected_sections, run):
             def _bind_popdown():
                 try:
                     popdown = combo.tk.call("ttk::combobox::PopdownWindow", str(combo))
@@ -13678,7 +14368,15 @@ def build_plan_wizard(parent):
                         if not template_paths.get(hovered_name):
                             _hide_template_preview()
                             return
-                        _schedule_template_preview(combo, template_var, template_paths, selected_name=hovered_name, delay=125)
+                        _schedule_template_preview(
+                            combo,
+                            template_var,
+                            template_paths,
+                            selected_sections,
+                            run,
+                            selected_name=hovered_name,
+                            delay=125,
+                        )
                     except Exception:
                         pass
                 def _leave():
@@ -13711,11 +14409,22 @@ def build_plan_wizard(parent):
             ttk.Label(box, text="Template:").grid(row=1, column=0, sticky="w")
             template_combo = ttk.Combobox(box, textvariable=template_var, values=values, state="readonly", width=52)
             template_combo.grid(row=1, column=1, sticky="ew", padx=(8, 0))
-            template_combo.bind("<Enter>", lambda _event, w=template_combo, v=template_var, p=path_by_name: _schedule_template_preview(w, v, p))
+            template_combo.bind(
+                "<Enter>",
+                lambda _event, w=template_combo, v=template_var, p=path_by_name, s=selected_sections, r=run: _schedule_template_preview(w, v, p, s, r),
+            )
             template_combo.bind("<Leave>", _hide_template_preview)
-            template_combo.bind("<ButtonPress-1>", lambda _event, w=template_combo, v=template_var, p=path_by_name: (_bind_template_dropdown_preview(w, v, p), _hide_template_preview()), add="+")
-            template_combo.bind("<<ComboboxSelected>>", lambda _event, w=template_combo, v=template_var, p=path_by_name: _schedule_template_preview(w, v, p), add="+")
-            _bind_template_dropdown_preview(template_combo, template_var, path_by_name)
+            template_combo.bind(
+                "<ButtonPress-1>",
+                lambda _event, w=template_combo, v=template_var, p=path_by_name, s=selected_sections, r=run: (_bind_template_dropdown_preview(w, v, p, s, r), _hide_template_preview()),
+                add="+",
+            )
+            template_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _event, w=template_combo, v=template_var, p=path_by_name, s=selected_sections, r=run: _schedule_template_preview(w, v, p, s, r),
+                add="+",
+            )
+            _bind_template_dropdown_preview(template_combo, template_var, path_by_name, selected_sections, run)
             row += 1
 
         _bind_mousewheel_to_canvas(canvas, canvas)
@@ -13734,33 +14443,23 @@ def build_plan_wizard(parent):
                 template_path = cfg["template_paths"].get(template_name)
                 press = run["press_var"].get()
                 fmt = _press_run_format(selected_sections)
-                section_pages = [int(s.get("pages") or 0) for s in selected_sections]
-                section_names = [str(s.get("name") or chr(ord('A') + i)).upper() for i, s in enumerate(selected_sections)]
                 if template_path:
-                    data = safe_read_json(template_path) or {}
-                    data = json.loads(json.dumps(data, default=str)) if isinstance(data, dict) else {}
-                    data.pop("_db_record_id", None); data.pop("_db_record_type", None); data.pop("_file_path", None); data.pop("_layout_name", None)
-                    color_template_data = json.loads(json.dumps(data, default=str))
+                    template_data = safe_read_json(template_path) or {}
                 else:
-                    data = {"version": 1, "units": []}
-                    color_template_data = data
-                data.update({
-                    "press": press,
-                    "format": fmt,
-                    "issue_date": plan.get("issue_date") or "",
-                    "product": ((plan.get("publication") or "") + " " + _generate_run_name(run, assignable_sections, plan)).strip(),
-                    "section_count": len(selected_sections),
-                    "section_pages": section_pages,
-                    "section_names": section_names,
-                    "saved_at": datetime.now().isoformat(timespec="seconds"),
-                    "last_changed_by": get_windows_username(),
-                })
-                desired_starter = _desired_starter_format_for_publication(data.get("product") or "")
-                if desired_starter:
-                    data["starter_format"] = desired_starter
-                color_cells, color_ok = _template_color_cells_for_run(color_template_data, press, fmt, selected_sections)
-                data = _apply_planned_pages_to_template_units(data, color_template_data, selected_sections)
-                data["color_cells"] = color_cells if color_ok else []
+                    template_data = {"version": 1, "units": []}
+                data, build_error = _build_planned_run_data(
+                    template_data,
+                    press,
+                    fmt,
+                    run,
+                    selected_sections,
+                    assignable_sections,
+                    plan,
+                )
+                if build_error or data is None:
+                    messagebox.showerror("Plan Layout", build_error or "Could not build the planned layout.", parent=dialog)
+                    return
+                section_names = data.get("section_names") or []
                 name_base = sanitize_filename(f"P{'1' if press == 'Press 1' else '2'} {data.get('product') or 'PLAN'} {''.join(section_names)} {data.get('issue_date','').replace('/', '-')}").strip() or f"Plan Run {idx}"
                 filename = name_base + ".json"
                 target = os.path.join(LAYOUTS_DIR, filename)
@@ -13808,6 +14507,49 @@ def build_plan_wizard(parent):
         _set_split_status("")
         dialog._manifest_color_pages = {}
 
+    def _apply_manifest_double_trucks(manifest_double_trucks):
+        """Resolve message section aliases and seed the wizard DT groups."""
+        page_group_state.clear()
+        candidates = sorted(
+            list(sections),
+            key=lambda section: 0 if section.get("parent_id") else 1,
+        )
+        for item in manifest_double_trucks or []:
+            if not isinstance(item, dict):
+                continue
+            alias = str(item.get("section_alias") or item.get("section") or "").strip().upper()
+            try:
+                pages = tuple(sorted({int(page) for page in item.get("pages") or []}))
+            except Exception:
+                continue
+            if not alias or len(pages) != 2:
+                continue
+            translated_alias = str(_apply_section_translation(alias) or alias).strip().upper()
+            target = None
+            for section in candidates:
+                section_name = str(section.get("name_var").get() or "").strip().upper()
+                parent = _parent_for_subsection(section)
+                parent_name = str(parent.get("name_var").get() or "").strip().upper() if parent else ""
+                names = {section_name, parent_name}
+                compact_names = {
+                    re.sub(r"[^A-Z0-9]", "", name)
+                    for name in names
+                    if name
+                }
+                alias_matches = translated_alias in names or alias in names or any(
+                    len(alias) >= 2 and compact_name.startswith(alias)
+                    for compact_name in compact_names
+                )
+                if alias_matches and all(page in (section.get("page_numbers") or []) for page in pages):
+                    target = section
+                    break
+            if target is None:
+                continue
+            section_name = str(target.get("name_var").get() or "").strip().upper()
+            page_color_state[(section_name, pages)] = True
+            for page in pages:
+                page_group_state[(section_name, page)] = pages
+
     # Store references on dialog for drag-and-drop / load manifest
     dialog._plan_issue_date_var = issue_date_var
     dialog._plan_publication_var = publication_var
@@ -13815,6 +14557,7 @@ def build_plan_wizard(parent):
     dialog._plan_make_section = _make_section
     dialog._plan_show_page_one = show_page_one
     dialog._plan_reset_wizard_state = _reset_wizard_for_new_manifest
+    dialog._plan_apply_manifest_double_trucks = _apply_manifest_double_trucks
 
     show_page_one()
     return dialog
@@ -15194,6 +15937,15 @@ def build_main_launcher():
     def _on_plan_drop(event):
         path = _resolve_manifest_drop_path(root, event)
         if path:
+            try:
+                manifest = _read_manifest_for_planning(path)
+            except Exception as exc:
+                messagebox.showerror("Load Manifest", f"Could not read the manifest file.\n\n{exc}", parent=root)
+                return
+            if not manifest or not manifest.get("sections"):
+                messagebox.showerror("Load Manifest", "Invalid file/message for planning wizard", parent=root)
+                return
+            _open_manifest_in_associated_application(path, parent=root)
             open_plan(drop_path=path)
             return
         _report_unusable_manifest_drop(root, event)
@@ -16003,6 +16755,7 @@ def save_template_from_layout(ctx):
         data.pop('issue_date', None)
         data.pop('product', None)
         data.pop('color_cells', None)
+        data.pop('double_trucks', None)
         template_path = _db_unique_virtual_path('template', build_filename_suggestion(ctx))
         data['name'] = os.path.splitext(os.path.basename(template_path))[0]
         safe_write_json(template_path, data)
