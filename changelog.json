@@ -1,6 +1,41 @@
 {
-  "current_version": "1.4.16",
+  "current_version": "1.4.18",
   "versions": [
+    {
+      "version": "1.4.18",
+      "released": "8-14-2026",
+      "summary": "Improves launcher responsiveness and reduces unnecessary database and configuration-file work.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Cached product and section translation tables in memory, with invalidation after edits and database-mode changes.",
+            "Cached window-state JSON in memory and reread it only when the file changes, while preserving existing state merge behavior.",
+            "Added a process-wide PostgreSQL connection pool for psycopg2 and safely returns or discards connections after each operation.",
+            "Reduced launcher refresh polling from 5 seconds to 15 seconds and template/regular cache polling from 1.5 seconds to 5 seconds; local refresh triggers remain immediate."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.4.17",
+      "released": "8-6-2026",
+      "summary": "Fixes the planning wizard keeping stale color-page state when a new manifest is dropped after another is loaded, and treats 'Spot' manifest markers as color pages.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the planning wizard not fully resetting when a second manifest or email is dropped after an initial one was loaded, which could leave stale color-page and double-truck state from the previous manifest applied to the new one."
+          ]
+        },
+        {
+          "category": "Added",
+          "items": [
+            "Added 'Spot' as a color-page marker in PDF manifest parsing, alongside the existing 'Full' marker, so pages marked Spot in a manifest are colored when loaded into the planning wizard."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.4.16",
       "released": "8-3-2026",
@@ -2188,7 +2223,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.4.16",
+    "current_release": "1.4.18",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",

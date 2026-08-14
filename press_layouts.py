@@ -201,6 +201,15 @@ def _reset_database_backend_after_config_switch():
         _PREVIEW_IMAGE_CACHE.clear()
     except Exception:
         pass
+    try:
+        _TRANSLATION_CACHE["product"] = {"entries": None, "lookup": {}}
+        _TRANSLATION_CACHE["section"] = {"entries": None, "lookup": {}}
+    except Exception:
+        pass
+    try:
+        _db_close_pool()
+    except Exception:
+        pass
 
 
 def _db_mode_label_text():
@@ -439,12 +448,28 @@ def is_admin(username=None) -> bool:
     effective_username = username if username is not None else get_windows_username()
     return str(effective_username or '').strip().lower() == 'mbradbury'
 
+
+_TRANSLATION_CACHE = {
+    "product": {"entries": None, "lookup": {}},
+    "section": {"entries": None, "lookup": {}},
+}
+
+
 def _load_product_translations():
+    cache = _TRANSLATION_CACHE["product"]
+    if cache["entries"] is not None:
+        return [dict(entry) for entry in cache["entries"]]
     try:
         with _db_cursor() as (cur, config):
             schema = _db_pg_ident(config.get('schema'))
             cur.execute(f'SELECT incoming, output FROM {schema}.product_translations ORDER BY incoming')
-            return [{"incoming": r["incoming"], "output": r["output"]} for r in _db_fetchall(cur)]
+            entries = [{"incoming": r["incoming"], "output": r["output"]} for r in _db_fetchall(cur)]
+            cache["entries"] = entries
+            cache["lookup"] = {
+                str(entry.get("incoming") or "").strip().lower(): str(entry.get("output") or "").strip()
+                for entry in entries
+            }
+            return [dict(entry) for entry in entries]
     except Exception:
         return []
 
@@ -460,23 +485,32 @@ def _save_product_translations(translations):
                         f'INSERT INTO {schema}.product_translations (incoming, output) VALUES (%s, %s)',
                         (incoming, entry.get("output", "").strip()),
                     )
+        _TRANSLATION_CACHE["product"] = {"entries": None, "lookup": {}}
+        return True
     except Exception:
-        pass
+        return False
 
 def _apply_product_translation(product_name):
-    entries = _load_product_translations()
     lower_in = product_name.strip().lower()
-    for entry in entries:
-        if entry.get("incoming", "").strip().lower() == lower_in:
-            return entry.get("output", "").strip() or product_name
-    return product_name
+    _load_product_translations()
+    translated = _TRANSLATION_CACHE["product"]["lookup"].get(lower_in, "")
+    return translated or product_name
 
 def _load_section_translations():
+    cache = _TRANSLATION_CACHE["section"]
+    if cache["entries"] is not None:
+        return [dict(entry) for entry in cache["entries"]]
     try:
         with _db_cursor() as (cur, config):
             schema = _db_pg_ident(config.get('schema'))
             cur.execute(f'SELECT incoming, output FROM {schema}.section_translations ORDER BY incoming')
-            return [{"incoming": r["incoming"], "output": r["output"]} for r in _db_fetchall(cur)]
+            entries = [{"incoming": r["incoming"], "output": r["output"]} for r in _db_fetchall(cur)]
+            cache["entries"] = entries
+            cache["lookup"] = {
+                str(entry.get("incoming") or "").strip().lower(): str(entry.get("output") or "").strip()
+                for entry in entries
+            }
+            return [dict(entry) for entry in entries]
     except Exception:
         return []
 
@@ -492,16 +526,16 @@ def _save_section_translations(translations):
                         f'INSERT INTO {schema}.section_translations (incoming, output) VALUES (%s, %s)',
                         (incoming, entry.get("output", "").strip()),
                     )
+        _TRANSLATION_CACHE["section"] = {"entries": None, "lookup": {}}
+        return True
     except Exception:
-        pass
+        return False
 
 def _apply_section_translation(section_name):
-    entries = _load_section_translations()
     lower_in = str(section_name or "").strip().lower()
-    for entry in entries:
-        if entry.get("incoming", "").strip().lower() == lower_in:
-            return entry.get("output", "").strip() or section_name
-    return section_name
+    _load_section_translations()
+    translated = _TRANSLATION_CACHE["section"]["lookup"].get(lower_in, "")
+    return translated or section_name
 
 def stamp_layout_change_metadata(data, path=None):
     if not isinstance(data, dict):
@@ -1808,15 +1842,49 @@ def append_window_debug_log(event_type: str, state_key: str, payload=None):
         pass
 
 
+_WINDOW_STATE_CACHE = {
+    "signature": None,
+    "state": {},
+}
+_WINDOW_STATE_CACHE_LOCK = threading.RLock()
+
+
+def _window_state_file_signature():
+    try:
+        stat = os.stat(window_state_file_path())
+    except Exception:
+        return None
+    return (
+        int(getattr(stat, "st_mtime_ns", int(float(getattr(stat, "st_mtime", 0.0)) * 1000000000))),
+        int(getattr(stat, "st_size", 0)),
+    )
+
+
+def _clone_window_state(state_map):
+    try:
+        return json.loads(json.dumps(state_map if isinstance(state_map, dict) else {}))
+    except Exception:
+        return dict(state_map) if isinstance(state_map, dict) else {}
+
+
 def load_window_state_map():
-    data = safe_read_json(window_state_file_path())
-    return data if isinstance(data, dict) else {}
+    with _WINDOW_STATE_CACHE_LOCK:
+        signature = _window_state_file_signature()
+        if signature != _WINDOW_STATE_CACHE.get("signature"):
+            data = safe_read_json(window_state_file_path())
+            _WINDOW_STATE_CACHE["state"] = data if isinstance(data, dict) else {}
+            _WINDOW_STATE_CACHE["signature"] = signature
+        return _clone_window_state(_WINDOW_STATE_CACHE.get("state", {}))
 
 
 def save_window_state_map(state_map):
     if not isinstance(state_map, dict):
         return
-    safe_write_json(window_state_file_path(), state_map)
+    with _WINDOW_STATE_CACHE_LOCK:
+        path = window_state_file_path()
+        safe_write_json(path, state_map)
+        _WINDOW_STATE_CACHE["state"] = _clone_window_state(state_map)
+        _WINDOW_STATE_CACHE["signature"] = _window_state_file_signature()
 
 
 def load_treeview_state(state_key: str, tree_key: str):
@@ -6752,7 +6820,11 @@ def get_cached_layout_rows(force=False):
     return rows, changed
 
 
-def _bind_cache_watcher(win, getter, on_change, interval_ms=1500):
+CACHE_WATCH_INTERVAL_MS = 5 * 1000
+MAIN_LAUNCHER_REFRESH_INTERVAL_MS = 15 * 1000
+
+
+def _bind_cache_watcher(win, getter, on_change, interval_ms=CACHE_WATCH_INTERVAL_MS):
     state = {"after_id": None}
     def _tick():
         state["after_id"] = None
@@ -11456,7 +11528,7 @@ def _parse_manifest_pdf(pdf_path):
             elif cur is not None and cur["pages"] > 0 and not col_name_found[col_x] and not text.isdigit():
                 cur["name"] = text
                 col_name_found[col_x] = True
-            elif cur is not None and text == "Full":
+            elif cur is not None and text in ("Full", "Spot"):
                 cur["full_ys"].append(y)
 
     for col_x in columns:
@@ -11520,7 +11592,7 @@ def _parse_tab_text(lines, result):
                 page_count = int(lines[i + 1])
                 break
 
-    # Parse page pairs: "+ N Full" or "+ N"
+    # Parse page pairs: "+ N Full", "+ N Spot", or "+ N"
     page_pairs = []
     page_ref = 1
     for l in lines:
@@ -11529,7 +11601,7 @@ def _parse_tab_text(lines, result):
             if parts:
                 try:
                     paired_num = int(parts[0])
-                    has_full = "Full" in l
+                    has_full = "Full" in l or "Spot" in l
                     page_pairs.append((page_ref, paired_num, has_full))
                 except ValueError:
                     pass
@@ -11776,15 +11848,18 @@ def _load_manifest_from_path_in_dialog(dialog, path):
         sections = getattr(dialog, "_plan_sections", None)
         show_page_one_fn = getattr(dialog, "_plan_show_page_one", None)
         make_section_fn = getattr(dialog, "_plan_make_section", None)
+        reset_state_fn = getattr(dialog, "_plan_reset_wizard_state", None)
     except Exception:
         return
+    if reset_state_fn is not None:
+        reset_state_fn()
+    elif sections is not None:
+        sections.clear()
     if issue_date_var is not None and manifest.get("issue_date"):
         issue_date_var.set(manifest["issue_date"])
     if publication_var is not None and manifest.get("product"):
         publication_var.set(_apply_product_translation(manifest["product"]))
     if sections is not None and make_section_fn is not None:
-        sections.clear()
-        dialog._manifest_color_pages = {}
         for idx, sec in enumerate(manifest["sections"]):
             for key in _load_manifest_section(sections, make_section_fn, idx, sec):
                 dialog._manifest_color_pages[key] = True
@@ -13725,12 +13800,21 @@ def build_plan_wizard(parent):
                 dialog._manifest_color_pages = None
             show_page_two(plan)
 
+    def _reset_wizard_for_new_manifest():
+        """Reset all Plan wizard state so a newly loaded manifest starts clean."""
+        page_color_state.clear()
+        page_group_state.clear()
+        sections.clear()
+        _set_split_status("")
+        dialog._manifest_color_pages = {}
+
     # Store references on dialog for drag-and-drop / load manifest
     dialog._plan_issue_date_var = issue_date_var
     dialog._plan_publication_var = publication_var
     dialog._plan_sections = sections
     dialog._plan_make_section = _make_section
     dialog._plan_show_page_one = show_page_one
+    dialog._plan_reset_wizard_state = _reset_wizard_for_new_manifest
 
     show_page_one()
     return dialog
@@ -13873,7 +13957,7 @@ def build_main_launcher():
     group_by_iid = {}
     sort_state = load_treeview_sort_state("main_launcher", "layout_tree", "product")
     refresh_job = {"id": None}
-    auto_refresh_ms = 5000
+    auto_refresh_ms = MAIN_LAUNCHER_REFRESH_INTERVAL_MS
     preview_state = {"win": None, "path": None, "after_id": None, "request_id": 0, "photo": None, "pil_image": None}
     def cancel_pending_preview():
         after_id = preview_state.get("after_id")
@@ -15253,6 +15337,11 @@ _DB_COLLECTION_BY_ROOT = {v: k for k, v in _DB_COLLECTION_ROOTS.items()}
 _DB_BOOTSTRAPPED = False
 _DB_BOOTSTRAP_LOCK = threading.Lock()
 _DB_DRIVER = None
+_DB_POOL = None
+_DB_POOL_KEY = None
+_DB_POOL_LOCK = threading.RLock()
+_DB_POOL_MIN_CONNECTIONS = 1
+_DB_POOL_MAX_CONNECTIONS = 6
 _DB_LOCK_DEFAULTS = {
     "stale_minutes": 240,
     "heartbeat_seconds": 30,
@@ -15349,10 +15438,7 @@ def _db_connect(database=None, maintenance=False):
     driver = _db_import_driver()
     config = _db_load_config()
     dbname = database or (config.get("maintenance_database") if maintenance else config.get("database"))
-    kwargs = {"host": config.get("host"), "port": int(config.get("port", 5432)), "user": config.get("user"), "password": config.get("password"), "dbname": dbname}
-    sslmode = config.get("sslmode")
-    if sslmode:
-        kwargs["sslmode"] = sslmode
+    kwargs = _db_connection_kwargs(config, dbname)
     conn = driver.connect(**kwargs)
     try:
         conn.autocommit = True
@@ -15368,6 +15454,97 @@ def _db_connect(database=None, maintenance=False):
     except Exception:
         pass
     return conn
+
+
+def _db_connection_kwargs(config, dbname):
+    kwargs = {
+        "host": config.get("host"),
+        "port": int(config.get("port", 5432)),
+        "user": config.get("user"),
+        "password": config.get("password"),
+        "dbname": dbname,
+    }
+    sslmode = config.get("sslmode")
+    if sslmode:
+        kwargs["sslmode"] = sslmode
+    return kwargs
+
+
+def _db_pool_config_key(config):
+    return tuple(
+        (key, str(config.get(key) or ""))
+        for key in ("host", "port", "database", "user", "password", "sslmode")
+    )
+
+
+def _db_get_pool():
+    """Return the process-wide PostgreSQL pool for the selected database."""
+    global _DB_POOL, _DB_POOL_KEY
+    config = _db_load_config()
+    key = _db_pool_config_key(config)
+    with _DB_POOL_LOCK:
+        if _DB_POOL is not None and _DB_POOL_KEY == key:
+            return _DB_POOL
+        _db_close_pool()
+        driver = _db_import_driver()
+        if str(getattr(driver, "__name__", "")) == "psycopg2":
+            from psycopg2.pool import ThreadedConnectionPool
+            _DB_POOL = ThreadedConnectionPool(
+                _DB_POOL_MIN_CONNECTIONS,
+                _DB_POOL_MAX_CONNECTIONS,
+                **_db_connection_kwargs(config, config.get("database")),
+            )
+            _DB_POOL_KEY = key
+        else:
+            # psycopg3 installations retain the existing direct-connection
+            # behavior unless a compatible pool adapter is added explicitly.
+            _DB_POOL = None
+            _DB_POOL_KEY = None
+        return _DB_POOL
+
+
+def _db_close_pool():
+    global _DB_POOL, _DB_POOL_KEY
+    with _DB_POOL_LOCK:
+        pool = _DB_POOL
+        _DB_POOL = None
+        _DB_POOL_KEY = None
+        if pool is None:
+            return
+        try:
+            pool.closeall()
+        except AttributeError:
+            try:
+                pool.close()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+
+def _db_pool_connection(pool):
+    if pool is None:
+        return None, None
+    if hasattr(pool, "getconn"):
+        return pool.getconn(), "psycopg2"
+    return None, None
+
+
+def _db_return_pool_connection(pool, conn, pool_kind, close=False):
+    if conn is None:
+        return
+    try:
+        if close:
+            conn.close()
+        elif pool_kind == "psycopg2":
+            pool.putconn(conn)
+        else:
+            conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _db_fetchone(cursor):
@@ -15473,15 +15650,32 @@ def _db_bootstrap():
 @contextmanager
 def _db_cursor():
     _db_bootstrap()
-    conn = _db_connect()
+    config = _db_load_config()
+    pool = _db_get_pool()
+    conn = None
+    pool_kind = None
+    pooled = False
+    if pool is not None:
+        conn, pool_kind = _db_pool_connection(pool)
+        pooled = conn is not None
+    if conn is None:
+        conn = _db_connect()
+    elif pooled:
+        try:
+            conn.autocommit = True
+        except Exception:
+            pass
     try:
         cur = conn.cursor()
         try:
-            yield cur, _db_load_config()
+            yield cur, config
         finally:
             cur.close()
     finally:
-        conn.close()
+        if pooled:
+            _db_return_pool_connection(pool, conn, pool_kind, close=bool(sys.exc_info()[0]))
+        else:
+            conn.close()
 
 
 def _db_parse_saved_at(value):
@@ -16069,6 +16263,7 @@ def main():
         _db_bootstrap()
         build_main_launcher()
     finally:
+        _db_close_pool()
         release_single_main_launcher_instance()
 
 
