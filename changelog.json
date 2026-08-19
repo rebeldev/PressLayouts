@@ -1,6 +1,49 @@
 {
-  "current_version": "1.5.0",
+  "current_version": "1.5.2",
   "versions": [
+    {
+      "version": "1.5.2",
+      "released": "8-18-2026",
+      "summary": "Scopes single-instance enforcement to each Windows user instead of the entire computer.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed Press Layouts blocking a second signed-in Windows user when another user on the same computer already had the application open.",
+            "Changed the single-instance mutex, activation port, and activation token to use a stable per-user key."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Press Layouts still prevents the same Windows user from opening a second instance, while allowing different Windows users on the same workstation to run one instance each.",
+            "Updated the duplicate-instance warning to clarify that the one-instance limit applies per Windows user account."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.5.1",
+      "released": "8-18-2026",
+      "summary": "Adds administrator visibility and control for active Press Layouts user sessions.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added PostgreSQL-backed logged-in user session tracking with username, workstation, process ID, version, database mode, login time, and last heartbeat.",
+            "Made the main launcher (ADMIN) flag clickable so administrators can view active Press Layouts sessions.",
+            "Added an administrator Force Logout action that requests the selected remote Press Layouts session to close and records which administrator requested it."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Active sessions now send a heartbeat every 15 seconds and stale session rows are removed after 90 seconds.",
+            "A forced-logout request shows the affected user who requested the logout and then closes their running Press Layouts application."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.5.0",
       "released": "8-14-2026",
@@ -2419,7 +2462,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.5.0",
+    "current_release": "1.5.2",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",

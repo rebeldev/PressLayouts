@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import uuid
+import zlib
 import tkinter as tk
 import tkinterdnd2 as tkdnd
 
@@ -7006,6 +7008,8 @@ def _rebuild_template_cache(entries=None):
             "section_pages": section_pages,
             "saved_dt": item.get("fs_saved_dt"),
             "saved_disp": item.get("fs_saved_disp") or "",
+            "last_used_dt": (db_row or {}).get("last_used_at") if isinstance((db_row or {}).get("last_used_at"), datetime) else parse_saved_at((db_row or {}).get("last_used_at") or (data.get("last_used_at") if valid else "")),
+            "last_used_disp": fmt_dt_for_display((db_row or {}).get("last_used_at") if isinstance((db_row or {}).get("last_used_at"), datetime) else parse_saved_at((db_row or {}).get("last_used_at") or (data.get("last_used_at") if valid else ""))),
             "last_changed_by": _last_changed_by_display(data.get("last_changed_by", "")) if valid else "Unknown",
             "valid": valid,
         })
@@ -7053,8 +7057,9 @@ def list_matching_templates(press_name, format_name, section_count=None, section
                     break
             if mismatch:
                 continue
-        results.append((row.get("name") or stem, row.get("path")))
-    return results
+        results.append((row.get("name") or stem, row.get("path"), row.get("last_used_dt")))
+    results.sort(key=lambda item: (item[2] is not None, item[2] or datetime.min), reverse=True)
+    return [(name, path) for name, path, _last_used in results]
 
 
 def _coerce_section_pages_for_display(data):
@@ -8234,7 +8239,7 @@ def build_template_editor_launcher(parent):
     list_frame.rowconfigure(0, weight=1)
     list_frame.columnconfigure(0, weight=1)
 
-    columns = ("sections", "pages", "changed_by", "saved")
+    columns = ("sections", "pages", "last_used", "changed_by", "saved")
     tree = ttk.Treeview(list_frame, columns=columns, show="tree headings", selectmode="browse")
     tree.grid(row=0, column=0, sticky="nsew")
     vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
@@ -8244,6 +8249,7 @@ def build_template_editor_launcher(parent):
     template_heading_titles = {
         "sections": "Sections",
         "pages": "Pages",
+        "last_used": "Last Used",
         "changed_by": "Last Changed By",
         "saved": "Last Saved",
     }
@@ -8252,16 +8258,17 @@ def build_template_editor_launcher(parent):
         tree.heading(key, text=title)
     tree.column("#0", width=280, anchor="w")
     tree.column("sections", width=80, anchor="center")
-    tree.column("pages", width=130, anchor="center")
-    tree.column("changed_by", width=140, anchor="center")
+    tree.column("pages", width=120, anchor="center")
+    tree.column("last_used", width=170, anchor="center")
+    tree.column("changed_by", width=130, anchor="center")
     tree.column("saved", width=170, anchor="center")
     try:
         tree.tag_configure("group_row", font=(None, 10, "bold"), foreground="#1f1f1f")
         tree.tag_configure("subgroup_row", font=(None, 10, "bold"), foreground="#444444")
     except Exception:
         pass
-    apply_treeview_column_width_state(tree, ("#0", "sections", "pages", "changed_by", "saved"), "template_editor_launcher", "template_tree")
-    bind_treeview_state_memory(root, "template_editor_launcher", "template_tree", tree, columns=("#0", "sections", "pages", "changed_by", "saved"))
+    apply_treeview_column_width_state(tree, ("#0", "sections", "pages", "last_used", "changed_by", "saved"), "template_editor_launcher", "template_tree")
+    bind_treeview_state_memory(root, "template_editor_launcher", "template_tree", tree, columns=("#0", "sections", "pages", "last_used", "changed_by", "saved"))
 
     template_rows = []
     row_by_iid = {}
@@ -8334,6 +8341,8 @@ def build_template_editor_launcher(parent):
                 return (tuple(r.get("section_pages_sort", (0, 0, 0, 0))), int(r.get("section_count") or 0), (r.get("name") or "").lower())
             if col == "saved":
                 return (r["saved_dt"] or datetime.min, (r.get("name") or "").lower())
+            if col == "last_used":
+                return (r.get("last_used_dt") or datetime.min, (r.get("name") or "").lower())
             if col == "changed_by":
                 return ((r.get("last_changed_by") or "").lower(), (r.get("name") or "").lower())
             return (r["name"] or "").lower()
@@ -8341,7 +8350,7 @@ def build_template_editor_launcher(parent):
         return sorted(rows, key=keyfunc, reverse=sort_state["desc"])
 
     def load_rows(rows):
-        tree_state, has_saved_state = get_treeview_reload_state(tree, "template_editor_launcher", "template_tree", columns=("#0", "sections", "pages", "changed_by", "saved"))
+        tree_state, has_saved_state = get_treeview_reload_state(tree, "template_editor_launcher", "template_tree", columns=("#0", "sections", "pages", "last_used", "changed_by", "saved"))
         saved_selected = [str(iid) for iid in (tree_state.get("selected_iids") or [])]
         saved_focus = str(tree_state.get("focus_iid") or "").strip() or None
         saved_yview = tree_state.get("yview") if isinstance(tree_state.get("yview"), list) else None
@@ -8372,17 +8381,17 @@ def build_template_editor_launcher(parent):
             format_groups = press_groups.get(press_name, {})
             press_count = sum(len(items) for items in format_groups.values())
             press_open = True if not has_saved_state else (press_iid in open_iids)
-            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", ""), open=press_open, tags=("group_row",))
+            tree.insert("", "end", iid=press_iid, text=f"{press_name} ({press_count})", values=("", "", "", "", "", ""), open=press_open, tags=("group_row",))
             group_by_iid[press_iid] = ("press", press_name)
             for format_name in sorted(format_groups.keys(), key=format_sort_key, reverse=format_reverse):
                 format_iid = f"__template_format__::{press_name}::{format_name}"
                 format_count = len(format_groups.get(format_name, []))
                 format_open = True if not has_saved_state else (format_iid in open_iids)
-                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", ""), open=format_open, tags=("subgroup_row",))
+                tree.insert(press_iid, "end", iid=format_iid, text=f"{format_name} ({format_count})", values=("", "", "", "", "", ""), open=format_open, tags=("subgroup_row",))
                 group_by_iid[format_iid] = ("format", press_name, format_name)
                 for row in format_groups.get(format_name, []):
                     iid = row["path"]
-                    tree.insert(format_iid, "end", iid=iid, text=row.get("name", ""), values=(row.get("section_count", ""), row.get("pages_disp", ""), row.get("last_changed_by", "Unknown"), row.get("saved_disp", "")))
+                    tree.insert(format_iid, "end", iid=iid, text=row.get("name", ""), values=(row.get("section_count", ""), row.get("pages_disp", ""), row.get("last_used_disp", ""), row.get("last_changed_by", "Unknown"), row.get("saved_disp", "")))
                     row_by_iid[iid] = row
         known_iids = set(row_by_iid).union(group_by_iid)
         restore_selection = [iid for iid in saved_selected if iid in known_iids]
@@ -8446,6 +8455,7 @@ def build_template_editor_launcher(parent):
         tree.heading("#0", text=_treeview_sort_heading_text("Template Name", sort_state, "name"), command=lambda: sort_by("name"))
         tree.heading("sections", text=_treeview_sort_heading_text(template_heading_titles["sections"], sort_state, "sections"), command=lambda: sort_by("sections"))
         tree.heading("pages", text=_treeview_sort_heading_text(template_heading_titles["pages"], sort_state, "pages"), command=lambda: sort_by("pages"))
+        tree.heading("last_used", text=_treeview_sort_heading_text(template_heading_titles["last_used"], sort_state, "last_used"), command=lambda: sort_by("last_used"))
         tree.heading("changed_by", text=_treeview_sort_heading_text(template_heading_titles["changed_by"], sort_state, "changed_by"), command=lambda: sort_by("changed_by"))
         tree.heading("saved", text=_treeview_sort_heading_text(template_heading_titles["saved"], sort_state, "saved"), command=lambda: sort_by("saved"))
 
@@ -8464,6 +8474,8 @@ def build_template_editor_launcher(parent):
                 "pages_disp": _format_section_pages_for_display({"section_pages": cached.get("section_pages") or [], "section_count": cached.get("section_count") or 0}),
                 "saved_dt": cached.get("saved_dt"),
                 "saved_disp": cached.get("saved_disp") or "",
+                "last_used_dt": cached.get("last_used_dt"),
+                "last_used_disp": cached.get("last_used_disp") or "",
                 "last_changed_by": cached.get("last_changed_by") or "Unknown",
             }
             all_rows.append(row)
@@ -11104,11 +11116,23 @@ def show_launcher_macro_dialog(parent, launcher_username=None):
 
 
 _SINGLE_INSTANCE_HOST = "127.0.0.1"
-_SINGLE_INSTANCE_PORT = 47657
-_SINGLE_INSTANCE_AUTH_TOKEN = "PRESS_LAYOUTS_SINGLE_INSTANCE_V2"
-_SINGLE_INSTANCE_MUTEX_NAME = r"Local\PressLayoutsMainLauncherSingleton"
+
+
+def _single_instance_user_key():
+    """Return a stable, non-sensitive key that scopes the launcher guard to one Windows user."""
+    username = str(get_windows_username() or "Unknown").strip().lower()
+    return f"{zlib.crc32(username.encode('utf-8')) & 0xffffffff:08x}"
+
+
+_SINGLE_INSTANCE_USER_KEY = _single_instance_user_key()
+# Each Windows user receives a separate loopback activation port and mutex.
+# This prevents duplicate launches for the same user while allowing different
+# signed-in users on the same workstation to run Press Layouts concurrently.
+_SINGLE_INSTANCE_PORT = 47657 + ((zlib.crc32(_SINGLE_INSTANCE_USER_KEY.encode('ascii')) & 0xffffffff) % 10000)
+_SINGLE_INSTANCE_AUTH_TOKEN = f"PRESS_LAYOUTS_SINGLE_INSTANCE_V3:{_SINGLE_INSTANCE_USER_KEY}"
+_SINGLE_INSTANCE_MUTEX_NAME = rf"Local\PressLayoutsMainLauncherSingleton_{_SINGLE_INSTANCE_USER_KEY}"
 _SINGLE_INSTANCE_ALERT_TITLE = "Press Layouts Already Running"
-_SINGLE_INSTANCE_ALERT_MESSAGE = "Press Layouts is already open. Only one main launcher instance can run at a time."
+_SINGLE_INSTANCE_ALERT_MESSAGE = "Press Layouts is already open for your Windows user account. Only one main launcher instance can run per user."
 _SINGLE_INSTANCE_SERVER_SOCKET = None
 _SINGLE_INSTANCE_MUTEX_HANDLE = None
 _SINGLE_INSTANCE_ACTIVE_WINDOW = None
@@ -14469,6 +14493,11 @@ def build_plan_wizard(parent):
                     target = os.path.join(LAYOUTS_DIR, f"{name_base}_{counter}.json")
                 data["name"] = os.path.splitext(os.path.basename(target))[0]
                 safe_write_json(target, data)
+                if template_path:
+                    try:
+                        mark_template_last_used(template_path)
+                    except Exception:
+                        pass
                 created.append(os.path.basename(target))
                 created_paths.append(target)
             open_parent = None
@@ -14621,7 +14650,10 @@ def build_main_launcher():
         username_label.configure(style="LauncherLink.TLabel", cursor="hand2")
         username_label.bind("<Button-1>", lambda _event: show_launcher_macro_dialog(root, launcher_username=launcher_username))
     if allow_launcher_maintenance_actions:
-        ttk.Label(status_frame, text="(ADMIN)", style="AdminFlag.TLabel").pack(side="right", padx=(0, 12))
+        admin_label = ttk.Label(status_frame, text="(ADMIN)", style="AdminFlag.TLabel")
+        admin_label.pack(side="right", padx=(0, 12))
+        admin_label.configure(cursor="hand2")
+        admin_label.bind("<Button-1>", lambda _event: show_logged_in_users_dialog(root))
         db_mode_label = ttk.Label(status_frame, text=_db_mode_label_text(), style=_db_mode_label_style(), anchor="e", justify="right")
         db_mode_label.pack(side="right", padx=(0, 12))
         db_mode_label.configure(cursor="hand2")
@@ -16055,7 +16087,9 @@ def build_main_launcher():
         _persist_bound_preview_panes(root)
         close_preview()
         unregister_single_instance_window(root)
+        _db_unregister_user_session()
         root.destroy()
+    session_state = start_user_session_tracking(root, running_version, on_close)
     root.bind("<FocusIn>", _on_launcher_focus_in, add="+")
     root.protocol("WM_DELETE_WINDOW", on_close)
     refresh(preserve_state=False)
@@ -16360,6 +16394,7 @@ def _db_bootstrap():
                     section_count INTEGER,
                     section_pages JSONB,
                     saved_at TIMESTAMPTZ,
+                    last_used_at TIMESTAMPTZ,
                     last_changed_by TEXT,
                     data JSONB NOT NULL,
                     preview_png BYTEA,
@@ -16367,6 +16402,7 @@ def _db_bootstrap():
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     UNIQUE (record_type, file_name)
                 )''')
+                cur.execute(f'ALTER TABLE {schema}.records ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ')
                 cur.execute(f'CREATE INDEX IF NOT EXISTS records_lookup_idx ON {schema}.records (record_type, file_name)')
                 cur.execute(f'CREATE INDEX IF NOT EXISTS records_name_idx ON {schema}.records (record_type, name)')
                 cur.execute(f'''CREATE TABLE IF NOT EXISTS {schema}.record_locks (
@@ -16380,6 +16416,19 @@ def _db_bootstrap():
                     PRIMARY KEY (record_type, record_id)
                 )''')
                 cur.execute(f'CREATE INDEX IF NOT EXISTS record_locks_heartbeat_idx ON {schema}.record_locks (heartbeat_at)')
+                cur.execute(f'''CREATE TABLE IF NOT EXISTS {schema}.user_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    hostname TEXT,
+                    process_id INTEGER,
+                    app_version TEXT,
+                    database_mode TEXT,
+                    logged_in_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    logout_requested_at TIMESTAMPTZ,
+                    logout_requested_by TEXT
+                )''')
+                cur.execute(f'CREATE INDEX IF NOT EXISTS user_sessions_heartbeat_idx ON {schema}.user_sessions (heartbeat_at)')
                 cur.execute(f'''CREATE TABLE IF NOT EXISTS {schema}.product_translations (
                     id BIGSERIAL PRIMARY KEY,
                     incoming TEXT NOT NULL,
@@ -16466,7 +16515,7 @@ def _db_list_rows(record_type):
     with _db_cursor() as (cur, config):
         schema = _db_pg_ident(config.get('schema'))
         cur.execute(
-            f'''SELECT id, record_type, file_name, file_stem, name, press, format, issue_date, product, section_count, section_pages, saved_at, last_changed_by, data, created_at, updated_at FROM {schema}.records WHERE record_type = %s ORDER BY COALESCE(name, file_stem, file_name), file_name''',
+            f'''SELECT id, record_type, file_name, file_stem, name, press, format, issue_date, product, section_count, section_pages, saved_at, last_used_at, last_changed_by, data, created_at, updated_at FROM {schema}.records WHERE record_type = %s ORDER BY COALESCE(name, file_stem, file_name), file_name''',
             (record_type,),
         )
         return _db_fetchall(cur)
@@ -16476,10 +16525,34 @@ def _db_read_record(record_type, file_name):
     with _db_cursor() as (cur, config):
         schema = _db_pg_ident(config.get('schema'))
         cur.execute(
-            f'''SELECT id, record_type, file_name, file_stem, name, press, format, issue_date, product, section_count, section_pages, saved_at, last_changed_by, data, created_at, updated_at FROM {schema}.records WHERE record_type = %s AND file_name = %s''',
+            f'''SELECT id, record_type, file_name, file_stem, name, press, format, issue_date, product, section_count, section_pages, saved_at, last_used_at, last_changed_by, data, created_at, updated_at FROM {schema}.records WHERE record_type = %s AND file_name = %s''',
             (record_type, file_name),
         )
         return _db_fetchone(cur)
+
+def mark_template_last_used(path):
+    """Record when a template is used to create a planned layout."""
+    now = datetime.now()
+    parsed = _db_parse_virtual_path(path)
+    if parsed and parsed.get('file_name') and parsed.get('record_type') == 'template':
+        with _db_cursor() as (cur, config):
+            schema = _db_pg_ident(config.get('schema'))
+            cur.execute(
+                f'UPDATE {schema}.records SET last_used_at = %s WHERE record_type = %s AND file_name = %s',
+                (now, 'template', parsed['file_name']),
+            )
+        _TEMPLATE_CACHE["signature"] = None
+        return now
+    data = _FS_safe_read_json(path)
+    if isinstance(data, dict):
+        data = dict(data)
+        data['last_used_at'] = now.isoformat(timespec='seconds')
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, indent=2)
+        _TEMPLATE_CACHE["signature"] = None
+        return now
+    return None
+
 
 def _db_record_exists(path):
     parsed = _db_parse_virtual_path(path)
@@ -17001,6 +17074,244 @@ def _db_os_remove(path):
 
 os.path.exists = _db_os_path_exists
 os.remove = _db_os_remove
+
+
+# =============================================================================
+# Logged-in user session tracking and administrator logout controls
+# =============================================================================
+
+_USER_SESSION_ID = str(uuid.uuid4())
+_USER_SESSION_STALE_SECONDS = 90
+_USER_SESSION_HEARTBEAT_MS = 15 * 1000
+
+
+def _db_register_user_session(app_version=""):
+    context = _db_lock_context()
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(
+            f'''INSERT INTO {schema}.user_sessions
+                (session_id, username, hostname, process_id, app_version, database_mode,
+                 logged_in_at, heartbeat_at, logout_requested_at, logout_requested_by)
+               VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), NULL, NULL)
+               ON CONFLICT (session_id) DO UPDATE SET
+                 username = EXCLUDED.username,
+                 hostname = EXCLUDED.hostname,
+                 process_id = EXCLUDED.process_id,
+                 app_version = EXCLUDED.app_version,
+                 database_mode = EXCLUDED.database_mode,
+                 heartbeat_at = NOW()''',
+            (_USER_SESSION_ID, context['opened_by'], context['hostname'], context['process_id'],
+             str(app_version or ''), get_selected_db_config_label()),
+        )
+
+
+def _db_heartbeat_user_session():
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(
+            f'''UPDATE {schema}.user_sessions
+                SET heartbeat_at = NOW(), database_mode = %s
+                WHERE session_id = %s
+                RETURNING logout_requested_at, logout_requested_by''',
+            (get_selected_db_config_label(), _USER_SESSION_ID),
+        )
+        return _db_fetchone(cur) or {}
+
+
+def _db_unregister_user_session():
+    try:
+        with _db_cursor() as (cur, config):
+            schema = _db_pg_ident(config.get('schema'))
+            cur.execute(f'DELETE FROM {schema}.user_sessions WHERE session_id = %s', (_USER_SESSION_ID,))
+    except Exception:
+        pass
+
+
+def _db_list_active_user_sessions():
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(
+            f'''DELETE FROM {schema}.user_sessions
+                WHERE heartbeat_at < NOW() - (%s * INTERVAL '1 second')''',
+            (_USER_SESSION_STALE_SECONDS,),
+        )
+        cur.execute(
+            f'''SELECT session_id, username, hostname, process_id, app_version, database_mode,
+                       logged_in_at, heartbeat_at, logout_requested_at, logout_requested_by
+                FROM {schema}.user_sessions
+                ORDER BY LOWER(username), hostname, logged_in_at'''
+        )
+        return _db_fetchall(cur)
+
+
+def _db_request_user_logout(session_id, requested_by=None):
+    with _db_cursor() as (cur, config):
+        schema = _db_pg_ident(config.get('schema'))
+        cur.execute(
+            f'''UPDATE {schema}.user_sessions
+                SET logout_requested_at = NOW(), logout_requested_by = %s
+                WHERE session_id = %s
+                RETURNING username, hostname''',
+            (requested_by or get_windows_username(), str(session_id or '')),
+        )
+        return _db_fetchone(cur)
+
+
+def _fmt_session_time(value):
+    if isinstance(value, datetime):
+        return fmt_dt_for_display(value)
+    return fmt_dt_for_display(parse_saved_at(value)) if value else ""
+
+
+def show_logged_in_users_dialog(parent):
+    if not is_admin():
+        return None
+    existing = getattr(parent, '_logged_in_users_dialog', None)
+    try:
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return existing
+    except Exception:
+        pass
+    dialog = tk.Toplevel(parent)
+    parent._logged_in_users_dialog = dialog
+    set_window_icon(dialog)
+    dialog.title('Logged In Users')
+    dialog.geometry('900x430')
+    dialog.minsize(760, 340)
+    remember_window_geometry(dialog, 'logged_in_users_dialog', default_geometry='900x430', minsize=(760, 340))
+    frame = ttk.Frame(dialog, padding=12)
+    frame.pack(fill='both', expand=True)
+    frame.rowconfigure(1, weight=1)
+    frame.columnconfigure(0, weight=1)
+    ttk.Label(frame, text='Active Press Layouts Sessions', font=(None, 11, 'bold')).grid(row=0, column=0, sticky='w', pady=(0, 8))
+    columns = ('computer', 'pid', 'version', 'database', 'login', 'heartbeat', 'status')
+    tree = ttk.Treeview(frame, columns=columns, show='tree headings', selectmode='browse')
+    tree.grid(row=1, column=0, sticky='nsew')
+    scroll = ttk.Scrollbar(frame, orient='vertical', command=tree.yview)
+    scroll.grid(row=1, column=1, sticky='ns')
+    tree.configure(yscrollcommand=scroll.set)
+    tree.heading('#0', text='User')
+    headings = {'computer':'Computer','pid':'PID','version':'Version','database':'Database','login':'Logged In','heartbeat':'Last Seen','status':'Status'}
+    widths = {'computer':135,'pid':65,'version':75,'database':75,'login':150,'heartbeat':150,'status':120}
+    tree.column('#0', width=135, anchor='w')
+    for col in columns:
+        tree.heading(col, text=headings[col])
+        tree.column(col, width=widths[col], anchor='center')
+    row_by_iid = {}
+    refresh_job = {'id': None}
+
+    def refresh():
+        try:
+            rows = _db_list_active_user_sessions()
+        except Exception as exc:
+            messagebox.showerror('Logged In Users', f'Could not load active sessions:\n\n{exc}', parent=dialog)
+            return
+        selected = tree.selection()
+        selected_id = selected[0] if selected else None
+        tree.delete(*tree.get_children(''))
+        row_by_iid.clear()
+        for row in rows:
+            iid = str(row.get('session_id') or '')
+            if not iid:
+                continue
+            status = 'Logout requested' if row.get('logout_requested_at') else ('This session' if iid == _USER_SESSION_ID else 'Active')
+            tree.insert('', 'end', iid=iid, text=row.get('username') or 'Unknown', values=(
+                row.get('hostname') or '', row.get('process_id') or '', row.get('app_version') or '',
+                row.get('database_mode') or '', _fmt_session_time(row.get('logged_in_at')),
+                _fmt_session_time(row.get('heartbeat_at')), status))
+            row_by_iid[iid] = row
+        if selected_id and selected_id in row_by_iid:
+            tree.selection_set(selected_id)
+            tree.focus(selected_id)
+
+    def force_logout():
+        selection = tree.selection()
+        session_id = selection[0] if selection else tree.focus()
+        row = row_by_iid.get(session_id)
+        if not row:
+            messagebox.showinfo('Force Logout', 'Select a user session first.', parent=dialog)
+            return
+        user = row.get('username') or 'Unknown'
+        computer = row.get('hostname') or 'Unknown computer'
+        if session_id == _USER_SESSION_ID:
+            messagebox.showinfo('Force Logout', 'Use the main launcher Close button to end your own session.', parent=dialog)
+            return
+        if not messagebox.askyesno(
+            'Force User Logout',
+            f'Force {user} on {computer} to log out?\n\nTheir running Press Layouts application will close. Unsaved changes may be lost.',
+            parent=dialog,
+            icon='warning',
+        ):
+            return
+        result = _db_request_user_logout(session_id, get_windows_username())
+        if not result:
+            messagebox.showinfo('Force Logout', 'That session is no longer active.', parent=dialog)
+        refresh()
+
+    buttons = ttk.Frame(frame)
+    buttons.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(10, 0))
+    ttk.Button(buttons, text='Force Logout', command=force_logout, width=14).pack(side='left')
+    ttk.Button(buttons, text='Refresh', command=refresh, width=10).pack(side='right', padx=(8, 0))
+    ttk.Button(buttons, text='Close', command=dialog.destroy, width=10).pack(side='right')
+
+    def auto_refresh():
+        refresh_job['id'] = None
+        try:
+            if dialog.winfo_exists():
+                refresh()
+                refresh_job['id'] = dialog.after(5000, auto_refresh)
+        except Exception:
+            pass
+
+    def close_dialog():
+        if refresh_job.get('id') is not None:
+            try:
+                dialog.after_cancel(refresh_job['id'])
+            except Exception:
+                pass
+        dialog.destroy()
+
+    dialog.protocol('WM_DELETE_WINDOW', close_dialog)
+    refresh()
+    refresh_job['id'] = dialog.after(5000, auto_refresh)
+    return dialog
+
+
+def start_user_session_tracking(root, app_version, close_callback):
+    state = {'job': None, 'logout_handled': False}
+    try:
+        _db_register_user_session(app_version)
+    except Exception:
+        return state
+
+    def tick():
+        state['job'] = None
+        try:
+            result = _db_heartbeat_user_session()
+            if result.get('logout_requested_at') and not state['logout_handled']:
+                state['logout_handled'] = True
+                requested_by = result.get('logout_requested_by') or 'an administrator'
+                messagebox.showwarning(
+                    'Press Layouts Logout',
+                    f'Your Press Layouts session was closed by {requested_by}.',
+                    parent=root,
+                )
+                close_callback()
+                return
+        except Exception:
+            pass
+        try:
+            if root.winfo_exists():
+                state['job'] = root.after(_USER_SESSION_HEARTBEAT_MS, tick)
+        except Exception:
+            pass
+
+    state['job'] = root.after(_USER_SESSION_HEARTBEAT_MS, tick)
+    return state
 
 # =============================================================================
 # Application entry point
