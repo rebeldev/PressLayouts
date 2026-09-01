@@ -4702,11 +4702,13 @@ def direct_print_image_file(img_path, printer_name=None, copies=1, orientation="
                 diff = ImageChops.difference(img, bg)
                 bbox = diff.getbbox()
                 if bbox:
-                    pad = 4
+                    pad = 12
+                    # Extra bottom pad to preserve descenders (g, y, j) on last line
+                    bottom_pad = 20
                     left = max(0, int(bbox[0]) - pad)
                     top = max(0, int(bbox[1]) - pad)
                     right = min(int(img.size[0]), int(bbox[2]) + pad)
-                    bottom = min(int(img.size[1]), int(bbox[3]) + pad)
+                    bottom = min(int(img.size[1]), int(bbox[3]) + bottom_pad)
                     if right > left and bottom > top:
                         img = img.crop((left, top, right, bottom))
             except Exception:
@@ -4797,8 +4799,14 @@ def direct_print_image_file(img_path, printer_name=None, copies=1, orientation="
             y = int(offset_y + top_margin) if align_top else int(offset_y + top_margin + ((safe_h - scaled.size[1]) / 2))
 
         position_adjust_inches = position_adjust_inches if isinstance(position_adjust_inches, dict) else {}
-        adjust_x = max(0, int(round(float(position_adjust_inches.get("x", 0.0)) * dpi_x)))
-        adjust_y = max(0, int(round(float(position_adjust_inches.get("y", 0.0)) * dpi_y)))
+        try:
+            adjust_x = int(round(float(position_adjust_inches.get("x", 0.0)) * dpi_x))
+        except Exception:
+            adjust_x = 0
+        try:
+            adjust_y = int(round(float(position_adjust_inches.get("y", 0.0)) * dpi_y))
+        except Exception:
+            adjust_y = 0
         min_x = int(offset_x + left_margin)
         min_y = int(offset_y + top_margin)
         max_x = int(offset_x + left_margin + max(0, safe_w - scaled.size[0]))
@@ -4845,7 +4853,15 @@ def _print_layout_data_to_default_printer(data, copies=5):
     os.close(fd)
     try:
         img.save(path, format='PNG', dpi=(300, 300))
-        return direct_print_image_file(path, copies=max(1, int(copies or 1)), orientation='Landscape', align_top=False)
+        # Extra 0.25" bottom margin plus slight upward shift to prevent descender clipping (g, y)
+        return direct_print_image_file(
+            path,
+            copies=max(1, int(copies or 1)),
+            orientation='Landscape',
+            align_top=False,
+            margins_inches={"left": 0.15, "top": 0.15, "right": 0.15, "bottom": 0.40},
+            position_adjust_inches={"y": -0.10},
+        )
     finally:
         try:
             os.remove(path)
@@ -6041,7 +6057,15 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                     printer_selection = _show_printer_dialog()
                     if printer_selection:
                         printer_name, copies = printer_selection
-                        printed = _direct_print_image(path, printer_name, copies, orientation="Landscape", align_top=False)
+                        printed = _direct_print_image(
+                            path,
+                            printer_name,
+                            copies,
+                            orientation="Landscape",
+                            align_top=False,
+                            margins_inches={"left": 0.15, "top": 0.15, "right": 0.15, "bottom": 0.40},
+                            position_adjust_inches={"y": -0.10},
+                        )
                 except Exception as e:
                     direct_print_error['message'] = str(e)
                     printed = False

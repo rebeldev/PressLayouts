@@ -1,6 +1,21 @@
 {
-  "current_version": "1.5.3",
+  "current_version": "1.5.4",
   "versions": [
+    {
+      "version": "1.5.4",
+      "released": "9-02-2026",
+      "summary": "Fixes bottom-line descender clipping on printed layouts.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed low-hanging g's and other descenders on the bottom line being cut off when printing layouts.",
+            "Added 0.25 inch extra bottom margin to printed layouts and shifted the image up slightly so the bottom line clears the printable area.",
+            "Increased whitespace trim padding (4px to 12px, 20px at bottom) so the cropped print image preserves descenders."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.5.3",
       "released": "9-01-2026",
@@ -2485,7 +2500,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.5.3",
+    "current_release": "1.5.4",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",
