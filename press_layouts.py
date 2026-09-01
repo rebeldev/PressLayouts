@@ -748,10 +748,31 @@ def build_save_filename_suggestion(ctx) -> str:
         return build_regular_filename_suggestion(ctx)
     return build_layout_filename_suggestion(ctx)
 def safe_int(value):
-    try:
-        return int(str(value).strip())
-    except Exception:
+    """Parse a cell value to its page number, ignoring any letter prefix/suffix.
+
+    The layout editor now permits letters in grids (e.g. "C1", "C2") so
+    operators can annotate cells. For imposition name, template saving and
+    template matching the letter portion is stripped and only the numeric part
+    is used — "C1" is interpreted as 1, "C12" as 12. Pure letters with no
+    digits return None and are treated as empty for those calculations.
+    """
+    text = str(value or "").strip()
+    if not text:
         return None
+    # Fast path for pure digits
+    if text.isdigit():
+        try:
+            return int(text)
+        except Exception:
+            return None
+    # Strip letter portion: keep only digits so "C1" -> 1, "C12" -> 12
+    digits = re.sub(r"\D", "", text)
+    if digits:
+        try:
+            return int(digits)
+        except Exception:
+            return None
+    return None
 def unit_row_has_numbers(unit_dict, row_index: int) -> bool:
     entries_2d = unit_dict["entries"]
     if row_index < 0 or row_index >= len(entries_2d):
@@ -1496,7 +1517,16 @@ def apply_window_sizing(win, config):
 
 def _grid_entry_allows_only_numbers(proposed_value: str) -> bool:
     proposed = str(proposed_value or "").strip()
-    return proposed == "" or proposed.isdigit()
+    if proposed == "":
+        return True
+    # Allow pure numbers (page numbers) and letters / alphanumeric placeholders
+    # such as "C1", "C2". Letters are permitted for operator notes; for
+    # imposition name, template saving and template matching the letter
+    # portion is stripped via safe_int so "C1" is interpreted as 1.
+    return proposed.isalnum()
+
+def _grid_entry_allows_numbers_or_letters(proposed_value: str) -> bool:
+    return _grid_entry_allows_only_numbers(proposed_value)
 
 def create_press_unit(
     parent,
@@ -2623,6 +2653,7 @@ def _normalize_template_data(data):
         return data
     normalized = dict(data)
     normalized.pop("double_trucks", None)
+    normalized.pop("notes", None)
     try:
         section_count = max(1, min(4, int(normalized.get("section_count", 1))))
     except Exception:
@@ -2781,7 +2812,7 @@ def _unit_has_assigned_pages(unit_ctx) -> bool:
     for row in unit_ctx.get("entries", []):
         for cell in row:
             try:
-                if (cell.get() or "").strip():
+                if safe_int(cell.get()) is not None:
                     return True
             except Exception:
                 continue
@@ -2884,7 +2915,12 @@ def _invalid_grid_cells_from_data(data):
             row_values = row if isinstance(row, list) else []
             for col_index, cell in enumerate(row_values, start=1):
                 value = str(cell or "").strip()
-                if value and (not value.isdigit()):
+                # Letters and alphanumeric placeholders like "C1" are allowed.
+                # For imposition/template calculations the letter portion is
+                # stripped via safe_int so "C1" is interpreted as 1; pure
+                # letters with no digits are treated as empty. Only flag
+                # truly illegal symbols (anything not alphanumeric).
+                if value and not value.isalnum():
                     invalid.append((label, row_index, col_index, value))
     return invalid
 
@@ -2900,7 +2936,7 @@ def _units_missing_sections_from_data(data):
         for row in (unit.get("grid", []) or []):
             row_values = row if isinstance(row, list) else []
             for cell in row_values:
-                if str(cell or "").strip():
+                if safe_int(cell) is not None:
                     has_values = True
                     break
             if has_values:
@@ -3031,6 +3067,17 @@ def collect_layout_data(ctx):
             for (unit, r, c) in sorted(ctx.get("color_cells", set()))
         ]
         data["double_trucks"] = normalize_double_trucks({"double_trucks": ctx.get("double_trucks", [])})
+        # Notes: free-form text for layouts (also regulars). Stripped letter handling
+        # for grids is separate; notes are stored verbatim and printed.
+        try:
+            notes_widget = ctx.get("notes_text")
+            if notes_widget is not None:
+                raw_notes = notes_widget.get("1.0", "end-1c") if hasattr(notes_widget, "get") else ""
+                notes_val = str(raw_notes or "").strip()
+                if notes_val:
+                    data["notes"] = notes_val
+        except Exception:
+            pass
     return data
 def populate_layout_from_data(ctx, data):
     regular_mode = _ctx_is_regular_mode(ctx)
@@ -3134,6 +3181,24 @@ def populate_layout_from_data(ctx, data):
             except Exception:
                 pass
         ctx["double_trucks"] = normalize_double_trucks(data)
+        # ---- load notes ----
+        try:
+            notes_widget = ctx.get("notes_text")
+            if notes_widget is not None:
+                notes_val = str(data.get("notes") or "")
+                # Text widget
+                try:
+                    notes_widget.delete("1.0", "end")
+                    notes_widget.insert("1.0", notes_val)
+                except Exception:
+                    # Fallback for Entry/StringVar
+                    try:
+                        notes_widget.delete(0, "end")
+                        notes_widget.insert(0, notes_val)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
 def do_save(win, ctx):
     default_dir = ctx.get("default_dir", LAYOUTS_DIR)
@@ -3252,7 +3317,9 @@ def _template_imposition_signature_from_data(data):
     Section count, unit labels, unit section assignments, and occupied grid-cell
     positions define the imposition. The actual page numbers and section page
     totals are intentionally ignored so the same structure still matches when a
-    layout uses a different page run.
+    layout uses a different page run.  Letter placeholders in grid cells are
+    ignored - only numeric cells contribute to the imposition structure so
+    templates match regardless of any letters typed into grids.
     """
     normalized = _normalize_template_data(data if isinstance(data, dict) else {})
     try:
@@ -3269,7 +3336,7 @@ def _template_imposition_signature_from_data(data):
         occupancy = []
         for row in grid:
             row_values = row if isinstance(row, list) else []
-            occupancy.append(tuple(bool(str(cell or "").strip()) for cell in row_values))
+            occupancy.append(tuple(safe_int(cell) is not None for cell in row_values))
         unit_signatures.append((label, section, tuple(occupancy)))
     unit_signatures.sort(key=lambda item: item[0].lower())
     return (section_count, tuple(unit_signatures))
@@ -3406,6 +3473,7 @@ def save_template_from_layout(ctx):
         data.pop("product", None)
         data.pop("color_cells", None)
         data.pop("double_trucks", None)
+        data.pop("notes", None)
 
         # Generate template filename
         template_filename = build_filename_suggestion(ctx)
@@ -3728,12 +3796,21 @@ def _normalize_layout_data_for_touch(data, path, template_mode=False, regular_mo
             normalized["starter_format"] = desired_starter_format
         elif existing_starter_format:
             normalized["starter_format"] = existing_starter_format
+        # Preserve notes for layouts and regulars; headless ctx has no Text widget
+        # so collect_layout_data would not have captured it. Keep original notes.
+        try:
+            existing_notes = str((data or {}).get("notes") or "").strip()
+            if existing_notes and not normalized.get("notes"):
+                normalized["notes"] = existing_notes
+        except Exception:
+            pass
     if template_mode:
         normalized = helpers_mod._normalize_template_data(normalized)
         normalized.pop("issue_date", None)
         normalized.pop("product", None)
         normalized.pop("color_cells", None)
         normalized.pop("double_trucks", None)
+        normalized.pop("notes", None)
     return normalized, ctx
 
 
@@ -4229,6 +4306,32 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
 
     legend_circle_diameter = max(42, int(legend_circle_diameter))
     legend_y = footer_line_y - 190
+
+    # ---- Notes between layout and legend (same font/size as color pages list) ----
+    # Moved up ~2 inches from legend; legend and color list stay anchored.
+    _notes_raw = (data.get("notes") or "").strip() if not template_mode else ""
+    if _notes_raw:
+        try:
+            _notes_max_w = max(260, img_w - (2 * margin_x))
+            _notes_line_h = max(44, _render_measure_text(draw, 'Ag', legend_list_font)[1] + 10)
+            _notes_lines_wrap = _render_wrap_text_to_width(draw, f"Notes: {_notes_raw}", legend_list_font, _notes_max_w)
+            _max_notes = 6
+            if len(_notes_lines_wrap) > _max_notes:
+                _notes_lines_wrap = _notes_lines_wrap[:_max_notes]
+                _notes_lines_wrap[-1] = _notes_lines_wrap[-1].rstrip() + " …"
+            _notes_block_h = len(_notes_lines_wrap) * _notes_line_h
+            # Base position just above legend, then shift up ~2 inches (≈600px at 300dpi)
+            # Do NOT move legend_y; only notes move.
+            _two_inches_px = 600  # ~2" on 2200x1940 print canvas
+            _notes_y = legend_y - _notes_block_h - 16 - _two_inches_px
+            # Clamp to avoid overlapping the grid area
+            _min_notes_y = grid_top + 12
+            if _notes_y < _min_notes_y:
+                _notes_y = _min_notes_y
+            for _ni, _nline in enumerate(_notes_lines_wrap):
+                draw.text((margin_x, _notes_y + _ni * _notes_line_h), _nline, fill='black', font=legend_list_font)
+        except Exception:
+            pass
     legend_circle_box = (
         margin_x,
         legend_y,
@@ -4779,7 +4882,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     def _unit_has_any_pages(unit_data):
         for row in unit_data.get("grid", []) or []:
             for cell in row:
-                if str(cell or "").strip():
+                if safe_int(cell) is not None:
                     return True
         return False
 
@@ -5149,7 +5252,27 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
     # Press area
     press_area_frame = ttk.Frame(win, padding=(16, 0, 16, 12))
     press_area_frame.pack(fill="both", expand=True)
-    controls_outer_frame.pack(fill="x")
+    # Notes (layouts and regulars only) - between press area and controls
+    notes_frame = None
+    notes_text = None
+    notes_scroll = None
+    if not template_mode:
+        notes_frame = ttk.Frame(win, padding=(16, 0, 16, 8))
+        # Re-order so notes appear above the button bar: forget and repack controls
+        try:
+            controls_outer_frame.pack_forget()
+        except Exception:
+            pass
+        ttk.Label(notes_frame, text="Notes:", font=(None, 10, "bold")).pack(side="left", anchor="n", padx=(0, 8), pady=4)
+        notes_text = tk.Text(notes_frame, height=3, wrap="word", font=(None, 10), relief="solid", borderwidth=1)
+        notes_text.pack(side="left", fill="both", expand=True)
+        notes_scroll = ttk.Scrollbar(notes_frame, orient="vertical", command=notes_text.yview)
+        notes_scroll.pack(side="right", fill="y")
+        notes_text.configure(yscrollcommand=notes_scroll.set)
+        notes_frame.pack(fill="x")
+        controls_outer_frame.pack(fill="x")
+    else:
+        controls_outer_frame.pack(fill="x")
 
     enable_hscroll = config.get("enable_hscroll", False)
     _, press_frame, _canvas = make_press_area(press_area_frame, enable_hscroll=enable_hscroll,
@@ -5277,6 +5400,8 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
         "press_selector_var": press_selector_var,
         "format_selector_var": format_selector_var,
         "units": units,
+        "notes_text": notes_text,
+        "notes_frame": notes_frame,
         "file_path": None,
         "layout_name": None,
         "template_mode": template_mode,
@@ -6491,6 +6616,7 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
             "color_cells": list(data.get("color_cells", []) or []),
             "double_trucks": normalize_double_trucks(data),
             "starter_format": (starter_format_var.get() or "Standard").strip() or "Standard",
+            "notes": str(data.get("notes") or "").strip(),
         }
 
     def _sync_dirty_state():
@@ -6601,6 +6727,14 @@ def build_press_layout(win, title="Press Layout", config=None, load_path=None, l
                             pass
             except Exception:
                 pass
+        # Notes dirty tracking
+        try:
+            notes_widget = ctx.get("notes_text")
+            if notes_widget is not None:
+                notes_widget.bind("<KeyRelease>", _mark_dirty_event)
+                notes_widget.bind("<<Modified>>", _mark_dirty_event)
+        except Exception:
+            pass
     except Exception:
         pass
 

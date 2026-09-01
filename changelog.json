@@ -1,6 +1,29 @@
 {
-  "current_version": "1.5.2",
+  "current_version": "1.5.3",
   "versions": [
+    {
+      "version": "1.5.3",
+      "released": "9-01-2026",
+      "summary": "Allows letters in grids as page annotations and adds printable layout notes.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a Notes field to layouts and regulars (templates do not save notes) as a multi-line Text area between the press grid and the button bar, persisted to layouts/regulars JSON and preserved through touch/cleanup and press/format conversions.",
+            "Notes print on the printed layout between the layout grid and the legend using the same font and size as the Color pages list, positioned about 2 inches above the legend; the legend and color pages list remain anchored.",
+            "Added dirty tracking for notes so unsaved note edits prompt to save on close."
+          ]
+        },
+        {
+          "category": "Changed",
+          "items": [
+            "Grid cells now accept letters and alphanumeric values such as C1 and C2; validation allows isalnum values and only flags non-alphanumeric symbols.",
+            "For imposition name, page counts, template saving/matching, occupancy and dinky detection, the letter portion is stripped and only the numeric part is used so C1 is interpreted as 1 and C2 as 2; pure letters with no digits are treated as empty.",
+            "Updated safe_int to extract digits via regex so all page-number calculations consistently ignore letter prefixes/suffixes."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.5.2",
       "released": "8-18-2026",
@@ -2462,7 +2485,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.5.2",
+    "current_release": "1.5.3",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",
