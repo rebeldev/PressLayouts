@@ -1,6 +1,37 @@
 {
-  "current_version": "1.5.4",
+  "current_version": "1.5.6",
   "versions": [
+    {
+      "version": "1.5.6",
+      "released": "9-11-2026",
+      "summary": "Fixes email-manifest double trucks across press runs and named-section color pages.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed email-manifest double-truck scanning stopping at the first Butt in Gutter block, which dropped Center Spread entries in later press runs (e.g. A10/A11 in the FIRST EDITION RUN).",
+            "Fixed Butt in Gutter continuation rows being misidentified as double trucks (e.g. BU4/BU5 and SR8/SR9); butt entries and their continuations are now ignored until the next Center Spread block.",
+            "Fixed manifest color pages not being recognized for mixed-case section names (e.g. NFL Sports) in the planning wizard color-page screen.",
+            "Double-truck lines that name their section explicitly (e.g. NFL Sports:SP4,SP5) now attach to that section instead of being dropped on an unmatchable page prefix."
+          ]
+        }
+      ]
+    },
+    {
+      "version": "1.5.5",
+      "released": "9-11-2026",
+      "summary": "Fixes planning wizard labelling every unit with the last section on multi-section press runs.",
+      "changes": [
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed the planning wizard assigning all press units to the last section when a run contains multiple sections (e.g. a Press 2 B&C run labelled every unit C instead of D2, C2 and B2-Upper as C and A2, F2 and G2-Upper as B).",
+            "Template units are now matched to run sections by their positional template index (S1..S4) instead of mixing positional letter/number aliases with real section names, so a positional alias can no longer collide with a run section name.",
+            "Units with a blank section are always left empty in generated layouts, even if the template grid contains values; color-page and double-truck template matching use the same positional resolution."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.5.4",
       "released": "9-02-2026",
@@ -2500,7 +2531,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.5.4",
+    "current_release": "1.5.6",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",

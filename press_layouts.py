@@ -11794,9 +11794,16 @@ def _parse_manifest_msg_body(body):
             collecting_double_truck_metadata = True
             double_truck_lines.append("\t".join(cells[1:]))
             continue
+        if label == "butt in gutter":
+            # Butt-in-gutter entries are never double trucks: ignore this line
+            # and any continuation rows until the next Center Spread block.
+            # (A later press run's Center Spread block must still be found, so
+            # this suspends collection instead of ending the scan.)
+            collecting_double_truck_metadata = False
+            continue
         if not collecting_double_truck_metadata:
             continue
-        if label in {"butt in gutter", "thanks,"}:
+        if label == "thanks,":
             break
         if not line.strip():
             # Outlook places a blank line between continuation rows.
@@ -11806,21 +11813,31 @@ def _parse_manifest_msg_body(body):
         double_truck_lines.append(line)
 
     double_trucks = []
-    center_tokens = []
     for line in double_truck_lines:
-        center_tokens.extend(re.findall(r"\b([A-Za-z]+)(\d+)\b", line))
-    token_index = 0
-    while token_index + 1 < len(center_tokens):
-        first_prefix, first_page = center_tokens[token_index]
-        second_prefix, second_page = center_tokens[token_index + 1]
-        if first_prefix.upper() == second_prefix.upper():
-            double_trucks.append({
-                "section_alias": first_prefix.upper(),
-                "pages": [int(first_page), int(second_page)],
-            })
-            token_index += 2
-        else:
-            token_index += 1
+        center_tokens = re.findall(r"\b([A-Za-z]+)(\d+)\b", line)
+        if len(center_tokens) < 2:
+            continue
+        # A "Section:XX#,YY#" line names its section explicitly
+        # (e.g. "NFL Sports:SP4,SP5" belongs to NFL Sports even though the
+        # page prefix is SP). Prefer that name over the page prefix.
+        section_override = None
+        override_match = re.match(r"\s*([A-Za-z][A-Za-z .&'\-]*?)\s*:\s*[A-Za-z]*\d", line)
+        if override_match:
+            candidate = override_match.group(1).strip()
+            if candidate and not re.fullmatch(r"[A-Za-z]+\d+", candidate):
+                section_override = candidate.upper()
+        token_index = 0
+        while token_index + 1 < len(center_tokens):
+            first_prefix, first_page = center_tokens[token_index]
+            second_prefix, second_page = center_tokens[token_index + 1]
+            if first_prefix.upper() == second_prefix.upper():
+                double_trucks.append({
+                    "section_alias": section_override or first_prefix.upper(),
+                    "pages": [int(first_page), int(second_page)],
+                })
+                token_index += 2
+            else:
+                token_index += 1
     result["double_trucks"] = double_trucks
 
     by_name = {}
@@ -14183,27 +14200,54 @@ def build_plan_wizard(parent):
                     })
         return planned
 
+    def _template_section_index_for_unit(template_data, unit_section):
+        """Resolve a template unit's section label to its positional section index.
+
+        Templates are canonicalized to S1..S4 section names on save, so a unit
+        belongs to exactly one template position. Blank sections resolve to None
+        and are always left empty by the caller, even if the grid has content.
+        Legacy placeholders (bare number/letter) are supported positionally.
+        Run section names are deliberately NOT matched here: mixing positional
+        letters ("B" for position 2) with real run names ("B" for the first
+        section of a B&C run) caused every unit to be reassigned to the last
+        section.
+        """
+        text = str(unit_section or "").strip().upper()
+        if not text:
+            return None
+        try:
+            template_names = list(template_data.get("section_names") or [])
+        except Exception:
+            template_names = []
+        for idx, name in enumerate(template_names):
+            try:
+                candidate = str(name or "").strip().upper()
+            except Exception:
+                candidate = ""
+            if candidate and text == candidate:
+                return idx
+        # Legacy fallback: positional placeholders independent of run names.
+        for idx in range(4):
+            placeholders = {
+                f"S{idx + 1}",
+                str(idx + 1),
+                chr(ord("A") + idx),
+            }
+            if text in placeholders:
+                return idx
+        return None
+
     def _section_aliases_for_template_index(template_data, run_sections, section_index):
-        aliases = set()
-        try:
-            aliases.add(str(section_index + 1))
-            aliases.add(chr(ord('A') + int(section_index)))
-        except Exception:
-            pass
-        try:
-            run_name = str((run_sections[section_index] or {}).get("name") or "").strip()
-            if run_name:
-                aliases.add(run_name)
-        except Exception:
-            pass
+        # Kept for compatibility; new code resolves units positionally via
+        # _template_section_index_for_unit to avoid alias collisions.
         try:
             template_names = template_data.get("section_names") or []
-            template_name = str(template_names[section_index] or "").strip()
+            template_name = str(template_names[section_index] or "").strip().upper()
             if template_name:
-                aliases.add(template_name)
+                return {template_name}
         except Exception:
             pass
-        return {value.strip().upper() for value in aliases if str(value or "").strip()}
+        return {f"S{int(section_index) + 1}"}
 
     def _template_color_cells_for_run(template_data, press, fmt, run_sections):
         planned_color_pages = _planned_color_pages_for_sections(run_sections)
@@ -14215,15 +14259,13 @@ def build_plan_wizard(parent):
         for wanted in planned_color_pages:
             section_index = int(wanted.get("section_index", 0))
             page_number = int(wanted.get("template_page") or wanted.get("page", 0))
-            aliases = _section_aliases_for_template_index(template_data, run_sections, section_index)
             matched = False
             matched_color_capable = False
             for unit in template_data.get("units", []) or []:
                 if not isinstance(unit, dict):
                     continue
                 unit_label = str(unit.get("label") or "")
-                unit_section = str(unit.get("section") or "").strip().upper()
-                if aliases and unit_section and unit_section not in aliases:
+                if _template_section_index_for_unit(template_data, unit.get("section")) != section_index:
                     continue
                 for r, row in enumerate(unit.get("grid", []) or []):
                     row = row if isinstance(row, list) else []
@@ -14257,14 +14299,12 @@ def build_plan_wizard(parent):
         only_k_labels = {str(label or "") for label in cfg.get("only_k_labels", set())}
         for wanted in _planned_double_trucks_for_sections(run_sections):
             section_index = int(wanted["section_index"])
-            aliases = _section_aliases_for_template_index(template_data, run_sections, section_index)
             locations = {}
             for unit in template_data.get("units", []) or []:
                 if not isinstance(unit, dict):
                     continue
                 unit_label = str(unit.get("label") or "")
-                unit_section = str(unit.get("section") or "").strip().upper()
-                if unit_section and aliases and unit_section not in aliases:
+                if _template_section_index_for_unit(template_data, unit.get("section")) != section_index:
                     continue
                 for row, values in enumerate(unit.get("grid", []) or []):
                     for col, value in enumerate(values if isinstance(values, list) else []):
@@ -14292,40 +14332,69 @@ def build_plan_wizard(parent):
         units = data.get("units") or []
         if not isinstance(units, list):
             return data
-        for section_index, section in enumerate(run_sections):
+        planned_by_index = []
+        for section in run_sections or []:
             planned_pages = []
-            for page_number in section.get("page_numbers", []) or []:
-                try:
-                    planned_pages.append(int(page_number))
-                except Exception:
-                    pass
-            if not planned_pages:
+            if isinstance(section, dict):
+                for page_number in section.get("page_numbers", []) or []:
+                    try:
+                        planned_pages.append(int(page_number))
+                    except Exception:
+                        pass
+            planned_by_index.append(planned_pages)
+        run_names = []
+        for section in run_sections or []:
+            try:
+                run_names.append(str(section.get("name") or "").strip().upper())
+            except Exception:
+                run_names.append("")
+        for unit in units:
+            if not isinstance(unit, dict):
                 continue
-            section_name = str(section.get("name") or "").strip().upper()
-            aliases = _section_aliases_for_template_index(template_data, run_sections, section_index)
-            for unit in units:
-                if not isinstance(unit, dict):
-                    continue
-                unit_section = str(unit.get("section") or "").strip().upper()
-                if aliases and unit_section and unit_section not in aliases:
-                    continue
-                grid = unit.get("grid") or []
-                if not isinstance(grid, list):
-                    continue
-                assigned_to_this_unit = False
-                for r, row in enumerate(grid):
+            template_index = _template_section_index_for_unit(
+                template_data if isinstance(template_data, dict) else {}, unit.get("section")
+            )
+            grid = unit.get("grid")
+            if not isinstance(grid, list):
+                continue
+            if template_index is None or template_index < 0 or template_index >= len(planned_by_index):
+                # Blank or unresolvable sections are always left empty, even if
+                # the template grid somehow contains values.
+                for row in grid:
                     if not isinstance(row, list):
                         continue
-                    for c, cell_value in enumerate(row):
-                        try:
-                            relative_page = int(str(cell_value or "").strip())
-                        except Exception:
-                            continue
-                        if 1 <= relative_page <= len(planned_pages):
-                            row[c] = str(planned_pages[relative_page - 1])
-                            assigned_to_this_unit = True
-                if assigned_to_this_unit and section_name:
-                    unit["section"] = section_name
+                    for c in range(len(row)):
+                        row[c] = ""
+                unit["section"] = ""
+                continue
+            planned_pages = planned_by_index[template_index]
+            section_name = run_names[template_index] if template_index < len(run_names) else ""
+            if not planned_pages:
+                for row in grid:
+                    if not isinstance(row, list):
+                        continue
+                    for c in range(len(row)):
+                        row[c] = ""
+                unit["section"] = ""
+                continue
+            assigned_to_this_unit = False
+            for r, row in enumerate(grid):
+                if not isinstance(row, list):
+                    continue
+                for c, cell_value in enumerate(row):
+                    try:
+                        relative_page = int(str(cell_value or "").strip())
+                    except Exception:
+                        continue
+                    if 1 <= relative_page <= len(planned_pages):
+                        row[c] = str(planned_pages[relative_page - 1])
+                        assigned_to_this_unit = True
+                    else:
+                        row[c] = ""
+            if assigned_to_this_unit and section_name:
+                unit["section"] = section_name
+            elif not assigned_to_this_unit:
+                unit["section"] = ""
         # Empty units should not carry a section assignment into generated layouts.
         # Leaving a section on an empty unit makes the imposition builder include
         # unused units in the generated imposition name.
@@ -14677,12 +14746,15 @@ def build_plan_wizard(parent):
     def show_page_two_from_validation():
         plan = _validate_plan_inputs()
         if plan is not None:
-            # Apply manifest color state to page_color_state
+            # Apply manifest color state to page_color_state. Section names are
+            # uppercased to match _section_snapshot: manifest names keep their
+            # original casing (e.g. "NFL Sports") while plan lookups use the
+            # uppercased wizard names (e.g. "NFL SPORTS").
             manifest_colors = getattr(dialog, "_manifest_color_pages", None)
             if manifest_colors:
                 for key, value in manifest_colors.items():
                     section_name, page = key
-                    page_color_state[(section_name, (int(page),))] = bool(value)
+                    page_color_state[(str(section_name or "").strip().upper(), (int(page),))] = bool(value)
                 dialog._manifest_color_pages = None
             show_page_two(plan)
 
