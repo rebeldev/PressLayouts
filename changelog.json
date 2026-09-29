@@ -1,6 +1,20 @@
 {
-  "current_version": "1.5.6",
+  "current_version": "1.5.7",
   "versions": [
+    {
+      "version": "1.5.7",
+      "released": "9-17-2026",
+      "summary": "Adds auto-populated Press number to all starter sheet formats.",
+      "changes": [
+        {
+          "category": "Added",
+          "items": [
+            "Added a Press box labeled \"Press\" to the Standard, USAT, and NYT starter sheet formats, positioned beside the Publication box in the top band with the same boxed style.",
+            "Press value is auto-populated from the layout press (1 for Press 1, 2 for Press 2) and is not handwritten, matching Issue Date and Total Pages behavior."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.5.6",
       "released": "9-11-2026",
@@ -2531,7 +2545,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.5.6",
+    "current_release": "1.5.7",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",

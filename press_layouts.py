@@ -4406,12 +4406,27 @@ def _starter_sheet_fields_from_layout_data(data):
         color_pages, plates = _layout_color_and_plate_counts_from_data(data)
     except Exception:
         color_pages, plates = 0, 0
+    press_text = ""
+    for press_key in ("press", "press_name"):
+        try:
+            press_raw = str(data.get(press_key) or "").strip()
+        except Exception:
+            press_raw = ""
+        if not press_raw:
+            continue
+        if "1" in press_raw:
+            press_text = "1"
+            break
+        if "2" in press_raw:
+            press_text = "2"
+            break
     return {
         "publication": normalize_publication_name(data.get("product") or ""),
         "issue_date": issue_text,
         "color_pages": str(color_pages or "").strip(),
         "plates": str(plates or "").strip(),
         "total_pages": str(total_pages),
+        "press": press_text,
     }
 
 
@@ -4434,6 +4449,7 @@ def make_starter_sheet_image_from_data(data, format_name=None):
     color_pages = str(fields.get("color_pages", "") or "").strip()
     plates = str(fields.get("plates", "") or "").strip()
     total_pages = str(fields.get("total_pages", "") or "").strip()
+    press_number = str(fields.get("press", "") or "").strip()
     fmt_key = (format_name or "Standard").strip().upper()
     if fmt_key not in {"STANDARD", "USAT", "NYT"}:
         fmt_key = "STANDARD"
@@ -4567,11 +4583,21 @@ def make_starter_sheet_image_from_data(data, format_name=None):
             )
             _draw_centered_lines(value_lines, value_font, content_box)
 
-    publication_box = (margin, 70, page_w - margin, 310)
+    press_box_w = 460
+    publication_box = (margin, 70, page_w - margin - press_box_w - gap, 310)
+    press_box = (page_w - margin - press_box_w, 70, page_w - margin, 310)
     _draw_field_block(
         publication_box,
         "Publication",
         publication,
+        handwritten=False,
+        label_max_size=62,
+        value_max_size=116,
+    )
+    _draw_field_block(
+        press_box,
+        "Press",
+        press_number,
         handwritten=False,
         label_max_size=62,
         value_max_size=116,
