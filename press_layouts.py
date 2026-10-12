@@ -1821,7 +1821,7 @@ def load_preview_image_for_json(json_path: str):
         return None
 
 
-def _resize_preview_image_helper(image, scale=0.75):
+def _resize_preview_image_helper(image, scale=0.5):
     try:
         from PIL import Image
     except Exception as e:
@@ -1831,13 +1831,84 @@ def _resize_preview_image_helper(image, scale=0.75):
     try:
         scale = float(scale)
     except Exception:
-        scale = 0.75
+        scale = 0.5
     scale = max(0.1, min(1.0, scale))
     width, height = image.size
     new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
     if new_size == image.size:
         return image
     return image.resize(new_size, Image.LANCZOS)
+
+
+# Target width for stored preview images. The preview panel displays at a few
+# hundred px wide, so storing ~1650px-wide PNGs oversamples. Clamping to 880px
+# keeps on-screen output crisp while cutting TOAST/DB size roughly in half.
+PREVIEW_MAX_WIDTH = 880
+PREVIEW_PNG_COMPRESS_LEVEL = 6
+
+
+def _normalize_preview_image_for_storage(image, max_width=PREVIEW_MAX_WIDTH):
+    """Downscale oversized previews with LANCZOS and normalize the image mode."""
+    if image is None:
+        return None
+    try:
+        from PIL import Image
+    except Exception as e:
+        raise RuntimeError(f"Pillow is required for previews: {e}")
+    try:
+        max_width = int(max_width or 0)
+    except Exception:
+        max_width = PREVIEW_MAX_WIDTH
+    if max_width <= 0:
+        max_width = PREVIEW_MAX_WIDTH
+    try:
+        width, height = image.size
+    except Exception:
+        return image
+    if width > max_width:
+        new_height = max(1, int(height * (max_width / float(width))))
+        try:
+            image = image.resize((max_width, new_height), Image.LANCZOS)
+        except Exception:
+            pass
+    try:
+        if image.mode == "P":
+            image = image.convert("RGB")
+        elif image.mode not in ("RGB", "RGBA", "L"):
+            image = image.convert("RGB")
+    except Exception:
+        pass
+    return image
+
+
+def _encode_preview_png_bytes(image, max_width=PREVIEW_MAX_WIDTH):
+    """Encode a preview image as optimized PNG bytes for DB/file storage."""
+    import io as _preview_io
+
+    normalized = _normalize_preview_image_for_storage(image, max_width=max_width)
+    if normalized is None:
+        raise RuntimeError("Cannot encode an empty preview image.")
+    buffer = _preview_io.BytesIO()
+    normalized.save(
+        buffer,
+        format="PNG",
+        optimize=True,
+        compress_level=PREVIEW_PNG_COMPRESS_LEVEL,
+    )
+    return buffer.getvalue()
+
+
+def _save_preview_png_to_path(image, out_path, max_width=PREVIEW_MAX_WIDTH):
+    """Write an optimized, width-clamped PNG preview to a filesystem path."""
+    if not out_path:
+        raise RuntimeError("A preview output path is required.")
+    payload = _encode_preview_png_bytes(image, max_width=max_width)
+    parent = os.path.dirname(out_path)
+    if parent:
+        ensure_dir(parent)
+    with open(out_path, "wb") as fh:
+        fh.write(payload)
+    return out_path
 
 
 def _capture_window_image_for_preview(win):
@@ -1949,7 +2020,7 @@ def _capture_window_image_for_preview(win):
     return image
 
 
-def save_window_preview_image(win, json_path: str, scale=0.75):
+def save_window_preview_image(win, json_path: str, scale=0.5):
     if not win or not json_path:
         return None
     image = None
@@ -1973,8 +2044,7 @@ def save_window_preview_image(win, json_path: str, scale=0.75):
         image = _capture_window_image_for_preview(win)
         image = _resize_preview_image_helper(image, scale=scale)
     out_path = preview_image_path_for_json(json_path)
-    ensure_dir(os.path.dirname(out_path))
-    image.save(out_path, format="PNG")
+    _save_preview_png_to_path(image, out_path)
     try:
         _store_preview_image_in_cache(json_path, image)
     except Exception:
@@ -2752,7 +2822,7 @@ def _normalize_template_data(data):
     normalized["units"] = normalized_units
     return normalized
 
-def _save_preview_image_for_window(win, json_path, scale=0.75):
+def _save_preview_image_for_window(win, json_path, scale=0.5):
     if not win or not json_path:
         return
     try:
@@ -2765,8 +2835,7 @@ def _save_preview_image_for_window(win, json_path, scale=0.75):
             image = builder(scale=scale)
             if image is not None:
                 out_path = preview_image_path_for_json(json_path)
-                ensure_dir(os.path.dirname(out_path))
-                image.save(out_path, format="PNG")
+                _save_preview_png_to_path(image, out_path)
                 return
     except Exception:
         pass
@@ -2777,7 +2846,7 @@ def _save_preview_image_for_window(win, json_path, scale=0.75):
 
 
 def _save_preview_for_current_window(win, json_path):
-    _save_preview_image_for_window(win, json_path, scale=0.75)
+    _save_preview_image_for_window(win, json_path, scale=0.5)
 
 
 def _save_preview_for_saved_template(ctx, template_path):
@@ -2795,15 +2864,14 @@ def _save_preview_for_saved_template(ctx, template_path):
         image = render_layout_preview_image_from_data(
             data,
             dict(cfg),
-            scale=0.75,
+            scale=0.5,
             title_base=f"{press} - {fmt}",
             template_mode=True,
         )
         if image is None:
             return
         out_path = preview_image_path_for_json(template_path)
-        ensure_dir(os.path.dirname(out_path))
-        image.save(out_path, format="PNG")
+        _save_preview_png_to_path(image, out_path)
     except Exception:
         pass
 
@@ -4371,14 +4439,14 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
     return img
 
 
-def render_layout_preview_image_from_data(data, config, scale=0.75, title_base='', template_mode=False):
+def render_layout_preview_image_from_data(data, config, scale=0.5, title_base='', template_mode=False):
     img = render_layout_print_image_from_data(data, config, title_base=title_base, template_mode=template_mode)
     if img is None:
         return None
     try:
         scale = float(scale)
     except Exception:
-        scale = 0.75
+        scale = 0.5
     scale = max(0.1, min(1.0, scale))
     preview_img = img.crop((0, 0, img.width, max(1, int(img.height * 0.5))))
     if scale != 1.0:
@@ -7430,7 +7498,7 @@ def regenerate_preview_image_for_json_path(
     template_mode=False,
     default_dir=None,
     prompt_save_template=None,
-    scale=0.75,
+    scale=0.5,
 ):
     """Regenerate and save a preview image directly from layout JSON without opening an editor window."""
     data = safe_read_json(json_path)
@@ -7453,10 +7521,7 @@ def regenerate_preview_image_for_json_path(
     if image is None:
         raise RuntimeError(f"Could not build preview for: {json_path}")
     out_path = preview_image_path_for_json(json_path)
-    out_dir = os.path.dirname(out_path)
-    if out_dir:
-        ensure_dir(out_dir)
-    image.save(out_path, format="PNG")
+    _save_preview_png_to_path(image, out_path)
     return out_path
 
 
@@ -7584,7 +7649,7 @@ def open_json_preview(root, json_path, template_mode=False):
     image = render_layout_preview_image_from_data(
         data,
         dict(base_cfg),
-        scale=0.75,
+        scale=0.5,
         title_base=f"{press} - {fmt}",
         template_mode=bool(template_mode),
     )
@@ -7593,7 +7658,7 @@ def open_json_preview(root, json_path, template_mode=False):
     try:
         out_path = preview_image_path_for_json(json_path)
         ensure_dir(os.path.dirname(out_path))
-        image.save(out_path, format="PNG")
+        _save_preview_png_to_path(image, out_path)
     except Exception:
         pass
     return image, "Preview"
@@ -15517,7 +15582,7 @@ def build_main_launcher():
                     template_mode=template_mode,
                     default_dir=default_dir,
                     prompt_save_template=prompt_save_template,
-                    scale=0.75,
+                    scale=0.5,
                 )
                 return None
             except Exception as exc:
@@ -15938,6 +16003,16 @@ def build_main_launcher():
                     lock_count = (cur.fetchone() or [0])[0]
                     cur.execute('SELECT pg_size_pretty(pg_database_size(current_database()))')
                     db_size = (cur.fetchone() or ['Unknown'])[0]
+                    try:
+                        cur.execute(
+                            f"SELECT COUNT(*), COALESCE(SUM(octet_length(preview_png)), 0), "
+                            f"pg_size_pretty(COALESCE(SUM(octet_length(preview_png)), 0)), "
+                            f"pg_size_pretty(pg_total_relation_size('{schema}.records')) "
+                            f"FROM {schema}.records WHERE preview_png IS NOT NULL"
+                        )
+                        preview_row = cur.fetchone() or (0, 0, '0 bytes', 'Unknown')
+                    except Exception:
+                        preview_row = (0, 0, '0 bytes', 'Unknown')
                 lines = [
                     f"Database: {row[0] or 'Unknown'}",
                     f"User: {row[1] or 'Unknown'}",
@@ -15947,6 +16022,8 @@ def build_main_launcher():
                     f"Regulars: {int(counts.get('regular', 0) or 0)}",
                     f"Open locks: {int(lock_count or 0)}",
                     f"Database size: {db_size or 'Unknown'}",
+                    f"Previews stored: {int(preview_row[0] or 0)} ({preview_row[2] or '0 bytes'} total)",
+                    f"Records table (incl. previews/TOAST): {preview_row[3] or 'Unknown'}",
                 ]
                 log_message("\n".join(lines), clear=True)
                 status_var.set("Database health check completed.")
@@ -16852,7 +16929,7 @@ def _db_upsert_record(path, data, preview_png=None, clear_preview=False):
             data = EXCLUDED.data,
             preview_png = CASE WHEN %s THEN NULL WHEN %s IS NOT NULL THEN %s ELSE {schema}.records.preview_png END,
             updated_at = NOW()
-        RETURNING id, record_type, file_name, file_stem, name, press, format, issue_date, product, section_count, section_pages, saved_at, last_changed_by, data, preview_png, created_at, updated_at''', (
+        RETURNING id, record_type, file_name, file_stem, name, press, format, issue_date, product, section_count, section_pages, saved_at, last_changed_by, data, created_at, updated_at''', (
             record_type, file_name, os.path.splitext(file_name)[0], payload.get('name'), payload.get('press'), payload.get('format'), payload.get('issue_date'), payload.get('product'), int(payload.get('section_count', 1) or 1), json.dumps(section_pages, default=str), saved_at_dt, payload.get('last_changed_by'), json.dumps(payload, default=str), preview_png, bool(clear_preview), preview_png, preview_png))
         return _db_fetchone(cur)
 
@@ -16871,10 +16948,27 @@ def _db_delete_record(path):
 def _db_store_preview(path, image):
     if image is None:
         return
-    buffer = io.BytesIO()
-    image.save(buffer, format='PNG')
-    _db_upsert_record(path, safe_read_json(path) or {}, preview_png=buffer.getvalue())
+    preview_bytes = _encode_preview_png_bytes(image)
+    _db_upsert_record(path, safe_read_json(path) or {}, preview_png=preview_bytes)
 
+
+
+def _db_coerce_preview_bytes(payload):
+    if payload is None:
+        return None
+    if isinstance(payload, bytes):
+        return payload
+    if isinstance(payload, bytearray):
+        return bytes(payload)
+    if isinstance(payload, memoryview):
+        try:
+            return payload.tobytes()
+        except Exception:
+            return bytes(payload)
+    try:
+        return bytes(payload)
+    except Exception:
+        return payload
 
 
 def _db_load_preview_bytes(path):
@@ -16890,7 +16984,8 @@ def _db_load_preview_bytes(path):
         row = cur.fetchone()
     if not row:
         return None
-    return row[0] if not isinstance(row, dict) else row.get('preview_png')
+    payload = row[0] if not isinstance(row, dict) else row.get('preview_png')
+    return _db_coerce_preview_bytes(payload)
 
 def _db_clear_preview(path):
     parsed = _db_parse_virtual_path(path)
@@ -16960,17 +17055,17 @@ def load_preview_image_for_json(json_path: str):
         from PIL import Image
     except Exception:
         return None
-    payload = _db_load_preview_bytes(json_path)
+    payload = _db_coerce_preview_bytes(_db_load_preview_bytes(json_path))
     if not payload:
         return None
     try:
-        with Image.open(io.BytesIO(payload)) as img:
+        with Image.open(io.BytesIO(bytes(payload))) as img:
             return img.copy()
     except Exception:
         return None
 
 
-def _save_preview_image_for_window(win, json_path, scale=0.75):
+def _save_preview_image_for_window(win, json_path, scale=0.5):
     if not _db_parse_virtual_path(json_path):
         return _FS_save_preview_image_for_window(win, json_path, scale=scale)
     if not win or not json_path:
@@ -16997,7 +17092,7 @@ def _save_preview_image_for_window(win, json_path, scale=0.75):
 
 
 def _save_preview_for_current_window(win, json_path):
-    _save_preview_image_for_window(win, json_path, scale=0.75)
+    _save_preview_image_for_window(win, json_path, scale=0.5)
 
 
 def _save_preview_for_saved_template(ctx, template_path):
@@ -17011,12 +17106,12 @@ def _save_preview_for_saved_template(ctx, template_path):
     cfg = CONFIG_MAP.get((press, fmt))
     if not cfg:
         return
-    image = render_layout_preview_image_from_data(data, dict(cfg), scale=0.75, title_base=f"{press} - {fmt}", template_mode=True)
+    image = render_layout_preview_image_from_data(data, dict(cfg), scale=0.5, title_base=f"{press} - {fmt}", template_mode=True)
     if image is not None:
         _db_store_preview(template_path, image)
 
 
-def regenerate_preview_image_for_json_path(json_path, template_mode=False, default_dir=None, prompt_save_template=None, scale=0.75):
+def regenerate_preview_image_for_json_path(json_path, template_mode=False, default_dir=None, prompt_save_template=None, scale=0.5):
     if not _db_parse_virtual_path(json_path):
         return _FS_regenerate_preview_image_for_json_path(json_path, template_mode=template_mode, default_dir=default_dir, prompt_save_template=prompt_save_template, scale=scale)
     data = safe_read_json(json_path)

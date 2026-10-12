@@ -1,6 +1,34 @@
 {
-  "current_version": "1.5.7",
+  "current_version": "1.5.8",
   "versions": [
+    {
+      "version": "1.5.8",
+      "released": "9-29-2026",
+      "summary": "Shrinks stored preview images to reduce database size without hurting on-screen quality.",
+      "changes": [
+        {
+          "category": "Changed",
+          "items": [
+            "Stored preview images are now width-clamped to 880px and saved as optimized PNGs (lossless), cutting preview storage roughly in half while staying crisp in the preview panel.",
+            "New previews render at a reduced scale by default; existing previews are unchanged until re-saved or recompressed.",
+            "Preview saves no longer fetch the preview blob back from the database, halving the save round-trip."
+          ]
+        },
+        {
+          "category": "Added",
+          "items": [
+            "Added recompress_previews.py one-time backfill script (dry-run by default; --apply rewrites existing preview_png blobs and reports MB saved).",
+            "Database Health Check now reports previews stored, total preview bytes, and records-table size."
+          ]
+        },
+        {
+          "category": "Fixed",
+          "items": [
+            "Fixed preview bytes returned as memoryview not being coerced to bytes before loading with Pillow."
+          ]
+        }
+      ]
+    },
     {
       "version": "1.5.7",
       "released": "9-17-2026",
@@ -2545,7 +2573,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.5.7",
+    "current_release": "1.5.8",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",
