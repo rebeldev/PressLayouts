@@ -1,6 +1,19 @@
 {
-  "current_version": "1.5.8",
+  "current_version": "1.5.9",
   "versions": [
+  {
+    "version": "1.5.9",
+    "released": "10-26-2026",
+    "summary": "Fixes manifest color pages with a single color page (e.g. B1) not being marked color in the planning wizard.",
+    "changes": [
+      {
+        "category": "Fixed",
+        "items": [
+          "Fixed the Outlook/email manifest parser so a section whose Color Pages cell contains a single page number (e.g. B Business with color page 1) is now recognized, instead of only comma-separated lists; B1 is now marked color when the manifest is loaded into the planning wizard."
+        ]
+      }
+    ]
+  },
     {
       "version": "1.5.8",
       "released": "9-29-2026",
@@ -2573,7 +2586,7 @@
     "manifest_version": 1,
     "package_type": "onedir",
     "release_root": "L:\\\\PressLayouts\\\\releases",
-    "current_release": "1.5.8",
+    "current_release": "1.5.9",
     "entry_exe": "press_layouts.exe",
     "launcher_exe": "press_layouts_launcher.exe",
     "local_root": "%LOCALAPPDATA%\\\\PressLayouts",

@@ -11959,11 +11959,15 @@ def _parse_manifest_msg_body(body):
                 break
         color_pages = []
         for cell in after:
+            if "/" in cell:
+                continue
             if "," in cell:
                 for token in cell.split(","):
                     token = token.strip()
                     if token.isdigit():
                         color_pages.append(int(token))
+            elif cell.isdigit():
+                color_pages.append(int(cell))
         color_pages = sorted(set(page for page in color_pages if 1 <= page <= pages))
         split = split_counts if len(split_counts) >= 2 and sum(split_counts) == pages else None
         by_name[letter or name] = {
