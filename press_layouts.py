@@ -4317,14 +4317,17 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
                     section_ref = section_text.strip().upper()
                     page_ref = str(value or '').strip()
                     if section_ref and page_ref:
-                        ref_text = f'{section_ref}{page_ref}'
+                        if any(ch.isdigit() for ch in section_ref):
+                            ref_text = f'({section_ref}){page_ref}'
+                        else:
+                            ref_text = f'{section_ref}{page_ref}'
                         if ref_text not in seen_color_refs:
                             seen_color_refs.add(ref_text)
                             try:
                                 page_num = int(page_ref)
                             except Exception:
                                 page_num = 10 ** 9
-                            color_page_refs.append((section_display_lookup.get(section_ref, 999), section_ref, page_num, ref_text))
+                            color_page_refs.append((section_display_lookup.get(section_ref, 999), section_ref, page_num, ref_text, page_ref))
 
         # Draw DT marks after page text and color marks so each spread has one
         # continuous blue outline around the two physical press positions.
@@ -4373,7 +4376,7 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
     draw.text((margin_x + 900, footer_y), f"Total Pages: {total_page_count}", fill='black', font=header_font)
 
     legend_circle_diameter = max(42, int(legend_circle_diameter))
-    legend_y = footer_line_y - 190
+    legend_y_base = footer_line_y - 190
 
     # ---- Notes between layout and legend (same font/size as color pages list) ----
     # Moved up ~2 inches from legend; legend and color list stay anchored.
@@ -4390,8 +4393,8 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
             _notes_block_h = len(_notes_lines_wrap) * _notes_line_h
             # Base position just above legend, then shift up ~2 inches (≈600px at 300dpi)
             # Do NOT move legend_y; only notes move.
-            _two_inches_px = 600  # ~2" on 2200x1940 print canvas
-            _notes_y = legend_y - _notes_block_h - 16 - _two_inches_px
+            _two_inches_px = 450  # ~1.5" on 2200x1940 print canvas (moved down ~0.5")
+            _notes_y = legend_y_base - _notes_block_h - 16 - _two_inches_px
             # Clamp to avoid overlapping the grid area
             _min_notes_y = grid_top + 12
             if _notes_y < _min_notes_y:
@@ -4400,6 +4403,7 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
                 draw.text((margin_x, _notes_y + _ni * _notes_line_h), _nline, fill='black', font=legend_list_font)
         except Exception:
             pass
+    legend_y = legend_y_base - 150
     legend_circle_box = (
         margin_x,
         legend_y,
@@ -4428,14 +4432,56 @@ def render_layout_print_image_from_data(data, config, title_base="", template_mo
         font=legend_font,
     )
 
-    color_page_refs_sorted = [item[3] for item in sorted(color_page_refs, key=lambda item: (item[0], item[2], item[3]))]
-    refs_text = 'Color pages list: ' + (', '.join(color_page_refs_sorted) if color_page_refs_sorted else 'None')
+    _pastel_colors = ["#77dd77", "#aec6cf", "#ff9966", "#ffb3de"]
+    sorted_color_refs = sorted(color_page_refs, key=lambda item: (item[0], item[2], item[3]))
+    # Build colored chunks: (text, fill)
+    chunks = [("Color pages list: ", "black")]
+    if not sorted_color_refs:
+        chunks.append(("None", "black"))
+    else:
+        for ref_index, item in enumerate(sorted_color_refs):
+            section_index = item[0]
+            section_ref = item[1]
+            page_ref = item[4] if len(item) > 4 else ""
+            if not page_ref:
+                # derive from ref_text
+                if section_ref and item[3].startswith(section_ref):
+                    page_ref = item[3][len(section_ref):]
+                elif section_ref and item[3].startswith("(" + section_ref + ")"):
+                    page_ref = item[3][len(section_ref) + 2:]
+            if ref_index > 0:
+                chunks.append((", ", "black"))
+            section_color = _pastel_colors[section_index] if (isinstance(section_index, int) and 0 <= section_index < len(_pastel_colors)) else "black"
+            if any(ch.isdigit() for ch in section_ref):
+                chunks.append((f"({section_ref})", section_color))
+            else:
+                chunks.append((section_ref, section_color))
+            chunks.append((str(page_ref), "black"))
     list_y = legend_y + legend_circle_diameter + 26
     max_text_width = max(260, img_w - (2 * margin_x))
-    wrapped_lines = _render_wrap_text_to_width(draw, refs_text, legend_list_font, max_text_width)
+    # Wrap chunks into lines
+    wrapped_chunk_lines = []
+    current_line = []
+    current_width = 0
+    for text, color in chunks:
+        text_width = _render_measure_text(draw, text, legend_list_font)[0]
+        if current_line and current_width + text_width > max_text_width:
+            wrapped_chunk_lines.append(current_line)
+            current_line = []
+            current_width = 0
+        current_line.append((text, color))
+        current_width += text_width
+    if current_line:
+        wrapped_chunk_lines.append(current_line)
+    if not wrapped_chunk_lines:
+        wrapped_chunk_lines = [[("Color pages list: None", "black")]]
     line_h = max(44, _render_measure_text(draw, 'Ag', legend_list_font)[1] + 10)
-    for line_index, line_text in enumerate(wrapped_lines):
-        draw.text((margin_x, list_y + (line_index * line_h)), line_text, fill='black', font=legend_list_font)
+    for line_index, line_chunks in enumerate(wrapped_chunk_lines):
+        x = margin_x
+        y = list_y + (line_index * line_h)
+        for text, color in line_chunks:
+            draw.text((x, y), text, fill=color, font=legend_list_font)
+            x += _render_measure_text(draw, text, legend_list_font)[0]
     return img
 
 
